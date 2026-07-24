@@ -1,0 +1,27 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: presence_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    # Aucun port publié vers l'hôte : conformément à l'architecture de déploiement
+    # (chap. 4.3), MySQL n'est accessible que via le réseau Docker interne, jamais
+    # depuis l'extérieur du conteneur hôte. Le backend (ajouté à l'étape suivante)
+    # y accèdera par le nom de service "mysql" sur le réseau par défaut du projet.
+    # Pour une inspection ponctuelle en développement : `docker compose exec mysql mysql -u root -p`.
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  mysql_data:
+    driver: local
