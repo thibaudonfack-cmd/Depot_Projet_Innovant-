@@ -8,11 +8,9 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-    # Aucun port publié vers l'hôte : conformément à l'architecture de déploiement
-    # (chap. 4.3), MySQL n'est accessible que via le réseau Docker interne, jamais
-    # depuis l'extérieur du conteneur hôte. Le backend (ajouté à l'étape suivante)
-    # y accèdera par le nom de service "mysql" sur le réseau par défaut du projet.
-    # Pour une inspection ponctuelle en développement : `docker compose exec mysql mysql -u root -p`.
+    # Aucun port publie vers l'hote : conformement a l'architecture de deploiement
+    # (chap. 4.3), MySQL n'est accessible que via le reseau Docker interne, jamais
+    # depuis l'exterieur du conteneur hote. Seul le proxy Caddy est expose (ports 80/443).
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -21,7 +19,57 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    networks:
+      - presence_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: presence_backend
+    restart: unless-stopped
+    environment:
+      PORT: ${PORT}
+      NODE_ENV: ${NODE_ENV}
+      # Variables MySQL deja injectees ici en anticipation de la brique "modele de
+      # donnees" (etape suivante) ; server.js ne s'y connecte pas encore a ce stade.
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    # Aucun port publie vers l'hote : le backend n'est joignable que par Caddy,
+    # via le reseau Docker interne (nom de service "backend", port 3000).
+    networks:
+      - presence_net
+
+  proxy:
+    image: caddy:2-alpine
+    container_name: presence_proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+    networks:
+      - presence_net
+
+networks:
+  presence_net:
+    driver: bridge
 
 volumes:
   mysql_data:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
     driver: local

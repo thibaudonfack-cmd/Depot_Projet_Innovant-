@@ -1,0 +1,36 @@
+# Caddyfile - Etape 0, Partie 2
+#
+# Role : point d'entree HTTPS unique du systeme. Aucun autre service (backend,
+# mysql) n'est expose a l'exterieur du reseau Docker (cf. architecture 4.3).
+# Caddy termine le TLS ici, avant que le trafic n'atteigne le backend.
+#
+# "tls internal" : Caddy agit comme sa propre autorite de certification locale
+# et emet un certificat pour localhost / api.localhost. Ce certificat est
+# cryptographiquement valide (chaine de confiance complete) mais son autorite
+# n'est pas connue du magasin de confiance du systeme d'exploitation hote :
+# le navigateur affichera donc un avertissement tant que cette CA n'est pas
+# explicitement approuvee (voir TESTING.md). C'est le comportement attendu
+# pour un environnement de developpement local, pas une erreur de configuration.
+
+{
+	admin off
+}
+
+localhost, api.localhost {
+	tls internal
+
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy backend:3000
+	}
+
+	handle {
+		respond "Proxy Caddy actif. API disponible sous /api/*" 200
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
