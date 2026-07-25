@@ -470,3 +470,182 @@ attendu (section 3), les deux utilisateurs MySQL ont des privilèges
 strictement disjoints et ce cloisonnement est démontré activement — pas
 seulement lu dans `SHOW GRANTS` (section 4), et `/api/db-health` renvoie
 `etudiants_count: 4` (section 6).
+
+---
+
+# Étape 2 — Jeton RS256, rotation, diffusion WebSocket
+
+Ce protocole suppose l'Étape 1 déjà validée. Nécessite un client WebSocket en
+ligne de commande : `wscat` (Node, installable globalement) ou l'extension
+WebSocket de Postman — les deux fonctionnent, les instructions ci-dessous
+utilisent `wscat`.
+
+```bash
+npm install -g wscat
+```
+
+## 1. Redémarrage avec le nouveau code
+
+```bash
+git pull origin dev
+docker compose up -d --build
+docker compose ps
+```
+
+Attendu : les 3 conteneurs `Up`, `presence_mysql` `(healthy)`. Le volume
+`keys/` est désormais monté sur `backend` — vérifier qu'aucune erreur de
+démarrage n'apparaît :
+
+```bash
+docker compose logs backend
+```
+
+Attendu : `Backend demarre sur le port 3000`, **aucune** ligne du type
+`Impossible de lire la cle privee`. Si cette erreur apparaît : vérifier que
+`./generate_keys.sh` a bien été exécuté à la racine (section 2 du protocole
+Étape 0.1) et que `keys/private.pem` existe sur ta machine.
+
+## 2. Création d'une séance
+
+```bash
+curl -k -X POST https://localhost/api/seances \
+  -H "Content-Type: application/json" \
+  -d '{"uf_id":"11111111-1111-1111-1111-111111111111","salle_id":"22222222-2222-2222-2222-222222222222"}'
+```
+
+(ces deux UUID sont ceux du jeu de données de démonstration, `02-seed.sql`)
+
+Attendu, exactement :
+```json
+{"status":"ok","seance_id":"<un-nouvel-uuid>","uf_id":"11111111-1111-1111-1111-111111111111","salle_id":"22222222-2222-2222-2222-222222222222","statut":"ouverte"}
+```
+
+**Note le `seance_id` retourné** — il sert à toutes les étapes suivantes.
+Variante d'erreur à tester :
+```bash
+curl -k -X POST https://localhost/api/seances -H "Content-Type: application/json" -d '{}'
+```
+Attendu : `400` avec `{"status":"error","message":"uf_id et salle_id sont obligatoires."}`
+
+```bash
+curl -k -X POST https://localhost/api/seances \
+  -H "Content-Type: application/json" \
+  -d '{"uf_id":"00000000-0000-0000-0000-000000000000","salle_id":"22222222-2222-2222-2222-222222222222"}'
+```
+Attendu : `400` avec `{"status":"error","message":"uf_id ou salle_id inconnu (aucune ligne correspondante en base)."}` (uf_id inexistant).
+
+**Vérification en base** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" -e "SELECT id, uf_id, salle_id, statut, date_ouverture FROM db_logs.seances;"
+```
+Attendu : la ligne correspondant au `seance_id` retourné par l'API, `statut = ouverte`.
+
+## 3. Connexion WebSocket et observation de la rotation
+
+Remplacer `<SEANCE_ID>` par la valeur obtenue en étape 2.
+
+```bash
+wscat -c "wss://localhost/api/ws/seances/<SEANCE_ID>" --no-check
+```
+
+(`--no-check` : équivalent du `-k` de `curl`, nécessaire pour la même raison
+que d'habitude — certificat local Caddy non approuvé par défaut, cf. Étape
+0.2/`TESTING.md`)
+
+Attendu **immédiatement** à la connexion, un premier message :
+```json
+{"type":"token","token":"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...."}
+```
+
+Puis **rien pendant 20 secondes**, puis un deuxième message du même format
+(nouveau jeton, nouveau `jti`). Laisser tourner au moins 45 secondes pour
+observer 2 à 3 rotations. Chronométrer approximativement l'écart entre deux
+messages : il doit être proche de 20s (± latence réseau/traitement, quelques
+centaines de ms tout au plus).
+
+Laisser `wscat` ouvert et, dans un second terminal, vérifier les logs :
+```bash
+docker compose logs -f backend
+```
+Attendu : une ligne `[qrBroadcaster] Formateur connecte : seance=<SEANCE_ID> salle=22222222-...` à la connexion.
+
+## 4. Vérification du contenu et de la signature d'un jeton
+
+Copier un des jetons reçus (la valeur du champ `"token"`, sans les guillemets)
+et le décoder tel quel sur [jwt.io](https://jwt.io) (décodage uniquement,
+aucune donnée sensible n'est envoyée par ce site — le décodage se fait dans
+le navigateur) : la partie payload doit afficher exactement 4 champs,
+`session_id`, `salle_id`, `jti`, `iat`, `exp` (5 en comptant `iat`/`exp`
+séparément).
+
+**Vérification de la signature en ligne de commande** (plus rigoureux que
+jwt.io, ne fait confiance qu'à ta propre clé publique locale) :
+
+```bash
+node -e "
+const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const publicKey = fs.readFileSync('keys/public.pem', 'utf8');
+const token = process.argv[1];
+const decoded = jwt.verify(token, publicKey, { algorithms: ['RS256'] });
+console.log(JSON.stringify(decoded, null, 2));
+console.log('exp - iat =', decoded.exp - decoded.iat, '(attendu : 25)');
+" "<COLLER_LE_TOKEN_ICI>"
+```
+
+(nécessite `jsonwebtoken` installé quelque part accessible — depuis
+`backend/`, où il est déjà une dépendance, fonctionne directement)
+
+Attendu : le JSON du payload s'affiche sans erreur (`jwt.verify` lève une
+exception si la signature est invalide), et `exp - iat = 25` exactement.
+
+**Test négatif — altération détectée** :
+```bash
+node -e "
+const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const publicKey = fs.readFileSync('keys/public.pem', 'utf8');
+const token = process.argv[1] + 'X'; // alteration triviale
+try {
+  jwt.verify(token, publicKey, { algorithms: ['RS256'] });
+  console.log('ECHEC : aurait du etre rejete');
+} catch (e) {
+  console.log('OK, rejet attendu :', e.message);
+}
+" "<COLLER_LE_TOKEN_ICI>"
+```
+Attendu : `OK, rejet attendu : invalid signature` (ou message équivalent).
+
+## 5. Fermeture de connexion et nettoyage de l'intervalle
+
+Dans `wscat`, `Ctrl+C` pour fermer la connexion. Vérifier immédiatement après :
+```bash
+docker compose logs backend | tail -5
+```
+Attendu : une ligne `[qrBroadcaster] Rotation arretee pour la seance <SEANCE_ID> (deconnexion formateur).`
+
+**Preuve qu'il n'y a pas de fuite** : rouvrir puis refermer `wscat` sur la
+même séance 3-4 fois de suite, rapidement. Chaque ouverture doit produire
+exactement une ligne `Formateur connecte`, chaque fermeture exactement une
+ligne `Rotation arretee`. Laisser passer 30 secondes après la dernière
+fermeture puis vérifier qu'aucun nouveau message `[qrBroadcaster]` n'apparaît
+dans les logs — un intervalle mal nettoyé continuerait à logguer/générer des
+jetons même sans connexion active.
+
+## 6. Cas d'erreur : séance inexistante ou clôturée
+
+```bash
+wscat -c "wss://localhost/api/ws/seances/00000000-0000-0000-0000-000000000000" --no-check
+```
+Attendu : la connexion est immédiatement refusée (`wscat` affiche une erreur
+du type `error: Unexpected server response: 404`), aucun message `token` n'est
+jamais reçu.
+
+## Critère de succès global — Étape 2
+
+Validée si et seulement si : `POST /api/seances` crée bien une ligne en base
+et retourne son `id` (section 2), la connexion WebSocket reçoit un jeton
+immédiatement puis un nouveau toutes les ~20s (section 3), la signature de
+chaque jeton est vérifiable avec la seule clé publique et `exp - iat = 25`
+exactement (section 4), et l'intervalle de rotation s'arrête proprement à la
+déconnexion sans laisser de trace résiduelle dans les logs (section 5).

@@ -47,6 +47,14 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      # Cle privee RS256, montee en LECTURE SEULE : necessaire depuis l'Etape 2
+      # (tokenService.js la lit pour signer les jetons de seance). Sans ce
+      # volume, le backend planterait au demarrage (fail-fast volontaire de
+      # tokenService.js, cf. backend/src/services/tokenService.js) faute de
+      # pouvoir lire /app/keys/private.pem. Jamais montee en ecriture : le
+      # conteneur backend n'a aucune raison de modifier la cle.
+      - ./keys:/app/keys:ro
     depends_on:
       mysql:
         condition: service_healthy
