@@ -285,3 +285,180 @@ produisent le résultat attendu documenté ci-dessus, sans intervention
 manuelle autre que celle explicitement décrite (y compris l'acceptation de
 l'avertissement de certificat, qui fait partie du résultat attendu et non
 d'un échec).
+
+---
+
+# Étape 1 — Modélisation DB, seed et connexion backend
+
+Ce protocole suppose l'Étape 0.2 déjà validée (proxy, backend, réseau Docker
+opérationnels). Si `docker-compose.yml` a déjà tourné une fois avec l'ancien
+schéma (sans `database/`), le volume `mysql_data` existe déjà et l'entrypoint
+MySQL **n'exécutera pas** les nouveaux scripts d'init (ils ne s'exécutent
+qu'au tout premier démarrage d'un volume vide). Repartir de zéro si besoin :
+
+```bash
+docker compose down -v
+```
+
+`-v` supprime aussi les volumes (données MySQL et certificat Caddy) — sans
+danger sur un prototype de développement, à éviter en tout autre contexte.
+
+## 1. Mise à jour de l'environnement
+
+```bash
+git pull origin dev
+cp .env.example .env    # uniquement si ton .env existant ne contient pas
+                         # encore les variables MYSQL_ATTESTATIONS_*
+```
+
+Vérifier que `.env` contient bien `MYSQL_ATTESTATIONS_USER` et
+`MYSQL_ATTESTATIONS_PASSWORD` avant de continuer (sinon `03-privileges.sh`
+échouera au démarrage de MySQL faute de variable).
+
+## 2. Démarrage à partir d'un volume propre
+
+```bash
+docker compose up -d --build
+docker compose logs -f mysql
+```
+
+Attendu dans les logs (dans cet ordre, en clair, pas du JSON comme Caddy) :
+```
+[Entrypoint] ... Initializing database
+...
+[Entrypoint] ... /docker-entrypoint-initdb.d/01-schema.sql
+[Entrypoint] ... /docker-entrypoint-initdb.d/02-seed.sql
+[Entrypoint] ... /docker-entrypoint-initdb.d/03-privileges.sh
+03-privileges.sh : utilisateur app_attestations cree (db_attestations uniquement) ; scans/corrections passees en ecriture seule pour app_logs.
+...
+[Entrypoint] ... MySQL init process done. Ready for start up.
+```
+`Ctrl+C` pour sortir du suivi de logs une fois cette séquence observée.
+Aucune ligne `ERROR` ne doit apparaître pour ces trois scripts.
+
+## 3. Vérification en ligne de commande MySQL — tables et seed
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" db_logs
+```
+(mot de passe demandé si non passé inline — utiliser celui du `.env`)
+
+Dans le prompt `mysql>` :
+
+```sql
+SHOW TABLES;
+```
+Attendu : `appareils_enroles`, `corrections`, `etudiants`, `inscriptions`, `salles`, `scans`, `seances`, `uf` (8 tables).
+
+```sql
+SELECT COUNT(*) FROM etudiants;
+```
+Attendu : `4`.
+
+```sql
+SELECT id, nom, email FROM etudiants;
+```
+Attendu : les 4 étudiants de démonstration (Amara Diallo, Bilal Ozturk, Chiara Rossi, Driss El Amrani).
+
+```sql
+SELECT nom, JSON_PRETTY(polygone_geojson) FROM salles;
+```
+Attendu : `Local 12 - ESA Namur` avec un polygone GeoJSON de type `Polygon` à 5 points (le 5ᵉ referme le 1ᵉʳ).
+
+```sql
+SHOW CREATE TABLE scans\G
+```
+Attendu : la définition doit contenir `UNIQUE KEY uq_scan_nonce (jti,etudiant_id)`.
+
+```sql
+SHOW CREATE TABLE appareils_enroles\G
+```
+Attendu : doit contenir la colonne générée `actif_key` et `UNIQUE KEY uq_appareil_actif (actif_key)`.
+
+```sql
+exit
+```
+
+## 4. Vérification des privilèges séparés
+
+```bash
+docker compose exec mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "SHOW GRANTS FOR 'app_logs'@'%';"
+```
+Attendu : des privilèges sur `db_logs.*`, **aucune** ligne mentionnant
+`db_attestations`. Et en y regardant le détail, `scans`/`corrections` ne
+doivent apparaître dans aucun `GRANT ... UPDATE/DELETE` — seuls `SELECT` et
+`INSERT` (via les privilèges globaux sur `db_logs.*`, moins ce qui a été
+explicitement révoqué) doivent permettre d'agir dessus.
+
+```bash
+docker compose exec mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "SHOW GRANTS FOR 'app_attestations'@'%';"
+```
+Attendu :
+```
+GRANT USAGE ON *.* TO `app_attestations`@`%`
+GRANT SELECT, INSERT ON `db_attestations`.* TO `app_attestations`@`%`
+```
+Rien sur `db_logs`.
+
+**Preuve active de l'isolement (au-delà de la lecture des GRANT)** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_ATTESTATIONS_USER:-app_attestations} -p"${MYSQL_ATTESTATIONS_PASSWORD}" -e "SELECT COUNT(*) FROM db_logs.etudiants;"
+```
+Attendu : une erreur explicite, du type
+`ERROR 1142 (42000): SELECT command denied to user 'app_attestations'@'...' for table 'etudiants'`
+— preuve en conditions réelles, pas seulement documentaire, que la
+séparation tient.
+
+**Preuve du journal en écriture seule** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" -e "UPDATE db_logs.scans SET resultat='valide' WHERE 1=0;"
+```
+Attendu : `ERROR 1142 (42000): UPDATE command denied to user 'app_logs'@'...' for table 'scans'`
+(la clause `WHERE 1=0` ne sélectionne aucune ligne — c'est le refus de la
+commande elle-même qui est testé, pas son effet sur des données réelles).
+
+## 5. Route `/api/health` (régression Étape 0.2)
+
+```bash
+curl -k https://localhost/api/health
+```
+Attendu (inchangé) : `{"status":"ok","message":"Backend is running securely"}`
+
+## 6. Route `/api/db-health` — preuve bout en bout
+
+```bash
+curl -k https://localhost/api/db-health
+```
+
+Attendu, exactement :
+```json
+{"status":"ok","database":"connected","schema_initialized":true,"etudiants_count":4}
+```
+
+Si le backend a démarré avant que MySQL soit `healthy` (ne devrait pas
+arriver grâce à `depends_on: condition: service_healthy`, mais à vérifier si
+ce test échoue) :
+```json
+{"status":"error","database":"unreachable","message":"connect ECONNREFUSED ..."}
+```
+avec un code HTTP `500`. Dans ce cas : `docker compose logs backend` pour
+confirmer l'erreur, puis `docker compose restart backend` une fois
+`docker compose ps` confirme `mysql` à `(healthy)`.
+
+## 7. Logs applicatifs du backend
+
+```bash
+docker compose logs backend
+```
+Ne doit contenir aucune ligne `Erreur /api/db-health` si le test 6 a réussi.
+Si cette ligne apparaît malgré un test 6 réussi ensuite, c'est le signe d'une
+erreur transitoire au démarrage (backend lancé avant MySQL réellement prêt) —
+sans gravité si la requête suivante réussit, à signaler sinon.
+
+## Critère de succès global — Étape 1
+
+Validée si et seulement si : les 8 tables existent avec exactement le contenu
+attendu (section 3), les deux utilisateurs MySQL ont des privilèges
+strictement disjoints et ce cloisonnement est démontré activement — pas
+seulement lu dans `SHOW GRANTS` (section 4), et `/api/db-health` renvoie
+`etudiants_count: 4` (section 6).

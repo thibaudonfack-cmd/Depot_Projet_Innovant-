@@ -8,11 +8,20 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      # Consommees uniquement par database/03-privileges.sh (creation de
+      # l'utilisateur restreint a db_attestations) -- jamais lues par le backend.
+      MYSQL_ATTESTATIONS_USER: ${MYSQL_ATTESTATIONS_USER}
+      MYSQL_ATTESTATIONS_PASSWORD: ${MYSQL_ATTESTATIONS_PASSWORD}
     # Aucun port publie vers l'hote : conformement a l'architecture de deploiement
     # (chap. 4.3), MySQL n'est accessible que via le reseau Docker interne, jamais
     # depuis l'exterieur du conteneur hote. Seul le proxy Caddy est expose (ports 80/443).
     volumes:
       - mysql_data:/var/lib/mysql
+      # Scripts executes automatiquement (une seule fois, au premier demarrage
+      # du volume) par l'entrypoint officiel MySQL, dans l'ordre alphabetique :
+      # 01-schema.sql -> 02-seed.sql -> 03-privileges.sh. Monte en lecture
+      # seule : ce conteneur ne doit jamais pouvoir modifier ces scripts.
+      - ./database:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
       interval: 10s
@@ -31,8 +40,8 @@ services:
     environment:
       PORT: ${PORT}
       NODE_ENV: ${NODE_ENV}
-      # Variables MySQL deja injectees ici en anticipation de la brique "modele de
-      # donnees" (etape suivante) ; server.js ne s'y connecte pas encore a ce stade.
+      # Consommees par backend/src/config/db.js (pool mysql2/promise) depuis
+      # l'Etape 1 -- le backend se connecte desormais reellement a db_logs.
       MYSQL_HOST: ${MYSQL_HOST}
       MYSQL_PORT: ${MYSQL_PORT}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
