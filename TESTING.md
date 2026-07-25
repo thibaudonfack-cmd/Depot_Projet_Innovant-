@@ -384,11 +384,19 @@ exit
 ```bash
 docker compose exec mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "SHOW GRANTS FOR 'app_logs'@'%';"
 ```
-Attendu : des privilèges sur `db_logs.*`, **aucune** ligne mentionnant
-`db_attestations`. Et en y regardant le détail, `scans`/`corrections` ne
-doivent apparaître dans aucun `GRANT ... UPDATE/DELETE` — seuls `SELECT` et
-`INSERT` (via les privilèges globaux sur `db_logs.*`, moins ce qui a été
-explicitement révoqué) doivent permettre d'agir dessus.
+Attendu, exactement (4 lignes) :
+```
+GRANT USAGE ON *.* TO `app_logs`@`%`
+GRANT SELECT, INSERT ON `db_logs`.* TO `app_logs`@`%`
+GRANT UPDATE, DELETE ON `db_logs`.`seances` TO `app_logs`@`%`
+GRANT UPDATE, DELETE ON `db_logs`.`appareils_enroles` TO `app_logs`@`%`
+```
+Aucune ligne ne doit mentionner `db_attestations`, ni `scans`, ni
+`corrections` — ces deux dernières tables ne reçoivent que le `SELECT,
+INSERT` de la ligne globale sur `db_logs.*`, jamais de `GRANT` `UPDATE`/
+`DELETE` dédié (c'est cette absence, et non un `REVOKE`, qui garantit leur
+statut d'écriture seule — voir `ANALYSE_CODE.md` pour la note de révision sur
+ce point).
 
 ```bash
 docker compose exec mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "SHOW GRANTS FOR 'app_attestations'@'%';"
