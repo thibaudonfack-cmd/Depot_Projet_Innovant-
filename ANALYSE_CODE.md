@@ -513,6 +513,86 @@ Un `.env` régénéré avec de nouveaux mots de passe MySQL (`.env.example` copi
 
 ---
 
+## Fix CI : `package-lock.json` désynchronisé (`npm ci` — `@emnapi/core` manquant)
+
+### Symptôme observé
+
+Le job `test_backend` de la pipeline GitLab CI échouait à l'étape `npm ci` :
+```
+npm error npm ci can only install packages when your package.json and package-lock.json
+or npm-shrinkwrap.json are in sync. Missing: @emnapi/core@1.11.3 from lock file
+```
+
+### Pourquoi `npm ci` est strict (et pourquoi c'est voulu)
+
+Contrairement à `npm install`, `npm ci` ne **résout jamais** de version depuis les
+intervalles semver de `package.json` (les `^x.y.z`) : il exige que
+`package-lock.json` contienne déjà, pour chaque paquet direct et transitif,
+une entrée exacte et cohérente avec `package.json`, puis installe strictement
+cet arbre figé, sans jamais interroger le registre pour choisir une version.
+C'est précisément ce qui rend `npm ci` adapté à une pipeline : deux exécutions
+du job, à des mois d'intervalle, installent bit-à-bit le même arbre de
+dépendances, y compris pour des sous-dépendances non listées dans
+`package.json` (ex. `@emnapi/core`, une dépendance transitive optionnelle de
+`@unrs/resolver-binding-wasm32-wasi`, elle-même utilisée par la chaîne de
+résolution de modules de Jest 30 — jamais installée directement par ce
+projet, mais fixée dans le lockfile comme tout le reste de l'arbre). Un
+`npm install` local, lui, peut légitimement re-résoudre certaines
+sous-dépendances au fil du temps si le lockfile n'est pas parfaitement à jour
+avec l'état exact du registre au moment de l'installation — et c'est
+exactement cette dérive, une fois commitée telle quelle sans être rejouée
+via `npm ci` en local avant de pousser, qui a produit un `package-lock.json`
+qui décrivait un arbre légèrement différent (`@emnapi/core@1.10.0`) de celui
+qu'un `npm ci` strict, lancé à un instant différent contre `package.json`,
+jugeait requis (`@emnapi/core@1.11.3`).
+
+### Correctif appliqué
+
+```bash
+cd backend
+rm -rf node_modules package-lock.json
+npm install
+npm ci   # verification a blanc : doit reussir sans aucune re-resolution
+```
+Le nouveau `package-lock.json` a été regénéré intégralement à partir du
+`package.json` actuel, puis validé par un second passage `npm ci` (à partir
+d'un `node_modules` supprimé) confirmant qu'il n'y a plus aucun écart entre
+les deux fichiers. Aucune dépendance **directe** n'a changé de version
+(`express@5.2.1`, `jsonwebtoken@9.0.3`, `mysql2@3.23.1`, `ws@8.21.1`,
+`jest@30.4.2`, `supertest@7.2.2` — identiques à avant) : seule la partie
+transitive/optionnelle du graphe (résolveur de modules de Jest) a été
+re-figée. Les 7 tests de `tokenService.test.js` repassent au vert après ce
+changement (clé RS256 régénérée localement via `./generate_keys.sh`, cf.
+`TESTING.md`).
+
+`npm audit` signale toujours les mêmes 19 vulnérabilités "high", toutes
+sur la même chaîne `jest` → `glob`/`minimatch`/`brace-expansion`
+(devDependency, jamais exécutée en production) déjà actée précédemment
+dans la section « Stratégie de test et pipeline CI/CD » — aucune régression
+ni nouveau risque introduit par cette régénération.
+
+### `.gitlab-ci.yml` : aucune modification nécessaire
+
+Le job `test_backend` exécute déjà `npm ci` dans une image fraîche
+(`image: node:20`) à chaque run, sans `cache:` sur `node_modules` ni
+réutilisation d'un état d'installation précédent — la seule source de vérité
+pour la pipeline est le `package-lock.json` commité. Une fois ce fichier
+resynchronisé, le job n'a besoin d'aucun ajustement : il validera
+naturellement le nouvel arbre au prochain run.
+
+### Comment éviter cette désynchronisation à l'avenir
+
+Règle simple, à appliquer systématiquement avant tout commit touchant
+`backend/package.json` ou `backend/package-lock.json` : ne jamais committer
+un lockfile obtenu uniquement via `npm install`, sans le revalider par un
+`npm ci` derrière (idéalement avec `node_modules` supprimé, pour reproduire
+fidèlement les conditions d'un runner CI qui repart toujours de zéro). Un
+`npm ci` local qui échoue AVANT le push est le même échec que celui que la
+pipeline aurait rencontré après — le détecter en local coûte une commande,
+le détecter en CI coûte un aller-retour de pipeline.
+
+---
+
 ## Prochaine étape suggérée
 
 Étape 3 : cascade de validation d'un scan (RF-12) — endpoint `POST /api/scans`, vérification de signature du jeton avec la clé publique, contrôle de fraîcheur (`exp`), consommation du nonce (`INSERT` protégé par la contrainte `UNIQUE(jti, etudiant_id)` posée à l'Étape 1), avant d'aborder l'enrôlement d'appareil (RF-07) et le géofencing (RF-13). Tests rétroactifs à écrire au fil de cette brique plutôt qu'après coup, maintenant que la stratégie de test est en place.

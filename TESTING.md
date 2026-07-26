@@ -672,6 +672,21 @@ npm install
 npm test
 ```
 
+**Avant tout `git push` touchant `backend/package.json` ou
+`backend/package-lock.json`**, valider en plus que `npm ci` (la commande
+réellement utilisée par la CI, section 3) réussit à partir d'un
+`node_modules` propre :
+```bash
+rm -rf node_modules
+npm ci
+```
+Contrairement à `npm install`, `npm ci` n'accepte aucun écart entre
+`package.json` et `package-lock.json` — c'est un test de synchronisation du
+lockfile, pas juste une installation. Le faire en local avant de pousser
+évite de découvrir la désynchronisation seulement après un aller-retour de
+pipeline (cf. `ANALYSE_CODE.md`, section « Fix CI : package-lock.json
+désynchronisé »).
+
 Attendu, exactement (l'ordre des suites peut varier) :
 ```
 PASS tests/tokenService.test.js
@@ -758,6 +773,21 @@ paramètres du runner GitLab que les services Docker sont autorisés.
 avec une erreur d'authentification : vérifier que la ligne `command:
 ["--default-authentication-plugin=mysql_native_password"]` est bien présente
 sous le service `mysql:8.0` dans `.gitlab-ci.yml`.
+
+**Si le job échoue à l'étape `npm ci` avec `Missing: <paquet>@<version>
+from lock file`** : `backend/package-lock.json` n'est plus synchronisé avec
+`backend/package.json` (typiquement après une modification des dépendances
+committée sans revalidation locale). Corriger en local — jamais en éditant
+le lockfile à la main :
+```bash
+cd backend
+rm -rf node_modules package-lock.json
+npm install
+rm -rf node_modules && npm ci   # doit reussir sans aucune re-resolution
+```
+puis committer le `package-lock.json` régénéré. Voir `ANALYSE_CODE.md`,
+section « Fix CI : package-lock.json désynchronisé », pour le détail de
+cette classe d'incident et pourquoi `npm ci` est volontairement strict.
 
 ## Critère de succès global — Stratégie de test et CI
 
