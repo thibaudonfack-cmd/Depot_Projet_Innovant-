@@ -275,6 +275,7 @@ présents (`docker volume ls` doit encore les lister).
 | `curl -k https://localhost/api/health` renvoie une erreur 502 | Le backend n'est pas encore prêt ou a crashé | Vérifier `docker compose ps` puis les logs backend |
 | Le port 443 est déjà utilisé | Un autre service (IIS, Skype, un ancien conteneur) occupe le port | `docker compose down` sur tout autre projet, ou changer temporairement le mapping de port dans `docker-compose.yml` |
 | `docker compose config` échoue avec une variable vide | `.env` incomplet ou non copié depuis `.env.example` | Refaire `cp .env.example .env` et vérifier chaque valeur |
+| `backend` crash en boucle avec `ENOENT ... open '/keys/private.pem'` (chemin SANS `/app`) | `JWT_PRIVATE_KEY_PATH`/`JWT_PUBLIC_KEY_PATH` absentes de l'environnement du service `backend` (bug latent depuis l'Étape 2, corrigé — voir Annexe A) ou `.env`/`keys/` supprimés localement (ex. `git clean -fd`) | `git pull origin dev` pour récupérer le correctif, puis suivre le protocole de relance complet de l'Annexe A |
 
 ---
 
@@ -767,3 +768,104 @@ restaurée (section 2), et la pipeline GitLab CI s'exécute automatiquement
 sur un `push` vers `dev`/`main` ou l'ouverture d'une Merge Request, avec les
 9 mêmes tests validés contre un MySQL entièrement provisionné par les
 scripts du projet (section 3).
+
+
+---
+
+# Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
+
+## Contexte
+
+Cet incident type se produit quand une commande de nettoyage Git non
+qualifiée (`git clean -fd`) est exécutée après un pull : elle supprime
+**tous** les fichiers non suivis par Git, y compris ceux volontairement
+gitignorés (`.env`, `keys/`) car ils contiennent des secrets locaux qui ne
+doivent jamais être commités. Symptôme observé :
+```
+Error: [tokenService] Impossible de lire la cle privee RS256 (/keys/private.pem)
+: ENOENT: no such file or directory, open '/keys/private.pem'.
+Executez ./generate_keys.sh a la racine du projet avant de demarrer le backend.
+```
+puis, en tentant de lancer les tests pendant que le conteneur boucle :
+```
+Error response from daemon: Container [...] is restarting, wait until the container is running.
+```
+
+Deux causes distinctes se cumulent ici (voir `ANALYSE_CODE.md`, section
+« Fix critique ») : la perte réelle de `.env`/`keys/`, ET un bug latent de
+`docker-compose.yml` (variables `JWT_PRIVATE_KEY_PATH`/`JWT_PUBLIC_KEY_PATH`
+jamais transmises au conteneur `backend`) présent depuis l'Étape 2 et
+corrigé à cette occasion. Le protocole ci-dessous suppose le correctif déjà
+récupéré via `git pull`.
+
+## Protocole de relance, étape par étape
+
+**1. Récupérer le correctif**
+```bash
+git checkout dev
+git pull origin dev
+```
+Attendu : `docker-compose.yml` contient désormais, sous `backend.environment`,
+les deux lignes `JWT_PRIVATE_KEY_PATH: ${JWT_PRIVATE_KEY_PATH:-./keys/private.pem}`
+et `JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH:-./keys/public.pem}`
+(vérifiable avec `grep JWT_ docker-compose.yml`).
+
+**2. Restaurer `.env`**
+```bash
+cp .env.example .env
+```
+Éditer `.env` si des valeurs spécifiques (mots de passe) doivent être
+conservées ; sinon les valeurs d'exemple suffisent pour un usage local.
+Attendu : le fichier existe à la racine, contient bien `JWT_PRIVATE_KEY_PATH=./keys/private.pem`
+et les variables `MYSQL_*`.
+
+**3. Régénérer les clés RS256**
+```bash
+./generate_keys.sh
+```
+Attendu : `keys/private.pem` (droits 600) et `keys/public.pem` (droits 644)
+créés — le script refuse d'écraser une clé déjà présente, donc sans risque
+à relancer si des clés existent déjà. Ce chemin (`./keys/`) est exactement
+celui attendu par le volume `./keys:/app/keys:ro` de `docker-compose.yml`.
+
+**4. Purger TOTALEMENT l'état Docker, y compris les volumes**
+```bash
+docker compose down -v --remove-orphans
+```
+**Pourquoi `-v` est indispensable ici et pas juste `down` seul** : `.env`
+vient d'être régénéré depuis `.env.example`. Si l'ancien volume `mysql_data`
+(issu d'une initialisation précédente, avec d'anciens mots de passe) est
+conservé, MySQL redémarre dessus SANS rejouer `01-schema.sql`/`02-seed.sql`/
+`03-privileges.sh` (l'entrypoint officiel ne les exécute qu'au tout premier
+démarrage d'un volume vide) — les identifiants dans le nouveau `.env` ne
+correspondraient alors plus à ceux réellement configurés dans MySQL, et le
+backend échouerait à se connecter avec une erreur d'authentification, un
+second incident masquant la résolution du premier. `--remove-orphans`
+nettoie en plus tout conteneur résiduel d'une configuration antérieure du
+projet. Attendu : `docker volume ls` ne liste plus `mysql_data`,
+`caddy_data`, `caddy_config` pour ce projet ; `docker compose ps` ne liste
+plus aucun conteneur `presence_*`.
+
+**5. Reconstruire et relancer proprement**
+```bash
+docker compose up -d --build
+```
+Attendu : les trois conteneurs démarrent (`docker compose ps` → tous
+`running`/`healthy`) ; `docker compose logs backend` affiche la séquence de
+démarrage normale (connexion MySQL établie, `Backend demarre sur le port
+3000`) sans aucune ligne `ENOENT` ni redémarrage en boucle.
+
+## Vérification finale
+
+```bash
+docker compose ps
+docker compose logs backend --tail=30
+curl -k https://localhost/api/health
+curl -k https://localhost/api/db-health
+```
+Attendu : `docker compose ps` montre les trois services up ; les logs backend
+ne contiennent aucune erreur ; `/api/health` renvoie un JSON de statut OK ;
+`/api/db-health` renvoie `etudiants_count: 4` (le seed est rejoué sur le
+volume neuf). Une fois ces quatre vérifications passées, les tests
+d'intégration (section « Stratégie de test automatisé ») peuvent reprendre
+normalement.

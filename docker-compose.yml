@@ -47,6 +47,17 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      # FIX (post Etape 2) : ces deux variables manquaient ici. Sans elles,
+      # tokenService.js retombe sur un chemin de secours calcule depuis
+      # __dirname (/app/src/services), qui remonte a la racine du systeme de
+      # fichiers du conteneur (/keys/private.pem) plutot qu'a /app/keys ou le
+      # volume ci-dessous monte reellement la cle -- le backend plantait au
+      # demarrage (ENOENT) des que la variable n'etait pas deja presente par
+      # ailleurs. Valeur de secours (${...:-...}) alignee sur .env.example :
+      # si jamais un .env incomplet omet ces variables, docker compose
+      # injecte quand meme un chemin correct plutot qu'une chaine vide.
+      JWT_PRIVATE_KEY_PATH: ${JWT_PRIVATE_KEY_PATH:-./keys/private.pem}
+      JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH:-./keys/public.pem}
     volumes:
       # Cle privee RS256, montee en LECTURE SEULE : necessaire depuis l'Etape 2
       # (tokenService.js la lit pour signer les jetons de seance). Sans ce
