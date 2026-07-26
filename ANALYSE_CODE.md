@@ -593,6 +593,177 @@ le détecter en CI coûte un aller-retour de pipeline.
 
 ---
 
+# Étape 3 — Cascade de validation d'un scan (RF-12)
+
+## Objectif et périmètre exact
+
+Cette étape ferme deux des vecteurs d'attaque identifiés au chapitre 2 :
+- **V1** (partage différé) : un étudiant photographie le QR code et
+  l'envoie par SMS/messagerie à un absent, qui le scanne plus tard.
+- **V4** (rejeu) : un même jeton, intercepté ou partagé en temps réel, est
+  soumis plusieurs fois (par le même étudiant ou par plusieurs).
+
+Explicitement **hors périmètre** de cette étape (reporté aux suivantes,
+cf. « Prochaine étape suggérée » en fin de section) : l'enrôlement
+d'appareil (RF-07) et le géofencing (RF-13). Conséquence directe et
+assumée : à ce stade, `etudiant_id` est fourni tel quel dans le corps de la
+requête, sans authentification de l'appareil qui l'envoie. La cascade
+actuelle prouve *« ce jeton est authentique, frais, et pas encore consommé
+par cet étudiant »*, pas encore *« présenté par l'appareil enrôlé de cet
+étudiant »* — cette garantie supplémentaire, et le vecteur qu'elle ferme,
+arriveront avec RF-07. Documenté ici pour qu'aucune confusion ne subsiste
+sur ce que cette étape garantit réellement devant un jury.
+
+## Écart assumé : `POST /api/scans` plutôt que `/api/scan`
+
+La mission de cette étape mentionne littéralement l'endpoint `/api/scan`
+(singulier). Choix retenu : **`/api/scans`** (pluriel), pour rester cohérent
+avec la convention déjà en place dans ce projet — `POST /api/seances` crée
+une ligne dans la table `seances` ; `POST /api/scans` crée une ligne dans la
+table `scans`. Même correspondance route ↔ table des deux côtés. C'était
+d'ailleurs déjà le nom retenu dans la feuille de route notée à la fin de la
+section Étape 2 de ce document. Un écart signalé et justifié explicitement
+vaut mieux qu'une incohérence silencieuse entre les deux seuls endpoints
+d'écriture du projet.
+
+## La cascade, dans l'ordre imposé
+
+```
+POST /api/scans   { jeton, etudiant_id }
+        │
+        ▼
+  a) Signature RS256 (clé PUBLIQUE)  ──── échec ──▶ 401 JETON_INVALIDE
+        │ ok
+        ▼
+  b) Expiration (exp, TTL 25s)       ──── échec ──▶ 401 JETON_EXPIRE   (V1)
+        │ ok
+        ▼
+  c) INSERT scans (jti, etudiant_id) ──── ER_DUP_ENTRY ──▶ 409 REJEU_DETECTE (V4)
+        │ ok
+        ▼
+      201 { status: 'ok', resultat: 'valide', ... }
+```
+
+**a) et b) sont implémentées ensemble**, dans `verificationService.js`, par
+un unique appel à `jwt.verify(jeton, clePublique, { algorithms: ['RS256'] })`.
+Ce n'est pas une simplification qui suppose l'ordre correct : c'est
+`jsonwebtoken` lui-même qui garantit cet ordre — la bibliothèque vérifie
+d'abord la signature cryptographique (`jws.verify`), et ne contrôle les
+revendications temporelles (`exp`, `nbf`) que **si** cette signature est
+valide. Un jeton à la fois expiré et mal signé échoue donc toujours avec
+`JsonWebTokenError` (signature), jamais avec `TokenExpiredError` — exactement
+l'ordre a) puis b) demandé, obtenu sans code applicatif supplémentaire pour
+le séquencer. `algorithms: ['RS256']` reste explicite, pour la même raison
+anti « algorithm confusion » que `tokenService.js` (Étape 2) : sans cette
+restriction, un jeton signé en HS256 avec la clé **publique** (par
+définition non secrète) comme clé HMAC serait accepté.
+
+**c) est implémentée en base, pas en application.** Le controller
+(`scanController.js`) ne fait *jamais* de `SELECT` préalable du type « ce
+`jti` existe-t-il déjà pour cet étudiant ? » suivi d'un `INSERT`
+conditionnel. Un tel enchaînement applicatif ouvrirait une fenêtre de
+course : deux requêtes HTTP portant le même jeton, arrivant à quelques
+millisecondes d'écart (deux onglets, ou un rejeu volontaire quasi
+simultané), pourraient toutes deux exécuter leur `SELECT` et toutes deux le
+voir « absent » avant qu'aucune des deux n'ait encore écrit — les deux
+passeraient alors le contrôle et inséreraient. Seul le moteur InnoDB,
+au moment précis de l'écriture physique de l'index, peut garantir
+l'atomicité de cette vérification. Le controller se contente donc de
+tenter l'`INSERT` et d'intercepter le code d'erreur `ER_DUP_ENTRY` que
+MySQL renvoie si la contrainte `UNIQUE(jti, etudiant_id)` (posée à
+l'Étape 1, cf. section correspondante de ce document) est violée — cette
+contrainte n'est pas une simple validation, elle est **le** mécanisme de
+fermeture de V4, la seule chose qui empêche réellement deux scans du même
+jeton par le même étudiant de coexister en base, quelle que soit la
+concurrence des requêtes.
+
+Codes HTTP retenus, et pourquoi :
+- **401** pour un jeton expiré ou de signature invalide : le jeton est
+  syntaxiquement compréhensible, mais ne constitue plus (ou jamais) une
+  preuve de présence valide — analogue à un identifiant/mot de passe
+  invalide, cas d'usage classique du 401.
+- **409 Conflict** (et non 400) pour un rejeu : la requête est en elle-même
+  parfaitement valide, c'est son *effet* — créer un doublon — que l'état
+  actuel du serveur refuse. 409 est le code prévu par la sémantique HTTP
+  pour ce cas précis (conflit avec l'état courant de la ressource).
+- **400** pour `jeton`/`etudiant_id` manquant, ou pour un `seance_id`/
+  `etudiant_id` qui ne référence aucune ligne existante (`ER_NO_REFERENCED_ROW_2`,
+  même traitement que `seanceController.js` à l'Étape 2) : erreur de saisie
+  prévisible, pas panne serveur.
+
+## Séparation `verificationService.js` / `scanController.js`
+
+`verificationService.js` ne connaît **pas** la base de données : il lit la
+clé publique une seule fois au chargement (même stratégie fail-fast que
+`tokenService.js` pour la clé privée), vérifie un jeton, et retourne son
+contenu ou lève une `TokenInvalideError` typée (`EXPIRE` /
+`SIGNATURE_INVALIDE` / `MALFORME`). C'est `scanController.js` qui traduit
+ce code en réponse HTTP et qui, seul, touche à `scans`. Séparation
+délibérée : elle permettrait de tester la vérification cryptographique en
+pur unitaire, sans MySQL, si un test dédié devenait nécessaire à l'avenir
+(à ce stade, `scan.test.js` couvre déjà ce chemin via des requêtes HTTP
+complètes contre un vrai MySQL — voir plus bas pourquoi ce choix a été
+préféré à un test unitaire isolé de ce service).
+
+## Stratégie de test : aucun mock de la base, délibérément
+
+`backend/tests/scan.test.js` reproduit exactement la discipline déjà
+établie par `health.test.js` (Étape « Tests/CI ») : Supertest contre l'objet
+`app` réel, connexion à un vrai MySQL (schéma + seed chargés), `pool.end()`
+en `afterAll`. Aucun mock de `pool.query` n'a été introduit pour simuler
+`ER_DUP_ENTRY` : le seul fait qui compte réellement pour cette étape est que
+la contrainte `UNIQUE(jti, etudiant_id)` rejette *effectivement* un doublon
+au niveau du moteur InnoDB — un mock ne prouverait que la branche `if
+(error.code === 'ER_DUP_ENTRY')` du controller, jamais que MySQL renvoie
+réellement ce code pour ce cas précis (ordre des colonnes de l'index
+composite, format exact du `jti`, etc.).
+
+**Validation locale, sans Docker :** l'environnement où ce code a été écrit
+n'a pas accès à Docker (cf. `TESTING.md`, préambule). Pour valider malgré
+tout la cascade contre un **vrai** MySQL avant de pousser — et pas seulement
+contre la CI, après coup — un MySQL 8.0 éphémère a été provisionné
+temporairement via le paquet npm `mysql-memory-server` (binaire officiel
+MySQL téléchargé depuis `cdn.mysql.com`, exécuté en utilisateur non
+privilégié, sans Docker). Ce paquet n'est **pas** une dépendance du projet
+(absent de `backend/package.json`) : il a servi uniquement, depuis un
+répertoire hors dépôt, à rejouer `01-schema.sql` + `02-seed.sql` + la
+logique de `03-privileges.sh`, puis à lancer `npm test` avec les variables
+`MYSQL_*` pointant vers cette instance. Les 5 scénarios de `scan.test.js`
+sont passés au vert contre ce MySQL réel, y compris le rejeu (409 obtenu
+via un véritable `ER_DUP_ENTRY`, pas une simulation).
+
+**Un bug réel a été détecté par cette validation**, et corrigé avant tout
+commit : la première version de `scan.test.js` tentait, dans son `afterAll`,
+un `DELETE FROM scans WHERE seance_id = ?` en utilisant le pool applicatif
+standard (utilisateur `app_logs`). Résultat, avec le vrai MySQL : `DELETE
+command denied to user 'app_logs'@'localhost' for table 'scans'`. Ce n'est
+pas une anomalie à contourner — c'est la preuve, en conditions réelles, que
+la stratégie de privilèges *whitelist* posée à l'Étape 1
+(`database/03-privileges.sh`) fonctionne exactement comme prévu : `scans`
+est volontairement en écriture seule (`INSERT` uniquement) pour
+l'application, aucun `UPDATE`/`DELETE`, conformément à RF-18/RNF-13 (journal
+non modifiable). Un nettoyage de ces lignes exigerait un accès root, réservé
+dans ce projet à la purge de fin d'UF (RF-20, non implémentée). Le fix a
+donc été de **retirer** ce `DELETE` du test plutôt que d'élever ses
+privilèges — le test ne doit pas pouvoir faire, même à des fins de
+nettoyage, ce que l'architecture interdit explicitement à l'application.
+
+**En CI (GitLab)**, aucun changement n'est nécessaire à `.gitlab-ci.yml` ni
+à `jest.config.js` : le service MySQL éphémère existant est réutilisé tel
+quel, et `scan.test.js` est automatiquement détecté par le
+`testMatch: ['**/tests/**/*.test.js']` déjà en place (Étape « Tests/CI »).
+
+---
+
 ## Prochaine étape suggérée
 
-Étape 3 : cascade de validation d'un scan (RF-12) — endpoint `POST /api/scans`, vérification de signature du jeton avec la clé publique, contrôle de fraîcheur (`exp`), consommation du nonce (`INSERT` protégé par la contrainte `UNIQUE(jti, etudiant_id)` posée à l'Étape 1), avant d'aborder l'enrôlement d'appareil (RF-07) et le géofencing (RF-13). Tests rétroactifs à écrire au fil de cette brique plutôt qu'après coup, maintenant que la stratégie de test est en place.
+Enrôlement d'appareil (RF-07) : associer une paire de clés (probablement
+ECDSA, générée côté client, jamais transmise) à chaque étudiant lors de son
+premier scan réussi, avec un seul appareil actif à la fois (contrainte déjà
+posée en base à l'Étape 1, `appareils_enroles.actif_key`). Objectif : que la
+cascade de cette Étape 3 puisse, en plus de valider le jeton de séance,
+authentifier l'appareil qui le soumet — fermant ainsi le dernier angle mort
+documenté ci-dessus (« présenté par cet étudiant » devient « présenté par
+l'appareil enrôlé de cet étudiant »). Le géofencing (RF-13, contrôle
+`polygone_geojson` de la salle) reste également en attente, indépendant de
+RF-07 et pouvant être traité avant ou après selon la priorité retenue.

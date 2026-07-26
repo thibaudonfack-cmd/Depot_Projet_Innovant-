@@ -5,6 +5,10 @@
 // Etape 2                : creation de seance (RF-01), service de jeton
 //                          RS256 (RF-04), diffusion WebSocket temps reel
 //                          (RF-05/RF-06).
+// Etape 3                : cascade de validation d'un scan (RF-12),
+//                          fermeture des vecteurs V1 (expiration) et V4
+//                          (rejeu, via la contrainte UNIQUE de la table
+//                          scans) -- cf. src/controllers/scanController.js.
 // Strategie de test        : app et httpServer exportes pour Supertest ;
 //                          httpServer.listen() n'est declenche que lorsque ce
 //                          fichier est execute directement (node server.js),
@@ -19,6 +23,7 @@ const http = require('http');
 
 const pool = require('./src/config/db');
 const seanceRoutes = require('./src/routes/seanceRoutes');
+const scanRoutes = require('./src/routes/scanRoutes');
 const { attachQrBroadcaster } = require('./src/services/qrBroadcaster');
 
 const app = express();
@@ -53,6 +58,7 @@ app.get('/api/db-health', async (req, res) => {
 });
 
 app.use('/api/seances', seanceRoutes);
+app.use('/api/scans', scanRoutes);
 
 const httpServer = http.createServer(app);
 

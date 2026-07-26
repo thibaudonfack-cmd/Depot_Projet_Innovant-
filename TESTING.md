@@ -799,6 +799,165 @@ sur un `push` vers `dev`/`main` ou l'ouverture d'une Merge Request, avec les
 9 mêmes tests validés contre un MySQL entièrement provisionné par les
 scripts du projet (section 3).
 
+---
+
+# Étape 3 — Cascade de validation d'un scan (RF-12)
+
+Ce protocole suppose l'Étape 2 déjà validée (jeton RS256, WebSocket) et
+`docker compose up -d --build` déjà exécuté avec le code de cette étape.
+Ferme V1 (jeton expiré) et V4 (rejeu) — le géofencing et l'authentification
+par appareil (RF-07/RF-13) ne sont volontairement PAS couverts ici (cf.
+`ANALYSE_CODE.md`, section Étape 3, « Objectif et périmètre exact »).
+
+## 1. Redémarrage avec le nouveau code
+
+```bash
+git pull origin dev
+docker compose up -d --build
+docker compose logs backend | tail -5
+```
+Attendu : `Backend demarre sur le port 3000`, aucune erreur.
+
+## 2. Créer une séance et générer un jeton valide
+
+```bash
+curl -k -X POST https://localhost/api/seances \
+  -H "Content-Type: application/json" \
+  -d '{"uf_id":"11111111-1111-1111-1111-111111111111","salle_id":"22222222-2222-2222-2222-222222222222"}'
+```
+Noter le `seance_id` retourné (`<SEANCE_ID>` ci-dessous).
+
+Plutôt que d'ouvrir une connexion WebSocket et copier un jeton au vol
+(Étape 2, section 3), générer directement un jeton pour cette séance en
+exécutant le même code que le backend, **à l'intérieur du conteneur**
+(mêmes clés, mêmes variables d'environnement) :
+```bash
+docker compose exec backend node -e "
+const { generateSessionToken } = require('./src/services/tokenService');
+console.log(generateSessionToken('<SEANCE_ID>', '22222222-2222-2222-2222-222222222222'));
+"
+```
+Attendu : une chaîne JWT compacte (`eyJhbGciOiJSUzI1NiIs...`) s'affiche.
+Copier cette valeur (`<JETON>` ci-dessous) — elle sert aux sections 3 à 5.
+
+## 3. Cas nominal — scan accepté
+
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<JETON>","etudiant_id":"33333333-3333-3333-3333-333333333331"}'
+```
+Attendu, exactement (le `scan_id` change à chaque exécution) :
+```json
+{"status":"ok","scan_id":"<uuid>","seance_id":"<SEANCE_ID>","etudiant_id":"33333333-3333-3333-3333-333333333331","resultat":"valide"}
+```
+Code HTTP : `201`.
+
+**Vérification en base** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, seance_id, etudiant_id, jti, resultat FROM db_logs.scans WHERE seance_id='<SEANCE_ID>';"
+```
+Attendu : une ligne, `resultat = valide`.
+
+## 4. Cas d'échec V4 — rejeu du même jeton
+
+Rejouer **exactement la même commande** que la section 3, avec le même `<JETON>` :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<JETON>","etudiant_id":"33333333-3333-3333-3333-333333333331"}'
+```
+Attendu, exactement :
+```json
+{"status":"error","code":"REJEU_DETECTE","message":"Ce jeton a deja ete utilise par cet etudiant (rejeu detecte)."}
+```
+Code HTTP : `409`. Vérifier qu'**aucune deuxième ligne** n'a été ajoutée en
+base (rejouer la requête SQL de la section 3 : toujours une seule ligne).
+
+**Variante — même jeton, étudiant différent** (le rejeu est bloqué par
+étudiant, pas globalement — cf. `UNIQUE(jti, etudiant_id)` et non
+`UNIQUE(jti)` seul) :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<JETON>","etudiant_id":"33333333-3333-3333-3333-333333333332"}'
+```
+Attendu : `201` (accepté — un autre étudiant scannant le même jeton affiché
+dans la même salle est un usage légitime, pas un rejeu).
+
+## 5. Cas d'échec V1 — jeton expiré
+
+Générer un jeton dont l'expiration est déjà dépassée (même clé privée,
+`expiresIn` négatif) :
+```bash
+docker compose exec backend node -e "
+const fs = require('fs');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const privateKey = fs.readFileSync(process.env.JWT_PRIVATE_KEY_PATH, 'utf8');
+console.log(jwt.sign(
+  { session_id: '<SEANCE_ID>', salle_id: '22222222-2222-2222-2222-222222222222' },
+  privateKey,
+  { algorithm: 'RS256', expiresIn: '-10s', jwtid: crypto.randomUUID() }
+));
+"
+```
+Puis :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<JETON_EXPIRE>","etudiant_id":"33333333-3333-3333-3333-333333333333"}'
+```
+Attendu, exactement :
+```json
+{"status":"error","code":"JETON_EXPIRE","message":"Jeton expire : rescannez le QR code actuellement affiche."}
+```
+Code HTTP : `401`. Alternative en conditions réelles (sans forcer `expiresIn`) :
+générer un jeton via la section 2, attendre 26 secondes réelles, puis
+soumettre — même résultat attendu.
+
+## 6. Cas d'échec — signature invalide et champs manquants
+
+**Jeton altéré** (même principe qu'Étape 2, section 4 — une modification
+triviale de la chaîne invalide la signature) :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<JETON>X","etudiant_id":"33333333-3333-3333-3333-333333333331"}'
+```
+Attendu : `401` avec `"code":"JETON_INVALIDE"`.
+
+**Champs manquants** :
+```bash
+curl -k -X POST https://localhost/api/scans -H "Content-Type: application/json" -d '{}'
+```
+Attendu : `400` avec `{"status":"error","message":"jeton et etudiant_id sont obligatoires."}`
+
+## 7. Tests automatisés (Jest/Supertest)
+
+```bash
+cd backend
+npm test -- scan.test.js
+```
+Attendu : 5 tests verts (nominal, V1, signature invalide, V4, champs
+manquants) — cf. `backend/tests/scan.test.js`. Ce fichier est détecté
+automatiquement par `jest.config.js` (`testMatch: ['**/tests/**/*.test.js']`,
+aucune modification nécessaire) et s'exécute donc aussi bien en local que
+dans la pipeline GitLab CI (`.gitlab-ci.yml`, job `test_backend`, également
+inchangé) — vérifier sur l'onglet **CI/CD > Pipelines** de GitLab qu'un
+nouveau pipeline déclenché par ce push affiche bien `14 passed, 14 total`
+dans les logs du job.
+
+## Critère de succès global — Étape 3
+
+Validée si et seulement si : le scan nominal (section 3) est accepté et
+visible en base ; le rejeu exact du même jeton par le même étudiant
+(section 4) est rejeté en 409 sans créer de deuxième ligne, tandis que le
+même jeton par un étudiant différent est accepté ; un jeton expiré (section
+5) est rejeté en 401 avec le code `JETON_EXPIRE` ; un jeton altéré (section
+6) est rejeté en 401 avec le code `JETON_INVALIDE` ; et `npm test` (section
+7) confirme ces 5 scénarios en automatisé, aussi bien en local qu'en CI.
 
 ---
 
