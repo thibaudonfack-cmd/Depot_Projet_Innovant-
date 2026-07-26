@@ -649,3 +649,121 @@ immédiatement puis un nouveau toutes les ~20s (section 3), la signature de
 chaque jeton est vérifiable avec la seule clé publique et `exp - iat = 25`
 exactement (section 4), et l'intervalle de rotation s'arrête proprement à la
 déconnexion sans laisser de trace résiduelle dans les logs (section 5).
+
+---
+
+# Stratégie de test automatisé (Jest/Supertest) et CI
+
+Ce protocole complète (il ne remplace pas) les tests manuels des sections
+précédentes. Les tests automatisés couvrent la logique déjà validée à la
+main aux Étapes 1 et 2 — les rejouer à chaque `push` est tout l'intérêt de
+cette section.
+
+## 1. Lancer les tests en local
+
+Prérequis : `docker compose up -d` déjà exécuté (MySQL doit être joignable
+pour `health.test.js`), et `keys/private.pem`/`keys/public.pem` déjà générés
+(`./generate_keys.sh`, Étape 0.1).
+
+```bash
+cd backend
+npm install
+npm test
+```
+
+Attendu, exactement (l'ordre des suites peut varier) :
+```
+PASS tests/tokenService.test.js
+  tokenService.generateSessionToken
+    ✓ le TTL du jeton est STRICTEMENT de 25 secondes (exp - iat)
+    ✓ le payload contient un identifiant unique a usage unique (le "nonce" du cahier des charges, implemente comme revendication JWT standard "jti")
+    ✓ deux jetons generes successivement ont des jti distincts (pas de reutilisation de nonce)
+    ✓ le payload contient exactement les session_id et salle_id fournis
+    ✓ la verification echoue si on force HS256 avec la cle publique comme secret (anti algorithm-confusion)
+    ✓ leve une erreur explicite si sessionId ou salleId est manquant
+    ✓ rotation (20s) et TTL (25s) respectent le recouvrement de 5s acte lors de la revue de coherence
+
+PASS tests/health.test.js
+  GET /api/health
+    ✓ repond 200, sante applicative pure sans dependance a la base
+  GET /api/db-health
+    ✓ repond 200 et confirme la connexion + le schema initialise avec le seed attendu
+
+Test Suites: 2 passed, 2 total
+Tests:       9 passed, 9 total
+```
+
+**Si `health.test.js` échoue avec `Expected: 200, Received: 500`** : MySQL
+n'est pas joignable depuis ta machine avec les variables d'environnement
+actuelles. Vérifier `docker compose ps` (le service `mysql` doit être
+`healthy`) et que les variables `MYSQL_*` de ton shell (ou d'un `.env`
+chargé) correspondent à celles du conteneur.
+
+**Aucun avertissement de ce type ne doit apparaître** :
+```
+Jest has detected the following 1 open handle potentially keeping Jest from exiting
+```
+S'il apparaît, un `pool.end()`/nettoyage manque quelque part — signaler,
+ne pas ignorer (c'est précisément ce que `detectOpenHandles: true` est
+configuré pour révéler, cf. `jest.config.js`).
+
+## 2. Vérifier que le test attrape vraiment la règle des 25 secondes
+
+Modifier temporairement `TOKEN_TTL_SECONDS` dans
+`backend/src/services/tokenService.js` (par exemple `20` au lieu de `25`),
+relancer `npm test` :
+```bash
+npm test -- tokenService.test.js
+```
+Attendu : le test `le TTL du jeton est STRICTEMENT de 25 secondes` échoue
+explicitement (`Expected: 25, Received: 20`). **Remettre la valeur à `25`
+immédiatement après ce test** (ne jamais laisser cette modification, elle
+casserait RF-04). Cette manipulation ponctuelle prouve que le test protège
+réellement la règle métier, pas seulement qu'il s'exécute sans erreur.
+
+## 3. Déclencher la pipeline GitLab CI
+
+Après un `git push` vers `dev` ou `main`, ou l'ouverture d'une Merge
+Request : ouvrir l'onglet **CI/CD > Pipelines** du projet GitLab. Une
+pipeline avec un seul job, `test_backend`, doit se déclencher automatiquement.
+
+**Étapes attendues dans les logs du job** (accessible en cliquant sur le
+job) :
+```
+$ apt-get update -qq && apt-get install -y -qq default-mysql-client
+$ ./generate_keys.sh
+Génération de la clé privée RSA 2048 bits (RS256)...
+...
+$ En attente de MySQL... (tentative 1/30)     [ou directement OK si rapide]
+$ mysql -h "$MYSQL_HOST" -u root -p"$MYSQL_ROOT_PASSWORD" < database/01-schema.sql
+$ mysql -h "$MYSQL_HOST" -u root -p"$MYSQL_ROOT_PASSWORD" < database/02-seed.sql
+$ bash database/03-privileges.sh
+03-privileges.sh : privileges mis en place avec succes !
+$ cd backend
+$ npm ci
+$ npm test
+...
+Test Suites: 2 passed, 2 total
+Tests:       9 passed, 9 total
+```
+Statut final du job : ✅ vert (`passed`).
+
+**Si le job échoue à l'étape `mysqladmin ping` (boucle des 30 tentatives
+épuisée)** : le service `mysql:8.0` n'a pas démarré à temps — relancer le
+job manuellement (bouton "Retry") ; si l'échec persiste, vérifier dans les
+paramètres du runner GitLab que les services Docker sont autorisés.
+
+**Si le job échoue à `mysql -h "$MYSQL_HOST" ... < database/01-schema.sql`**
+avec une erreur d'authentification : vérifier que la ligne `command:
+["--default-authentication-plugin=mysql_native_password"]` est bien présente
+sous le service `mysql:8.0` dans `.gitlab-ci.yml`.
+
+## Critère de succès global — Stratégie de test et CI
+
+Validée si et seulement si : `npm test` en local produit 9/9 tests réussis
+sans avertissement de handle ouvert (section 1), le test du TTL échoue
+explicitement quand la constante est altérée puis repasse au vert une fois
+restaurée (section 2), et la pipeline GitLab CI s'exécute automatiquement
+sur un `push` vers `dev`/`main` ou l'ouverture d'une Merge Request, avec les
+9 mêmes tests validés contre un MySQL entièrement provisionné par les
+scripts du projet (section 3).

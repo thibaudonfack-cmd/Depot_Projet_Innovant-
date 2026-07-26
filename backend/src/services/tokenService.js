@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const jwt = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 
 // Rotation de l'affichage (RF-05) et duree de vie du jeton (RF-04) : deux
 // constantes distinctes et volontairement DIFFERENTES. Voir ANALYSE_CODE.md,
@@ -80,7 +80,7 @@ function generateSessionToken(sessionId, salleId) {
   return jwt.sign(payload, privateKey, {
     algorithm: 'RS256',
     expiresIn: `${TOKEN_TTL_SECONDS}s`,
-    jwtid: uuidv4(),
+    jwtid: crypto.randomUUID(),
   });
 }
 

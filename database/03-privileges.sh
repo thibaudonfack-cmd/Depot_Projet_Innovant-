@@ -43,7 +43,17 @@
 # =============================================================================
 set -euo pipefail
 
-mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
+# -h "${MYSQL_HOST:-localhost}" : par defaut (localhost), ce script suppose
+# qu'il s'execute A L'INTERIEUR du conteneur MySQL lui-meme (cas normal via
+# docker-entrypoint-initdb.d, ou MYSQL_HOST n'est pas defini dans
+# l'environnement du conteneur -- cf. docker-compose.yml). Si MYSQL_HOST est
+# explicitement defini (cas de la CI GitLab, ou ce script est rejoue contre
+# le service mysql par son nom reseau -- cf. .gitlab-ci.yml), la connexion
+# cible ce host a la place. Reutilisation LITTERALE du meme script dans les
+# deux contextes, sans divergence entre ce que la CI valide et ce qui tourne
+# reellement en developpement/production.
+
+mysql -h "${MYSQL_HOST:-localhost}" -uroot -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
   -- Utilisateur dedie, restreint a la seule base db_attestations.
   CREATE USER IF NOT EXISTS '${MYSQL_ATTESTATIONS_USER}'@'%' IDENTIFIED BY '${MYSQL_ATTESTATIONS_PASSWORD}';
   GRANT SELECT, INSERT ON db_attestations.* TO '${MYSQL_ATTESTATIONS_USER}'@'%';

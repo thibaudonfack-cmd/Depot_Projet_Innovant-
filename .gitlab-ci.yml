@@ -1,0 +1,95 @@
+# .gitlab-ci.yml
+# Pipeline CI du prototype de presence numerique.
+#
+# Declenchement : push vers dev, push vers main, et toute Merge Request
+# (regle "rules" du job test_backend ci-dessous).
+#
+# Principe directeur : la CI reutilise LITTERALEMENT les memes scripts que le
+# developpement local (generate_keys.sh, database/01-schema.sql,
+# database/02-seed.sql, database/03-privileges.sh) plutot que de coder une
+# initialisation dediee a la CI. Objectif : que la pipeline valide la
+# configuration reelle du projet, pas une reconstruction parallele qui
+# pourrait diverger silencieusement au fil des etapes suivantes.
+
+stages:
+  - test
+
+variables:
+  # Valeurs de TEST jetables, propres a chaque execution de pipeline --
+  # sans aucun rapport avec les mots de passe de developpement local (.env,
+  # jamais commite) ni, a fortiori, un futur environnement de production.
+  MYSQL_ROOT_PASSWORD: ci_root_test_pw
+  MYSQL_DATABASE: db_logs
+  MYSQL_USER: app_logs
+  MYSQL_PASSWORD: ci_app_test_pw
+  MYSQL_ATTESTATIONS_USER: app_attestations
+  MYSQL_ATTESTATIONS_PASSWORD: ci_attestations_test_pw
+  # "mysql" = alias du service ci-dessous, resolu par le DNS interne du job
+  # (jamais "localhost" : le service tourne dans un conteneur separe de
+  # celui qui execute le script).
+  MYSQL_HOST: mysql
+  MYSQL_PORT: "3306"
+  NODE_ENV: test
+  PORT: "3000"
+  # Chemins ABSOLUS (via la variable predefinie CI_PROJECT_DIR), pas relatifs
+  # a l'un ou l'autre repertoire de travail successif du job (racine du
+  # depot pour generate_keys.sh, puis backend/ pour npm test) -- evite toute
+  # ambiguite de resolution selon le repertoire courant au moment ou
+  # tokenService.js lit ces variables.
+  JWT_PRIVATE_KEY_PATH: "$CI_PROJECT_DIR/keys/private.pem"
+  JWT_PUBLIC_KEY_PATH: "$CI_PROJECT_DIR/keys/public.pem"
+
+test_backend:
+  stage: test
+  image: node:20
+  services:
+    - name: mysql:8.0
+      alias: mysql
+      # Force l'authentification MySQL classique (mysql_native_password) au
+      # lieu du caching_sha2_password par defaut de MySQL 8 : le client
+      # "mysql" installe via apt (paquet default-mysql-client, base sur
+      # MariaDB) a un historique connu de mauvaise negociation de
+      # caching_sha2_password. mysql2 (utilise par l'application elle-meme)
+      # supporte nativement les deux -- ce reglage ne concerne que le client
+      # en ligne de commande utilise pour l'initialisation du schema.
+      command: ["--default-authentication-plugin=mysql_native_password"]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  before_script:
+    # Client mysql : absent de l'image node:20 par defaut, necessaire
+    # uniquement pour injecter le schema/seed/privileges dans le service
+    # ephemere (l'application elle-meme, elle, ne parle a MySQL qu'a travers
+    # mysql2, deja present dans node_modules).
+    - apt-get update -qq && apt-get install -y -qq default-mysql-client
+    # Cle RS256 EPHEMERE, propre a cette execution de pipeline -- jamais la
+    # cle reelle d'un environnement de developpement ou de production, qui
+    # n'existe nulle part dans le depot (exclue par .gitignore). Reutilise
+    # generate_keys.sh tel quel : le meme script qu'un developpeur execute
+    # localement (cf. TESTING.md, Etape 0.1).
+    - ./generate_keys.sh
+    # Le service MySQL demarre en parallele du conteneur du job : rien ne
+    # garantit qu'il accepte deja des connexions au moment ou ce script
+    # atteint cette ligne. Contrairement a docker-compose (healthcheck +
+    # depends_on: condition: service_healthy), les "services" GitLab CI
+    # n'offrent pas de mecanisme d'attente bloquant equivalent -- la
+    # boucle ci-dessous le remplace.
+    - |
+      for i in $(seq 1 30); do
+        mysqladmin ping -h "$MYSQL_HOST" -u root -p"$MYSQL_ROOT_PASSWORD" --silent && break
+        echo "En attente de MySQL... (tentative $i/30)"
+        sleep 2
+      done
+    # Reutilisation LITTERALE des scripts d'initialisation du projet (voir
+    # l'en-tete de ce fichier). 01-schema.sql et 02-seed.sql sont de simples
+    # scripts SQL, injectes directement via le client ; 03-privileges.sh est
+    # le meme fichier que celui monte dans /docker-entrypoint-initdb.d/ en
+    # local, ajuste (option -h) pour cibler ce service par son nom reseau.
+    - mysql -h "$MYSQL_HOST" -u root -p"$MYSQL_ROOT_PASSWORD" < database/01-schema.sql
+    - mysql -h "$MYSQL_HOST" -u root -p"$MYSQL_ROOT_PASSWORD" < database/02-seed.sql
+    - bash database/03-privileges.sh
+  script:
+    - cd backend
+    - npm ci
+    - npm test

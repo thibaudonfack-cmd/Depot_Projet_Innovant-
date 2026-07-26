@@ -2,14 +2,14 @@
 // RF-01 : ouverture d'une seance de pointage rattachee a une UF, une salle et
 // un creneau horaire.
 
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const pool = require('../config/db');
 
 /**
  * POST /api/seances
  * Corps attendu : { uf_id: string, salle_id: string }
  *
- * L'identifiant de la seance est genere COTE APPLICATION (uuidv4()), pas
+ * L'identifiant de la seance est genere COTE APPLICATION (crypto.randomUUID()), pas
  * laisse au DEFAULT (UUID()) du schema SQL (01-schema.sql). Raison technique
  * precise : ce DEFAULT s'applique quand la colonne id est omise de l'INSERT,
  * mais mysql2 (comme tout driver MySQL) n'expose l'identifiant genere par le
@@ -19,7 +19,7 @@ const pool = require('../config/db');
  * de retourner l'id de la seance creee dans la reponse HTTP sans une requete
  * de lecture supplementaire, elle-meme fragile en cas d'insertions
  * concurrentes. Generer le nonce du jeton (tokenService) et l'id de la
- * seance de la meme maniere (uuid v4 applicatif) est aussi plus coherent que
+ * seance de la meme maniere (crypto.randomUUID()) est aussi plus coherent que
  * de melanger deux strategies de generation d'UUID dans le meme projet.
  */
 async function creerSeance(req, res) {
@@ -32,7 +32,7 @@ async function creerSeance(req, res) {
     });
   }
 
-  const seanceId = uuidv4();
+  const seanceId = crypto.randomUUID();
 
   try {
     await pool.query(
