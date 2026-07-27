@@ -13,21 +13,35 @@
 //
 // Cascade STRICTE imposee par la mission :
 //   a) Signature RS256 (verificationService.js, cle PUBLIQUE)
-//   b) Expiration (exp, TTL 25s)            -- ferme V1 (partage differe)
-//   c) Unicite du nonce (jti, etudiant_id)  -- ferme V4 (rejeu)
+//   b) Expiration (exp, TTL 25s)                 -- ferme V1 (partage differe)
+//   c) Unicite du nonce (jti, etudiant_id)        -- ferme V4 (rejeu crypto)
+//   d) Unicite de la presence (seance_id, etudiant_id) -- regle METIER
+//      (un etudiant, une presence par seance, meme avec plusieurs jetons
+//      DIFFERENTS tous individuellement valides -- cf. ANALYSE_CODE.md,
+//      section Etape 3, "Regle metier d'unicite de presence" pour la
+//      distinction complete avec c).
 //
-// Le point c) est delibrement implemente en laissant l'INSERT echouer sur la
-// contrainte UNIQUE(jti, etudiant_id) de la table scans (01-schema.sql),
-// plutot que par un SELECT prealable ("ce jti existe-t-il deja ?") suivi
-// d'un INSERT conditionnel. Un SELECT-puis-INSERT applicatif ouvrirait une
-// fenetre de course : deux requetes HTTP concurrentes portant le meme jeton
-// (ex. deux onglets, ou un rejeu volontaire quasi simultane) pourraient
-// toutes deux lire "absent" avant qu'aucune des deux n'ait encore ecrit,
-// et donc toutes deux inserer. Seul le moteur InnoDB, au moment precis de
-// l'ecriture, peut garantir l'atomicite de cette verification -- c'est
-// exactement ce que documente deja le commentaire de la table scans dans
-// 01-schema.sql ("fermeture du vecteur V4 ... avant meme toute logique
-// applicative").
+// c) ET d) sont TOUTES DEUX implementees en laissant l'INSERT echouer sur
+// la contrainte UNIQUE correspondante de la table scans (01-schema.sql),
+// jamais par un SELECT prealable ("ce jti/cette presence existe-t-il deja ?")
+// suivi d'un INSERT conditionnel. Un SELECT-puis-INSERT applicatif ouvrirait
+// une fenetre de course dans les DEUX cas : deux requetes HTTP concurrentes
+// (deux onglets, un rejeu quasi simultane, ou deux jetons differents scannes
+// coup sur coup) pourraient toutes deux lire "absent" avant qu'aucune des
+// deux n'ait encore ecrit, et donc toutes deux inserer. Seul le moteur
+// InnoDB, au moment precis de l'ecriture, peut garantir l'atomicite de
+// cette verification -- exactement ce que documentent les commentaires de
+// la table scans dans 01-schema.sql.
+//
+// Une meme erreur MySQL (code ER_DUP_ENTRY, 1062) est levee que ce soit
+// uq_scan_nonce OU uq_scan_presence qui soit violee -- MySQL ne distingue
+// PAS nativement laquelle des deux dans le code d'erreur. La distinction
+// (necessaire pour choisir entre REJEU_DETECTE et DOUBLE_SCAN dans la
+// reponse HTTP) est faite ci-dessous par une lecture ciblee APRES l'echec
+// de l'INSERT, jamais par une analyse du texte libre de error.message
+// (dont le format exact varie selon la version/locale du serveur MySQL,
+// donc fragile) ni par une verification AVANT l'INSERT (qui reintroduirait
+// la meme fenetre de course que ci-dessus).
 
 const crypto = require('crypto');
 const pool = require('../config/db');
@@ -91,9 +105,10 @@ async function scannerJeton(req, res) {
   const { sessionId, jti } = decoded;
   const scanId = crypto.randomUUID();
 
-  // --- c) : unicite du nonce, appliquee par la contrainte UNIQUE de la
-  // table scans -- voir l'en-tete de ce fichier pour la justification
-  // complete du choix "laisser l'INSERT echouer" plutot qu'un SELECT prealable.
+  // --- c) et d) : unicite du nonce ET unicite de la presence, chacune
+  // appliquee par sa propre contrainte UNIQUE sur la table scans -- voir
+  // l'en-tete de ce fichier pour la justification complete du choix
+  // "laisser l'INSERT echouer" plutot qu'un SELECT prealable, dans les deux cas.
   try {
     await pool.query(
       'INSERT INTO scans (id, seance_id, etudiant_id, jti, resultat) VALUES (?, ?, ?, ?, ?)',
@@ -109,14 +124,42 @@ async function scannerJeton(req, res) {
     });
   } catch (error) {
     if (error.code === 'ER_DUP_ENTRY') {
-      // Rejeu (V4) : ce (jti, etudiant_id) existe deja en base -- la
-      // contrainte UNIQUE de 01-schema.sql vient de faire tout le travail.
-      // 409 Conflict (et non 400) : la requete est valide en soi, c'est son
-      // EFFET (creer un doublon) que l'etat actuel du serveur refuse.
+      // La contrainte UNIQUE (l'une des deux -- MySQL ne dit pas laquelle
+      // via error.code, toujours 1062 dans les deux cas) vient de rejeter
+      // l'insertion. Disambiguation deterministe : est-ce EXACTEMENT ce
+      // (jti, etudiant_id) qui existe deja ? Si oui, c'est un rejeu litteral
+      // du meme jeton (uq_scan_nonce, V4). Si non, l'INSERT n'a pu echouer
+      // que sur l'autre contrainte possible (uq_scan_presence) : un jeton
+      // DIFFERENT (jti different), mais la meme paire (seance_id,
+      // etudiant_id) existe deja -- double scan (regle metier).
+      //
+      // Cette lecture ne sert JAMAIS a decider s'il faut inserer (l'INSERT
+      // a deja ete tente et a deja echoue de maniere atomique au moment ou
+      // ce code s'execute) -- uniquement a choisir le bon message d'erreur
+      // pour le client. L'atomicite du rejet reste entierement garantie par
+      // les contraintes UNIQUE elles-memes, pas par cette lecture.
+      const [dejaRejoue] = await pool.query(
+        'SELECT 1 FROM scans WHERE jti = ? AND etudiant_id = ? LIMIT 1',
+        [jti, etudiantId]
+      );
+
+      if (dejaRejoue.length > 0) {
+        // uq_scan_nonce : rejeu (V4). 409 (et non 400) : la requete est
+        // valide en soi, c'est son EFFET (creer un doublon) que l'etat
+        // actuel du serveur refuse.
+        return res.status(409).json({
+          status: 'error',
+          code: 'REJEU_DETECTE',
+          message: 'Ce jeton a deja ete utilise par cet etudiant (rejeu detecte).',
+        });
+      }
+
+      // uq_scan_presence : un AUTRE jeton (jti different), valide et non
+      // rejoue, a deja ete scanne par cet etudiant pour cette meme seance.
       return res.status(409).json({
         status: 'error',
-        code: 'REJEU_DETECTE',
-        message: 'Ce jeton a deja ete utilise par cet etudiant (rejeu detecte).',
+        code: 'DOUBLE_SCAN',
+        message: 'Presence deja validee pour cette seance.',
       });
     }
 

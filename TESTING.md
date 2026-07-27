@@ -936,28 +936,90 @@ Attendu : `400` avec `{"status":"error","message":"jeton et etudiant_id sont obl
 
 ## 7. Tests automatisés (Jest/Supertest)
 
+**Commande exacte** (à l'intérieur du conteneur, jamais sur la machine hôte
+directement — cf. section 9 ci-dessous pour ce qui se passe si tu oublies) :
 ```bash
-cd backend
-npm test -- scan.test.js
+docker compose exec backend npm test -- scan.test.js
 ```
-Attendu : 5 tests verts (nominal, V1, signature invalide, V4, champs
-manquants) — cf. `backend/tests/scan.test.js`. Ce fichier est détecté
+Attendu : 6 tests verts (nominal, V1, signature invalide, V4, double scan,
+champs manquants) — cf. `backend/tests/scan.test.js`. Ce fichier est détecté
 automatiquement par `jest.config.js` (`testMatch: ['**/tests/**/*.test.js']`,
 aucune modification nécessaire) et s'exécute donc aussi bien en local que
 dans la pipeline GitLab CI (`.gitlab-ci.yml`, job `test_backend`, également
 inchangé) — vérifier sur l'onglet **CI/CD > Pipelines** de GitLab qu'un
-nouveau pipeline déclenché par ce push affiche bien `14 passed, 14 total`
+nouveau pipeline déclenché par ce push affiche bien `15 passed, 15 total`
 dans les logs du job.
+
+## 8. Règle métier de présence — double scan avec deux jetons différents
+
+Suite de la section 2 : générer un **second** jeton pour la même séance
+(nouvelle rotation ou nouvel appel manuel) :
+```bash
+docker compose exec backend node -e "
+const { generateSessionToken } = require('./src/services/tokenService');
+console.log(generateSessionToken('<SEANCE_ID>', '22222222-2222-2222-2222-222222222222'));
+"
+```
+Avec un étudiant qui n'a **pas encore** scanné pour cette séance (par
+exemple `33333333-3333-3333-3333-333333333334`, en supposant les sections 3
+et 4 déjà exécutées avec d'autres étudiants) :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<PREMIER_JETON>","etudiant_id":"33333333-3333-3333-3333-333333333334"}'
+```
+Attendu : `201`. Puis, avec le **second** jeton (différent, `jti` différent,
+mais lui aussi parfaitement valide) et le **même** étudiant :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<SECOND_JETON>","etudiant_id":"33333333-3333-3333-3333-333333333334"}'
+```
+Attendu, exactement :
+```json
+{"status":"error","code":"DOUBLE_SCAN","message":"Presence deja validee pour cette seance."}
+```
+Code HTTP : `409`. **Point clé à vérifier** : ce rejet n'est pas un rejeu
+(les deux jetons ont des `jti` différents — vérifiable en les décodant sur
+[jwt.io](https://jwt.io)) — c'est la règle métier d'unicité de présence
+(`uq_scan_presence`, distincte de `uq_scan_nonce`) qui agit ici, cf.
+`ANALYSE_CODE.md`.
+
+**Si ce test échoue** (le second scan est accepté au lieu d'être rejeté) :
+le volume `mysql_data` a probablement été initialisé **avant** ce correctif
+et ne contient donc pas encore la contrainte `uq_scan_presence` — cf.
+section 9 (dépannage) pour la procédure de reset.
+
+## 9. Robustesse — `db.js` refuse de démarrer sans les variables MySQL
+
+Simuler l'erreur qui a motivé ce correctif (lancer le code hors de Docker,
+sans variables d'environnement) :
+```bash
+cd backend
+env -i PATH="$PATH" node -e "require('./src/config/db.js')"
+```
+Attendu, exactement (et non plus une erreur MySQL du type `Access denied
+for user ''@'...'`) :
+```
+Error: Variables d'environnement DB manquantes (MYSQL_HOST, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD) -- Executez-vous le code dans Docker ? ...
+```
+Le process se termine immédiatement (code de sortie non nul), avant toute
+tentative de connexion réseau à MySQL.
 
 ## Critère de succès global — Étape 3
 
 Validée si et seulement si : le scan nominal (section 3) est accepté et
 visible en base ; le rejeu exact du même jeton par le même étudiant
-(section 4) est rejeté en 409 sans créer de deuxième ligne, tandis que le
-même jeton par un étudiant différent est accepté ; un jeton expiré (section
-5) est rejeté en 401 avec le code `JETON_EXPIRE` ; un jeton altéré (section
-6) est rejeté en 401 avec le code `JETON_INVALIDE` ; et `npm test` (section
-7) confirme ces 5 scénarios en automatisé, aussi bien en local qu'en CI.
+(section 4) est rejeté en 409 `REJEU_DETECTE` sans créer de deuxième ligne,
+tandis que le même jeton par un étudiant différent est accepté ; un jeton
+expiré (section 5) est rejeté en 401 avec le code `JETON_EXPIRE` ; un jeton
+altéré (section 6) est rejeté en 401 avec le code `JETON_INVALIDE` ; deux
+jetons différents et valides pour le même étudiant/même séance (section 8)
+donnent `201` puis `409 DOUBLE_SCAN` ; `db.js` refuse de démarrer avec un
+message explicite en l'absence des variables `MYSQL_*` critiques (section
+9) ; et `docker compose exec backend npm test` (section 7) confirme ces 6
+scénarios en automatisé, aussi bien en local qu'en CI (`15 passed, 15
+total`).
 
 ---
 

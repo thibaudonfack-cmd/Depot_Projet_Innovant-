@@ -109,10 +109,29 @@ CREATE TABLE seances (
 -- -----------------------------------------------------------------------------
 -- scans
 --
--- La contrainte UNIQUE(jti, etudiant_id) est LA fermeture du vecteur V4
--- (rejeu) au niveau base de donnees : une resoumission de la meme paire
--- (jeton, etudiant) est rejetee par le moteur InnoDB lui-meme, avant meme
--- toute logique applicative -- cf. 4.4, note "fermeture du vecteur V4".
+-- DEUX contraintes UNIQUE, DEUX vecteurs distincts fermes au niveau base de
+-- donnees (jamais en pre-verification applicative -- cf. ANALYSE_CODE.md,
+-- section Etape 3, pour la justification complete de ce choix dans les deux
+-- cas : un SELECT prealable ouvrirait une fenetre de course, seul le moteur
+-- InnoDB peut garantir l'atomicite de la verification au moment de l'ecriture) :
+--
+--   - uq_scan_nonce (jti, etudiant_id) : fermeture du vecteur V4 (REJEU
+--     cryptographique). Protege le JETON : un meme jeton (meme jti), deja
+--     consomme par cet etudiant, ne peut plus l'etre une seconde fois.
+--
+--   - uq_scan_presence (seance_id, etudiant_id) : regle METIER de presence
+--     (pas un vecteur d'attaque a proprement parler). Protege le FAIT
+--     enregistre : un etudiant ne peut avoir qu'UNE seule ligne de presence
+--     par seance, meme s'il scanne successivement PLUSIEURS jetons tous
+--     individuellement valides et jamais rejoues (jti differents a chaque
+--     rotation, cf. tokenService.js) -- ce que uq_scan_nonce seule ne peut
+--     pas empecher, puisqu'elle ne compare jamais deux jti differents entre eux.
+--
+-- Les deux constantes sont deliberement conservees ensemble (pas seulement
+-- la seconde a la place de la premiere) : elles repondent a deux questions
+-- differentes ("ce jeton precis a-t-il deja servi ?" vs "cet etudiant a-t-il
+-- deja une presence pour cette seance, quel que soit le jeton ?"), utiles
+-- independamment l'une de l'autre si la logique metier venait a evoluer.
 -- -----------------------------------------------------------------------------
 CREATE TABLE scans (
   id           CHAR(36)     NOT NULL DEFAULT (UUID()) PRIMARY KEY,
@@ -125,6 +144,7 @@ CREATE TABLE scans (
   CONSTRAINT fk_scan_seance FOREIGN KEY (seance_id) REFERENCES seances(id),
   CONSTRAINT fk_scan_etudiant FOREIGN KEY (etudiant_id) REFERENCES etudiants(id),
   UNIQUE KEY uq_scan_nonce (jti, etudiant_id),
+  UNIQUE KEY uq_scan_presence (seance_id, etudiant_id),
   KEY idx_scan_seance (seance_id),
   KEY idx_scan_etudiant (etudiant_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

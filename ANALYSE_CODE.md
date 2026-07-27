@@ -755,6 +755,164 @@ quel, et `scan.test.js` est automatiquement détecté par le
 
 ---
 
+## Correctif Étape 3 (bis) : règle métier d'unicité de présence (« double scan ») + fail-fast `db.js`
+
+### 1. Rejeu cryptographique (V4) vs règle métier d'unicité — la distinction exacte
+
+Deux idées différentes, faciles à confondre parce qu'elles produisent toutes
+deux un rejet, mais qui protègent des choses différentes :
+
+**V4 (rejeu, déjà fermé)** — `uq_scan_nonce (jti, etudiant_id)` — répond à la
+question *« ce jeton précis a-t-il déjà servi ? »*. Elle raisonne au niveau
+du **jeton** : chaque jeton signé porte un `jti` unique (Étape 2), et cette
+contrainte interdit de consommer deux fois le même `jti` pour le même
+étudiant. C'est une protection **cryptographique** — elle ne sait rien de
+« la présence » en tant que concept métier, elle sait seulement qu'un jeton
+donné a déjà été vu.
+
+**Règle métier d'unicité de présence (nouvelle)** — `uq_scan_presence
+(seance_id, etudiant_id)` — répond à une question différente : *« cet
+étudiant a-t-il déjà une présence enregistrée pour CETTE séance, quel que
+soit le jeton utilisé ? »*. Elle raisonne au niveau du **fait métier** :
+« présence validée », qui ne doit exister qu'une fois par (séance, étudiant),
+même si l'étudiant présente successivement plusieurs jetons **tous
+individuellement authentiques, frais, et jamais rejoués** (la rotation
+toutes les 20s, Étape 2, en génère mécaniquement un nouveau en continu tant
+que la séance reste ouverte).
+
+Une analogie utile pour la soutenance : V4 empêche de réutiliser **le même
+ticket** de métro deux fois ; la règle de présence empêche d'entrer deux fois
+dans la salle **même avec deux tickets différents, tous les deux valides**
+— la règle du lieu est « une entrée par personne et par séance », indépendante
+de la fraude éventuelle sur un ticket donné. Sans cette seconde règle, rien
+n'empêchait un étudiant de scanner le QR code affiché à `t=0s` puis à
+nouveau celui affiché à `t=20s` (nouvelle rotation, nouveau `jti`,
+totalement légitime au sens cryptographique) et de se retrouver avec deux
+lignes de présence pour la même séance.
+
+### 2. Schéma : deux contraintes `UNIQUE` distinctes, conservées toutes les deux
+
+`database/01-schema.sql`, table `scans` : ajout de `UNIQUE KEY
+uq_scan_presence (seance_id, etudiant_id)`, **en plus** de `uq_scan_nonce
+(jti, etudiant_id)` — pas à sa place. Dans l'implémentation actuelle, la
+seconde contrainte est presque toujours suffisante à elle seule pour
+détecter tout scan en double (un rejeu littéral viole *aussi*
+`uq_scan_presence`, puisque même séance + même étudiant). Les deux sont
+néanmoins conservées, pour deux raisons : (1) elles documentent, rien qu'en
+étant lues, deux règles conceptuellement différentes — un futur lecteur du
+schéma comprend immédiatement qu'il y a une protection cryptographique ET
+une règle métier, sans avoir à lire le code applicatif ; (2) elles restent
+utiles indépendamment l'une de l'autre si la logique métier évoluait (par
+exemple si un jour plusieurs présences par séance devenaient légitimes pour
+un autre cas d'usage — la protection anti-rejeu resterait pertinente même
+si la contrainte de présence unique était assouplie).
+
+**Important — cette migration ne s'applique PAS automatiquement à un
+environnement déjà initialisé.** Comme toujours avec
+`docker-entrypoint-initdb.d/` (Étape 1, Annexe A) : `01-schema.sql` ne
+s'exécute qu'au tout premier démarrage d'un volume `mysql_data` vide. Un
+environnement de développement déjà lancé avant ce correctif NE reçoit PAS
+la nouvelle contrainte tant que le volume n'est pas recréé :
+```bash
+docker compose down -v
+docker compose up -d --build
+```
+Sans ce reset, le double scan resterait possible en local malgré le code à
+jour, ce qui pourrait donner l'impression trompeuse que le correctif ne
+fonctionne pas.
+
+### 3. `scanController.js` : distinguer les deux rejets SANS lire `error.message`
+
+Les deux contraintes lèvent exactement le même code d'erreur MySQL
+(`ER_DUP_ENTRY`, 1062) — MySQL ne dit jamais, via ce code, laquelle des deux
+a été violée. Deux approches étaient possibles pour choisir entre `409
+REJEU_DETECTE` et `409 DOUBLE_SCAN` :
+
+1. Analyser le texte libre de `error.message` (qui mentionne parfois le nom
+   de la clé violée, ex. `Duplicate entry '...' for key 'scans.uq_scan_presence'`)
+   — **rejetée** : le format exact de ce message (présence ou non du nom de
+   la clé, qualification par le nom de table) dépend de la version et de la
+   locale du serveur MySQL, ce n'est pas une garantie contractuelle de
+   l'API — un `mysql:8.0` légèrement différent en CI et en local pourrait
+   produire un texte différent et casser silencieusement cette logique.
+2. **Retenue** : après l'échec de l'`INSERT`, exécuter une lecture ciblée
+   `SELECT 1 FROM scans WHERE jti = ? AND etudiant_id = ?`. Si elle trouve
+   une ligne, c'est très exactement la définition de `uq_scan_nonce` violée
+   → rejeu (V4). Sinon, l'`INSERT` n'a pu échouer que sur l'autre contrainte
+   possible (`uq_scan_presence`) → double scan. Déterministe, ne dépend
+   d'aucun format de message, et testable simplement.
+
+Point de vigilance explicitement vérifié (pas seulement supposé) : cette
+lecture intervient **après** que l'`INSERT` a déjà échoué de manière
+atomique. Elle ne sert jamais à décider s'il faut insérer — l'atomicité du
+rejet reste entièrement garantie par les contraintes `UNIQUE` elles-mêmes,
+exactement le même principe que pour V4 (cf. section précédente de ce
+document). Utiliser cette lecture *avant* l'`INSERT`, pour décider s'il faut
+tenter l'insertion, aurait réintroduit la fenêtre de course que ce choix
+architectural évite depuis le début de l'Étape 3.
+
+### 4. `db.js` : fail-fast sur les variables d'environnement critiques
+
+**Correction apportée à la mission reçue** : la mission demandait de
+vérifier `DB_USER`/`DB_PASSWORD`. Ces noms n'existent nulle part dans ce
+projet — les seuls noms réellement définis, partout (`.env.example`,
+`docker-compose.yml`, `.gitlab-ci.yml`, `database/03-privileges.sh`), sont
+`MYSQL_HOST`, `MYSQL_DATABASE`, `MYSQL_USER`, `MYSQL_PASSWORD`. Appliquer la
+mission au pied de la lettre aurait fait échouer ce contrôle sur
+**absolument tous les démarrages normaux du projet, Docker et CI compris**
+— puisque `DB_USER` n'est jamais défini nulle part, même quand tout
+fonctionne correctement. Le fail-fast a donc été implémenté avec les noms
+réels du projet.
+
+`src/config/db.js` vérifie désormais, au chargement du module (avant même
+la création du pool), la présence de `MYSQL_HOST`, `MYSQL_DATABASE`,
+`MYSQL_USER`, `MYSQL_PASSWORD` — et lève immédiatement une erreur explicite
+si l'une d'elles manque, plutôt que de laisser `mysql2` tenter une connexion
+avec des valeurs `undefined` (silencieusement converties en chaînes vides)
+et laisser MySQL échouer avec `Access denied for user ''@'...' (using
+password: NO)`, un message qui ne mentionne jamais la cause réelle. Même
+stratégie fail-fast, au même moment du cycle de vie (chargement du module,
+pas premier appel), que `tokenService.js`/`verificationService.js` pour les
+clés RS256 — cohérence délibérée entre les trois. `MYSQL_PORT` est
+volontairement exclu de la liste critique : contrairement aux quatre
+variables ci-dessus, une valeur par défaut (3306) a un sens fonctionnel réel.
+
+Vérifié directement (pas seulement en théorie) : exécuter
+`node -e "require('./src/config/db.js')"` sans aucune variable `MYSQL_*`
+dans l'environnement lève désormais immédiatement `Error: Variables
+d'environnement DB manquantes (MYSQL_HOST, MYSQL_DATABASE, MYSQL_USER,
+MYSQL_PASSWORD) -- Executez-vous le code dans Docker ? ...` — et avec
+certaines variables déjà présentes, le message ne liste que celles
+réellement absentes (testé avec `MYSQL_HOST`/`MYSQL_USER` définies : le
+message ne mentionne plus que `MYSQL_DATABASE, MYSQL_PASSWORD`).
+
+### 5. Tests : un étudiant dédié par scénario qui écrit réellement en base
+
+`backend/tests/scan.test.js` attribue désormais un `etudiant_id` **distinct**
+à chaque scénario qui va jusqu'à un `INSERT` réussi (cas nominal, V4, double
+scan) plutôt qu'un seul `ETUDIANT_ID` partagé. Nécessaire, pas cosmétique :
+avec `uq_scan_presence` en place, un étudiant ne peut plus avoir qu'une seule
+ligne de présence pour la séance de test — réutiliser le même `etudiant_id`
+entre deux scénarios aurait fait échouer le second avec `409 DOUBLE_SCAN` au
+lieu du `201`/`409 REJEU_DETECTE` attendu, un faux échec de test provoqué par
+la nouvelle règle métier elle-même plutôt que par une régression réelle.
+
+Nouveau test (`« regle metier de presence (double scan) »`) : génère deux
+jetons **distincts** pour la même séance (deux appels à
+`generateSessionToken`, donc deux `jti` différents — vérifié explicitement
+par une assertion dédiée avant le reste du test, pour garantir que ce
+scénario ne retombe pas accidentellement sur celui de V4), scanne le premier
+avec succès (`201`), scanne le second et vérifie `409` avec
+`code: 'DOUBLE_SCAN'`. Validé contre un vrai MySQL (même méthode que le
+reste de l'Étape 3 : `mysql-memory-server`, hors dépendances du projet,
+schéma+seed+privilèges rejoués tels quels) : **15/15 tests verts** (7
+tokenService + 2 health + 6 scan, le nouveau test inclus), avec confirmation
+via `SHOW INDEX FROM scans` que les deux contraintes `uq_scan_nonce` et
+`uq_scan_presence` sont bien présentes en base après exécution de
+`01-schema.sql`.
+
+---
+
 ## Prochaine étape suggérée
 
 Enrôlement d'appareil (RF-07) : associer une paire de clés (probablement
