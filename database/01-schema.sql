@@ -39,11 +39,21 @@ CREATE TABLE etudiants (
 -- etudiant_id. C'est l'equivalent, en MySQL, d'un "partial unique index"
 -- Postgres (UNIQUE ... WHERE statut = 'actif') -- MySQL ne supporte pas cette
 -- syntaxe nativement, d'ou cette colonne generee STORED comme substitut.
+--
+-- info_appareil (ajoutee Etape 4) : description libre fournie par le client
+-- (ex. "iPhone 13 - Safari"), a but PUREMENT INFORMATIF/journalisation (utile
+-- pour un etudiant ou un formateur qui consulte la liste des appareils
+-- enroles). Ne joue AUCUN role de securite : c'est la cle publique
+-- (cle_publique) qui authentifie l'appareil, jamais cette description en
+-- clair, librement modifiable par le client (cf. enrolementController.js,
+-- ANALYSE_CODE.md section Etape 4). NULL autorise : un client peut choisir
+-- de ne pas la fournir sans que l'enrolement echoue pour autant.
 -- -----------------------------------------------------------------------------
 CREATE TABLE appareils_enroles (
   id               CHAR(36)     NOT NULL DEFAULT (UUID()) PRIMARY KEY,
   etudiant_id      CHAR(36)     NOT NULL,
   cle_publique     TEXT         NOT NULL,
+  info_appareil    VARCHAR(255) NULL,
   statut           ENUM('actif', 'revoque') NOT NULL DEFAULT 'actif',
   date_enrolement  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   date_revocation  DATETIME     NULL,

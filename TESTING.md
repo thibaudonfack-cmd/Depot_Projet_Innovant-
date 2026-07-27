@@ -1023,6 +1023,138 @@ total`).
 
 ---
 
+# Étape 4 — Enrôlement cryptographique des appareils
+
+Ce protocole suppose l'Étape 3 déjà validée. Nouveau prérequis : après
+`git pull origin dev`, comme `01-schema.sql` a changé (colonne
+`info_appareil`), un volume déjà initialisé doit être recréé :
+```bash
+docker compose down -v
+docker compose up -d --build
+docker compose ps
+```
+Attendu : **quatre** conteneurs désormais (`presence_mysql`,
+`presence_backend`, `presence_frontend`, `presence_proxy`), tous `Up`
+(`presence_mysql` en `healthy` après quelques secondes).
+
+## 1. Le frontend répond bien derrière Caddy, en HTTPS
+
+```bash
+curl -k -o /dev/null -s -w "%{http_code}
+" https://localhost/
+```
+Attendu : `200`. Puis, dans un navigateur (pas seulement `curl` — le test
+suivant a besoin d'un vrai moteur JS) : ouvrir `https://localhost/`.
+Avertissement de certificat attendu, comme depuis l'Étape 0.2 (accepter
+pour continuer). La page « Enrôlement d'appareil » doit s'afficher, avec un
+menu déroulant d'étudiants de démonstration, un champ de description
+d'appareil, et un bouton « Générer une clé et s'enrôler ».
+
+**Vérifier que le rechargement à chaud (HMR) fonctionne** (preuve que
+`vite.config.js`/`hmr.clientPort` est correctement traversé par Caddy) :
+modifier un texte dans `frontend/src/App.jsx`, enregistrer — la page doit se
+mettre à jour dans le navigateur **sans rechargement complet**, en moins
+d'une seconde. Si la page se recharge entièrement (ou pas du tout), inspecter
+la console : une erreur de connexion WebSocket vers un port différent de 443
+indique un problème de configuration HMR, pas un bug fonctionnel de
+l'enrôlement lui-même.
+
+## 2. Enrôlement via l'interface
+
+Choisir un étudiant dans le menu déroulant, cliquer sur « Générer une clé et
+s'enrôler ». Attendu : après un court instant, un bloc de résultat vert
+s'affiche avec un JSON du type :
+```json
+{
+  "status": "ok",
+  "appareil_id": "<uuid>",
+  "etudiant_id": "33333333-3333-3333-3333-333333333331",
+  "statut": "actif",
+  "appareil_precedent_revoque": false
+}
+```
+Cliquer une seconde fois sur le bouton (même étudiant) : `appareil_precedent_revoque`
+doit désormais valoir `true` — preuve que la règle RF-09 (un seul appareil
+actif) fonctionne de bout en bout, pas seulement en test automatisé.
+
+## 3. Vérification dans la console du navigateur (protocole manuel bas niveau)
+
+Ouvrir les outils de développement (F12) sur `https://localhost/`, onglet
+Console. `CryptoService` est exposé sur `window` en mode développement :
+```js
+const paire = await window.CryptoService.generateAndStoreKeyPair();
+paire.privateKey.extractable   // attendu : false
+paire.publicKey.extractable    // attendu : true
+const pem = await window.CryptoService.exportPublicKey();
+console.log(pem);              // attendu : "-----BEGIN PUBLIC KEY-----
+...."
+```
+**Test négatif attendu** (preuve directe, dans le vrai navigateur, que la
+clé privée ne peut pas être exportée) :
+```js
+await window.crypto.subtle.exportKey('pkcs8', paire.privateKey);
+```
+Attendu : une exception `InvalidAccessError` (`"key is not extractable"`),
+levée par le moteur du navigateur lui-même — pas par du code applicatif.
+
+## 4. Vérification dans IndexedDB (onglet Application)
+
+Dans les outils de développement : onglet **Application** (Chrome/Edge) ou
+**Stockage** (Firefox) → **IndexedDB** → `presence-appareil-db` →
+`cles-cryptographiques`. Attendu : deux entrées,
+`appareil-cle-privee` et `appareil-cle-publique`, chacune affichée comme un
+objet `CryptoKey` (pas une chaîne, pas un JSON lisible — c'est attendu : le
+navigateur affiche un objet opaque pour une clé non exportable). Recharger
+entièrement la page (`F5`) puis relancer la commande de la section 3
+(`window.CryptoService.exportPublicKey()`) sans regénérer de nouvelle
+paire : le même PEM doit être retourné, preuve que la clé a bien persisté
+d'un chargement de page à l'autre.
+
+## 5. Vérification en base MySQL
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}"   -e "SELECT id, etudiant_id, statut, info_appareil, date_enrolement, date_revocation FROM db_logs.appareils_enroles WHERE etudiant_id='33333333-3333-3333-3333-333333333331'\G"
+```
+Attendu : autant de lignes que d'enrôlements effectués pour cet étudiant
+(section 2), **une seule** avec `statut: actif` (la plus récente), toutes
+les autres `statut: revoque` avec `date_revocation` renseignée. La colonne
+`cle_publique` (non affichée ci-dessus pour la lisibilité, à inspecter
+séparément si besoin) doit contenir un bloc PEM `-----BEGIN PUBLIC
+KEY-----`.
+
+**Vérifier qu'il n'existe jamais deux lignes actives simultanément** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}"   -e "SELECT etudiant_id, COUNT(*) AS nb_actifs FROM db_logs.appareils_enroles WHERE statut='actif' GROUP BY etudiant_id HAVING nb_actifs > 1;"
+```
+Attendu : **aucune ligne retournée** (la contrainte `uq_appareil_actif`
+rend ce cas structurellement impossible, quel que soit le nombre
+d'enrôlements effectués).
+
+## 6. Tests automatisés
+
+```bash
+docker compose exec backend npm test -- enrolement.test.js
+```
+Attendu : 4 tests verts (premier enrôlement, remplacement RF-09, champs
+manquants, `etudiant_id` inconnu). `docker compose exec backend npm test`
+(sans filtre) doit désormais afficher `19 passed, 19 total` sur les 4
+suites (`tokenService`, `health`, `scan`, `enrolement`).
+
+## Critère de succès global — Étape 4
+
+Validée si et seulement si : les quatre conteneurs démarrent proprement
+après un `docker compose down -v` (section 0) ; `https://localhost/` sert
+la page React (section 1), HMR fonctionnel ; un enrôlement réussi puis un
+second pour le même étudiant démontrent RF-09 dans l'interface (section 2)
+et en base (section 5, jamais deux actifs simultanés) ; la console du
+navigateur confirme `extractable: false` sur la clé privée et l'échec de
+son export (section 3) ; IndexedDB contient bien les deux clés et la clé
+privée persiste entre rechargements (section 4) ; et
+`docker compose exec backend npm test` confirme `19 passed, 19 total`
+(section 6).
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

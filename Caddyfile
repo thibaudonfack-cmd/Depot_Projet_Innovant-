@@ -1,8 +1,9 @@
-# Caddyfile - Etape 0, Partie 2
+# Caddyfile - Etape 0, Partie 2 (mis a jour Etape 4)
 #
 # Role : point d'entree HTTPS unique du systeme. Aucun autre service (backend,
-# mysql) n'est expose a l'exterieur du reseau Docker (cf. architecture 4.3).
-# Caddy termine le TLS ici, avant que le trafic n'atteigne le backend.
+# mysql, frontend) n'est expose a l'exterieur du reseau Docker (cf.
+# architecture 4.3). Caddy termine le TLS ici, avant que le trafic n'atteigne
+# le backend ou le frontend.
 #
 # "tls internal" : Caddy agit comme sa propre autorite de certification locale
 # et emet un certificat pour localhost / api.localhost. Ce certificat est
@@ -11,7 +12,16 @@
 # le navigateur affichera donc un avertissement tant que cette CA n'est pas
 # explicitement approuvee (voir TESTING.md). C'est le comportement attendu
 # pour un environnement de developpement local, pas une erreur de configuration.
-
+#
+# Etape 4 (WebCrypto) : cette HTTPS n'est plus seulement une bonne pratique,
+# elle est une EXIGENCE FONCTIONNELLE. L'API window.crypto.subtle n'est
+# disponible que dans un "contexte securise" (Secure Context) -- HTTPS, ou
+# l'exception specifique "http://localhost" que les navigateurs traitent
+# comme secure meme sans TLS (cf. ANALYSE_CODE.md, Etape 0.2, note sur cette
+# nuance). Servir le frontend EXCLUSIVEMENT via ce Caddy (jamais par un accès
+# direct a http://frontend:5173, qui n'existe de toute facon pas cote hote)
+# garantit que window.crypto.subtle est bien defini quand CryptoService.js
+# s'execute dans le navigateur.
 {
 	admin off
 }
@@ -25,8 +35,12 @@ localhost, api.localhost {
 		reverse_proxy backend:3000
 	}
 
+	# Catch-all : tout ce qui n'est pas /api/* est désormais le frontend React
+	# (Vite, mode developpement -- HMR compris, cf. vite.config.js pour le
+	# reglage hmr.clientPort necessaire a la traversee de ce reverse_proxy).
+	# Remplace l'ancien "respond" statique de l'Etape 0.2.
 	handle {
-		respond "Proxy Caddy actif. API disponible sous /api/*" 200
+		reverse_proxy frontend:5173
 	}
 
 	log {

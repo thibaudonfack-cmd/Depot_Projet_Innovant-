@@ -33,11 +33,17 @@ C'est la commande unique attendue par RNF-15. Verifier que tout est demarre :
 docker compose ps
 ```
 
-Les trois services (`mysql`, `backend`, `proxy`) doivent apparaitre avec un
-statut `running` (et `healthy` pour `mysql` apres ~20-30 secondes).
+Les quatre services (`mysql`, `backend`, `frontend`, `proxy`) doivent
+apparaitre avec un statut `running` (et `healthy` pour `mysql` apres
+~20-30 secondes).
 
-## Acceder au backend
+## Acceder a l'application
 
+```
+https://localhost/
+```
+Interface d'enrolement d'appareil (Etape 4). L'API backend reste accessible
+sous `https://localhost/api/*`, par exemple :
 ```
 https://localhost/api/health
 ```
@@ -64,5 +70,7 @@ docker compose down -v
 
 ## Etat du projet
 
-Etape 0 en cours (fondations d'infrastructure). Voir `ANALYSE_CODE.md` pour le
-detail de chaque partie livree et la prochaine etape prevue.
+Etape 4 livree (enrolement cryptographique des appareils, ECDSA P-256 +
+WebCrypto + IndexedDB cote client, RF-07/RF-09 cote backend). Voir
+`ANALYSE_CODE.md` pour le detail de chaque partie livree et la prochaine
+etape prevue.

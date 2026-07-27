@@ -913,15 +913,266 @@ via `SHOW INDEX FROM scans` que les deux contraintes `uq_scan_nonce` et
 
 ---
 
+# Étape 4 — Enrôlement cryptographique des appareils (RF-07/RF-09)
+
+## Vue d'ensemble
+
+Trois briques nouvelles, une par bout de la chaîne de confiance :
+`frontend/` (React/Vite, nouveau service Docker) génère et conserve la clé
+privée de l'appareil ; `Caddyfile`/`docker-compose.yml` exposent ce frontend
+en HTTPS via le même proxy que le backend ; `POST /api/enrolements` reçoit
+et enregistre la clé **publique** correspondante, en appliquant RF-09 (un
+seul appareil actif par étudiant).
+
+## Écart assumé : `enrolement`, pas `enrollement`
+
+La mission reçue orthographie systématiquement « enrollement » (deux L,
+calque de l'anglais *enrollment*). Nom retenu partout dans le code :
+**`enrolement`** (une seule L, sans accent circonflexe sur le O — convention
+ASCII déjà en vigueur dans tout ce projet, cf. `cle_privee`, `salle_id`,
+etc.). Ce n'est pas une préférence stylistique : la table posée dès l'Étape 1
+s'appelle déjà `appareils_enroles` (une seule L), avec le commentaire
+« RF-07 (enrolement cryptographique) » écrit noir sur blanc dans
+`01-schema.sql` avant même que cette étape ne commence. Utiliser une
+orthographe différente pour le nouveau controller/la nouvelle route aurait
+introduit, dans un projet destiné à être défendu devant un jury, deux
+graphies concurrentes du même concept. Fichier : `enrolementController.js`.
+Route : `POST /api/enrolements` (pluriel, même convention route ↔ action que
+`/api/seances` et `/api/scans`).
+
+## 1. Infrastructure : un troisième service, toujours derrière Caddy
+
+`frontend/` est un projet Vite + React généré via `npm create vite@latest --
+--template react` (le template JS standard — vérifié qu'aucun fichier
+`.ts`/`.tsx` ni `tsconfig.json` n'est présent). `frontend/Dockerfile` est
+volontairement un Dockerfile de **développement** : il ne construit aucun
+bundle de production, il lance `npm run dev` (serveur Vite avec rechargement
+à chaud). `docker-compose.yml` monte `./frontend:/app` en volume — à la
+différence du backend, jamais monté — précisément parce que ce mode dev n'a
+de sens que si Vite voit les modifications du disque immédiatement ; un
+volume anonyme supplémentaire sur `/app/node_modules` empêche ce montage
+d'écraser le `node_modules` installé *dans* le conteneur par un éventuel
+`node_modules` de l'hôte (potentiellement absent, ou installé pour une autre
+architecture/OS — même préoccupation que `.dockerignore` pour le backend,
+mais plus critique ici puisque le montage est permanent et non un simple
+`COPY` ponctuel).
+
+**Aucun port publié pour `frontend`**, comme `backend`/`mysql` : seul Caddy
+est exposé (80/443). Ce choix n'est pas que cohérence architecturale ici —
+il est **fonctionnellement nécessaire** : `window.crypto.subtle` (WebCrypto)
+n'existe que dans un « contexte sécurisé » (HTTPS, ou l'exception spécifique
+`http://localhost`). Ne jamais permettre un accès direct au frontend en
+dehors de Caddy garantit que le prototype est systématiquement testé dans
+les conditions où WebCrypto fonctionne réellement, jamais dans un raccourci
+qui masquerait un problème TLS.
+
+`Caddyfile` : le bloc `handle` par défaut (qui répondait auparavant un texte
+statique, Étape 0.2) route désormais vers `reverse_proxy frontend:5173`. Le
+bloc `handle /api/*` est **inchangé**, toujours en premier (Caddy applique
+le premier `handle` qui correspond — l'ordre du fichier fait foi). Frontend
+et API partagent ainsi la même origine (`https://localhost`) : aucune
+configuration CORS n'est nécessaire, `fetch('/api/enrolements', ...)` depuis
+le frontend atteint directement le backend via Caddy. Validé avec le
+véritable binaire Caddy (`caddy validate --config Caddyfile` → *Valid
+configuration* ; `caddy adapt` confirme les deux `upstreams`,
+`backend:3000` et `frontend:5173`, dans cet ordre), pas seulement relu à
+l'œil.
+
+`vite.config.js` ajoute trois réglages indispensables à ce montage, aucun
+n'étant nécessaire pour un simple `npm run dev` en local hors Docker :
+`server.host: true` (le serveur Vite n'écoute par défaut que sur
+`127.0.0.1` *dans* le conteneur — injoignable depuis Caddy, conteneur
+séparé, sans ce réglage) ; `strictPort: true` (échoue explicitement plutôt
+que de glisser vers un autre port que celui que Caddy cible) ; et surtout
+`server.hmr.clientPort: 443` — le script de rechargement à chaud injecté
+dans la page tourne dans le **navigateur**, qui ne connaît que l'origine
+publique (port 443 via Caddy) ; sans cette précision, il tenterait d'ouvrir
+sa connexion WebSocket directement vers le port 5173 (jamais publié vers
+l'hôte), et le HMR resterait silencieusement cassé alors même que la page
+se charge normalement. Vérifié concrètement : `npm run build` et
+`npm run lint` (oxlint) passent sans erreur, et le serveur Vite démarré
+localement (`host: true`) répond bien `HTTP 200` et sert la page attendue.
+
+## 2. `CryptoService.js` — ce que `extractable: false` protège réellement
+
+### Le mécanisme, précisément
+
+`generateAndStoreKeyPair()` appelle `crypto.subtle.generateKey({name:
+'ECDSA', namedCurve: 'P-256'}, false, ['sign', 'verify'])`. Le paramètre
+`extractable` (ici `false`) s'applique, selon la spécification WebCrypto, à
+la génération d'une **paire** de clés asymétriques : il verrouille la clé
+**privée** générée — toute tentative ultérieure de
+`crypto.subtle.exportKey(..., clePrivee)` lève une exception
+(`InvalidAccessError`), quel que soit le code qui la demande, légitime ou
+non. La clé **publique** générée dans le même appel reste, elle,
+**toujours extractable**, quelle que soit la valeur de ce paramètre — c'est
+un comportement normatif de la spécification, pas une négligence : une clé
+publique n'a rien de confidentiel, et doit pouvoir être exportée pour être
+envoyée au backend (`exportPublicKey()`). C'est précisément ce qui rend ce
+design réalisable sans configuration séparée pour chacune des deux clés.
+
+**Vérifié empiriquement, pas seulement lu dans la documentation** : un
+script Node (WebCrypto natif de Node ≥ 19, indépendant du navigateur)
+confirme que `privateKey.extractable === false`,
+`publicKey.extractable === true`, et qu'un `exportKey('pkcs8', privateKey)`
+lève effectivement une exception (`InvalidAccessException: key is not
+extractable`).
+
+### Pourquoi IndexedDB, et pas seulement « une bonne pratique »
+
+`localStorage` ne sait stocker que des **chaînes de caractères** : un objet
+`CryptoKey` non-extractable ne peut structurellement pas y être rangé — il
+faudrait d'abord l'exporter en chaîne, ce qui exigerait `extractable: true`
+et annulerait la garantie ci-dessus. `IndexedDB`, à l'inverse, utilise
+l'algorithme de **clonage structuré** (*Structured Clone*) du navigateur, et
+la spécification HTML étend explicitement cet algorithme aux objets
+`CryptoKey` — y compris non-extractables — en préservant leur état interne
+(`extractable`, `usages`) à travers l'écriture ET la relecture. IndexedDB
+n'est donc pas ici « un stockage parmi d'autres, choisi par prudence » :
+c'est le **seul** mécanisme natif du navigateur capable de faire persister
+une clé non-extractable d'une session à l'autre.
+
+**Vérifié empiriquement** (Node + `fake-indexeddb`, la bibliothèque de test
+standard pour IndexedDB hors navigateur, + `idb-keyval` réellement importé
+depuis `CryptoService.js`, pas réimplémenté pour l'occasion) : une clé
+privée stockée puis relue depuis IndexedDB reste `extractable === false`,
+**et** reste utilisable pour signer (`crypto.subtle.sign` réussit sur la
+clé relue) — la relecture ne dégrade ni la garantie de sécurité, ni la
+fonctionnalité. La clé publique exportée en PEM par `exportPublicKey()` a
+en outre été validée par une API **indépendante** de WebCrypto
+(`node:crypto`, `createPublicKey()`) : `asymmetricKeyType === 'ec'`,
+courbe `prime256v1` (= P-256) — le PEM produit est un SPKI EC P-256
+authentique, pas seulement une chaîne qui « a l'air » correcte.
+
+### Ce que cette protection empêche — et ce qu'elle n'empêche PAS (honnêteté requise)
+
+Scénario : un attaquant parvient à injecter du script (XSS) dans l'origine
+du frontend.
+
+**Sans `extractable: false`** (clé privée exportable, ou pire, stockée en
+clair sous forme de chaîne) : le script injecté exporte la clé en une
+requête, l'exfiltre vers un serveur tiers. Compromission **totale et
+permanente** : l'attaquant peut ensuite signer, depuis sa propre
+infrastructure, à tout moment, sans jamais avoir besoin de ré-accéder à
+l'appareil — y compris longtemps après que la faille XSS a été corrigée.
+
+**Avec `extractable: false` + IndexedDB** : le script injecté ne peut
+**toujours pas** exporter la clé — mais il tourne dans la **même origine**
+que l'application légitime, avec le **même accès** à l'objet `CryptoKey` en
+mémoire. Il peut donc parfaitement appeler
+`crypto.subtle.sign(..., clePriveeHandle, donneesArbitraires)` **pendant que
+son propre script s'exécute activement dans la page** — c'est-à-dire
+produire des signatures pour des données de son choix, tant que la session
+XSS est active. Ce que la protection élimine, c'est l'**exfiltration** de
+la clé elle-même : l'attaquant ne peut pas emporter la capacité de signer
+avec lui une fois qu'il quitte la page ou que le script est neutralisé, et
+ne peut jamais signer depuis un autre appareil ou une autre session.
+
+En clair : `extractable: false` + IndexedDB ne rend pas une XSS inoffensive
+— rien ne le peut, à ce niveau. Cela transforme un **vol de clé permanent,
+exploitable indéfiniment et depuis n'importe où**, en un **abus de signature
+temporaire, limité à la durée d'une session compromise active**. Une
+réduction de surface d'attaque réelle et significative, pas une élimination
+totale du risque. La défense **primaire** contre l'XSS elle-même (Content-
+Security-Policy, échappement systématique des sorties, etc.) reste hors
+périmètre de cette étape et n'est pas encore en place dans ce projet
+(`Caddyfile` ne pose aujourd'hui aucun en-tête CSP) — à traiter dans une
+étape de durcissement ultérieure, en complément de cette protection, pas à
+sa place.
+
+## 3. `POST /api/enrolements` — la transaction, pas une option
+
+`appareils_enroles.actif_key` (colonne générée, posée à l'Étape 1) et sa
+contrainte `UNIQUE KEY uq_appareil_actif` interdisent que deux lignes
+`statut='actif'` coexistent pour le même `etudiant_id`, ne serait-ce qu'un
+instant. Appliquer RF-09 (« un seul appareil actif ») exige donc deux
+opérations — révoquer l'éventuel appareil actif existant, puis insérer le
+nouveau — exécutées comme **une seule transaction** (`beginTransaction` /
+`commit` / `rollback` explicites via `pool.getConnection()`) : sans cela,
+une panne entre les deux étapes laisserait l'étudiant **sans aucun appareil
+actif** (l'ancien révoqué, le nouveau jamais inséré), un état incohérent et
+silencieux. C'est la première fonctionnalité de ce projet à nécessiter une
+transaction explicite — les endpoints précédents (`/api/seances`,
+`/api/scans`) n'exécutaient qu'une seule instruction d'écriture à la fois.
+
+`device_info` (nom de champ imposé par la mission, style API) correspond à
+la colonne `info_appareil` (nom en français, cohérent avec le reste du
+schéma) — même type de correspondance que `session_id` (revendication JWT)
+↔ `seance_id` (colonne `scans.seance_id`), déjà pratiquée depuis l'Étape 2.
+Colonne `NULL`-able, purement informative : elle ne joue **aucun** rôle de
+sécurité, seule `cle_publique` authentifie l'appareil.
+
+### Bug réel détecté par le test contre un vrai MySQL — et non par relecture
+
+Un même échec de contrainte `FOREIGN KEY` (INSERT avec un `etudiant_id`
+inexistant) est rapporté par MySQL sous **deux codes d'erreur différents**
+selon le contexte transactionnel — fait vérifié empiriquement, pas supposé :
+- **Hors transaction explicite** (autocommit — le cas de
+  `seanceController.js`/`scanController.js`) : `ER_NO_REFERENCED_ROW_2`
+  (errno 1452, message détaillé incluant le nom de la contrainte).
+- **Dans une transaction ouverte via `beginTransaction()`** (le cas ICI) :
+  `ER_NO_REFERENCED_ROW` (errno 1216, message plus générique, **sans** le
+  « _2 »).
+
+La première version du controller ne vérifiait que `ER_NO_REFERENCED_ROW_2`
+— copié du raisonnement déjà appliqué à `seanceController.js`, mais jamais
+testé dans un contexte transactionnel. Résultat : le test
+« `etudiant_id` inconnu » échouait (500 au lieu du 400 attendu),
+révélant que ce cas retombait, à tort, dans la branche générique. Corrigé
+en vérifiant les **deux** codes. Ce n'est pas un détail cosmétique : sans ce
+test exécuté contre un vrai moteur MySQL (plutôt qu'un mock, qui aurait
+simplement rejoué le code d'erreur que j'aurais supposé correct), ce bug
+serait passé inaperçu jusqu'à un vrai `etudiant_id` invalide en production,
+rapporté à l'utilisateur comme une panne serveur (500) plutôt qu'une erreur
+de saisie (400).
+
+## 4. Migration de schéma : encore un `docker compose down -v` nécessaire
+
+`info_appareil` (nouvelle colonne) est ajoutée directement dans
+`01-schema.sql`, qui — comme documenté à chaque étape précédente touchant
+le schéma — ne s'exécute qu'au tout premier démarrage d'un volume
+`mysql_data` vide. Un environnement déjà initialisé avant ce correctif ne
+recevra pas cette colonne (ni la validation `npm test` correspondante, qui
+échouerait avec une colonne inconnue) tant que :
+```bash
+docker compose down -v
+docker compose up -d --build
+```
+n'a pas été exécuté.
+
+## 5. Tests
+
+`backend/tests/enrolement.test.js` (Supertest, vrai MySQL, aucun mock —
+même discipline que `scan.test.js`/`health.test.js`) : premier enrôlement
+accepté ; second enrôlement pour le même étudiant → l'ancien appareil passe
+`revoque` (avec `date_revocation` renseignée) et le nouveau est `actif`,
+vérifié **en base** (jamais zéro, jamais deux lignes `actif` simultanées) et
+pas seulement sur la réponse HTTP ; champs manquants → 400 ; `etudiant_id`
+inconnu → 400 avec transaction annulée (vérifié : aucune ligne insérée
+malgré l'échec). Les clés publiques utilisées dans ces tests sont de
+**vraies** paires ECDSA P-256 générées via `node:crypto` (indépendant de
+WebCrypto), pas des chaînes arbitraires — données représentatives de ce
+qu'un vrai frontend enverrait. `appareils_enroles` autorise `DELETE` pour
+`app_logs` (contrairement à `scans`, cf. `03-privileges.sh`, Étape 1 :
+« révocation de clé, RF-08 ») : le nettoyage `afterAll` de ce fichier ne se
+heurte donc à aucune restriction de privilège, à la différence de ce qui
+avait été observé sur `scans` à l'Étape 3.
+
+Validation locale (toujours sans Docker dans cet environnement) : vrai
+MySQL 8.0.45 éphémère (`mysql-memory-server`, hors dépendances du projet),
+schéma+seed+privilèges rejoués tels quels. **19/19 tests verts** (7
+tokenService + 2 health + 6 scan + 4 enrolement). `npm ci` validé
+séparément pour `backend/` **et** pour `frontend/` (nouveau lockfile, jamais
+testé jusqu'ici) : les deux réussissent à froid, sans écart.
+
+---
+
 ## Prochaine étape suggérée
 
-Enrôlement d'appareil (RF-07) : associer une paire de clés (probablement
-ECDSA, générée côté client, jamais transmise) à chaque étudiant lors de son
-premier scan réussi, avec un seul appareil actif à la fois (contrainte déjà
-posée en base à l'Étape 1, `appareils_enroles.actif_key`). Objectif : que la
-cascade de cette Étape 3 puisse, en plus de valider le jeton de séance,
-authentifier l'appareil qui le soumet — fermant ainsi le dernier angle mort
-documenté ci-dessus (« présenté par cet étudiant » devient « présenté par
-l'appareil enrôlé de cet étudiant »). Le géofencing (RF-13, contrôle
-`polygone_geojson` de la salle) reste également en attente, indépendant de
-RF-07 et pouvant être traité avant ou après selon la priorité retenue.
+Le géofencing (RF-13, contrôle `polygone_geojson` de la salle, algorithme
+PNPOLY/ray casting côté application — cf. Étape 1) reste la brique de
+sécurité restante pour compléter la cascade de validation du scan. Vient
+ensuite la fermeture du dernier angle mort documenté à l'Étape 3 : lier la
+vérification du scan à l'appareil enrôlé ici (RF-07 complet — une preuve de
+possession de la clé privée, ex. un défi signé, plutôt que la simple
+confiance en la clé publique fournie à l'enrôlement).

@@ -9,6 +9,9 @@
 //                          fermeture des vecteurs V1 (expiration) et V4
 //                          (rejeu, via la contrainte UNIQUE de la table
 //                          scans) -- cf. src/controllers/scanController.js.
+// Etape 4                : enrolement cryptographique d'un appareil
+//                          (RF-07/RF-09) -- cf.
+//                          src/controllers/enrolementController.js.
 // Strategie de test        : app et httpServer exportes pour Supertest ;
 //                          httpServer.listen() n'est declenche que lorsque ce
 //                          fichier est execute directement (node server.js),
@@ -24,6 +27,7 @@ const http = require('http');
 const pool = require('./src/config/db');
 const seanceRoutes = require('./src/routes/seanceRoutes');
 const scanRoutes = require('./src/routes/scanRoutes');
+const enrolementRoutes = require('./src/routes/enrolementRoutes');
 const { attachQrBroadcaster } = require('./src/services/qrBroadcaster');
 
 const app = express();
@@ -59,6 +63,7 @@ app.get('/api/db-health', async (req, res) => {
 
 app.use('/api/seances', seanceRoutes);
 app.use('/api/scans', scanRoutes);
+app.use('/api/enrolements', enrolementRoutes);
 
 const httpServer = http.createServer(app);
 

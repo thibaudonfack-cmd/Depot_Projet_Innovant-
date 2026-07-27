@@ -74,6 +74,39 @@ services:
     networks:
       - presence_net
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: presence_frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV}
+    volumes:
+      # Montage du code source pour le rechargement a chaud (HMR) -- a la
+      # difference du backend (jamais monte, cf. plus haut), le frontend est
+      # ICI en mode developpement actif : Vite doit voir chaque modification
+      # de ./frontend sur l'hote immediatement, sans reconstruire l'image.
+      - ./frontend:/app
+      # Volume anonyme SUR /app/node_modules : empeche le montage
+      # ci-dessus d'ECRASER le node_modules installe PAR le conteneur
+      # (RUN npm install du Dockerfile) avec un eventuel node_modules de
+      # l'hote (absent, different d'OS, ou simplement pas installe cote
+      # Windows) -- meme principe que .dockerignore pour le backend, mais
+      # necessaire ICI en plus car le bind mount, contrairement a COPY,
+      # s'applique en continu et masquerait sinon le contenu du conteneur
+      # a chaque demarrage.
+      - /app/node_modules
+    # Aucun port publie vers l'hote : comme backend et mysql, le frontend
+    # n'est joignable que via Caddy (reseau Docker interne, port 5173).
+    # C'est egalement VITAL pour l'API WebCrypto (Etape 4) : elle exige un
+    # contexte securise (HTTPS OU localhost) -- passer exclusivement par
+    # Caddy garantit que le prototype est toujours teste dans les conditions
+    # reelles (HTTPS via reverse proxy), jamais via un acces direct qui
+    # masquerait un probleme de configuration TLS.
+    networks:
+      - presence_net
+
   proxy:
     image: caddy:2-alpine
     container_name: presence_proxy
@@ -87,6 +120,7 @@ services:
       - caddy_config:/config
     depends_on:
       - backend
+      - frontend
     networks:
       - presence_net
 
