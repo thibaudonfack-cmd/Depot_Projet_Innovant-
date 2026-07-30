@@ -1165,6 +1165,162 @@ tokenService + 2 health + 6 scan + 4 enrolement). `npm ci` validé
 séparément pour `backend/` **et** pour `frontend/` (nouveau lockfile, jamais
 testé jusqu'ici) : les deux réussissent à froid, sans écart.
 
+## 6. Rôle de l'interface temporaire (*test harness*)
+
+### Ce qu'est cette page, et ce qu'elle n'est pas
+
+`frontend/src/App.jsx` est un **outil de test de développement**, pas un
+écran du produit final. Sa seule raison d'être : permettre de déclencher et
+d'observer manuellement la chaîne cryptographique complète (génération
+ECDSA → IndexedDB → `POST /api/enrolements` → réponse backend) sans passer
+par la console du navigateur, et de constater visuellement que chaque
+maillon fonctionne.
+
+Le marqueur le plus évident de ce statut est le **menu déroulant
+« Étudiant »**. Choisir librement, dans une liste, l'identité pour laquelle
+on enrôle un appareil serait une faille béante dans un produit réel :
+n'importe qui pourrait enrôler son propre téléphone au nom de n'importe quel
+étudiant. Ce menu n'est acceptable que parce qu'il s'adresse au développeur,
+sur un jeu de données de démonstration, dans un environnement local — et
+parce que l'authentification n'est pas encore implémentée à ce stade du
+prototype. Il disparaîtra entièrement.
+
+Ce statut est désormais également signalé **à l'écran** (bandeau d'
+avertissement en haut de la page), et pas uniquement dans les commentaires
+du code : lors d'une démonstration devant jury, personne ne doit pouvoir
+confondre cet outil avec une maquette de l'interface finale.
+
+### Comment l'enrôlement se déroulera réellement
+
+Dans le produit final, l'enrôlement n'est pas une page que l'étudiant
+visite volontairement : c'est une **étape invisible, déclenchée
+automatiquement** lors de sa première utilisation du système sur un nouvel
+appareil. Séquence prévue :
+
+1. **Authentification.** L'étudiant se connecte à l'application (compte
+   fourni par l'établissement). C'est cette session authentifiée — et elle
+   seule — qui détermine `etudiant_id`. Conséquence directe sur le backend :
+   `POST /api/enrolements` ne devra plus **jamais** lire `etudiant_id` dans
+   le corps de la requête, mais l'extraire du jeton de session côté serveur.
+   Tant que ce n'est pas fait, l'endpoint reste, par construction, non
+   sécurisé contre l'usurpation — limitation déjà signalée en tête de
+   `enrolementController.js`.
+2. **Détection automatique.** Au chargement, l'application vérifie
+   (`CryptoService.possedeDejaUneCle()`, déjà implémentée) si cet appareil
+   possède une clé. Si oui : rien ne se passe, l'étudiant accède directement
+   au scan. Si non : l'enrôlement est proposé.
+3. **Consentement explicite, en langage clair.** Un écran unique du type
+   « Enregistrer cet appareil comme votre appareil de présence ? », qui
+   explique que l'étudiant ne pourra pointer que depuis celui-ci (RF-09), et
+   qu'un changement d'appareil nécessitera une nouvelle procédure. Pas de
+   jargon cryptographique : ni « ECDSA », ni « clé publique », ni
+   « IndexedDB » — ces détails sont la responsabilité du système, pas la
+   charge mentale de l'utilisateur.
+4. **Génération et envoi, transparents.** Un appui sur « Confirmer »
+   déclenche exactement le code déjà écrit (`generateAndStoreKeyPair()` puis
+   `exportPublicKey()` puis l'appel API). Durée : moins d'une seconde.
+   L'étudiant ne voit qu'une confirmation.
+5. **Preuve de possession (à ajouter).** L'enrôlement complet devra inclure
+   un défi-réponse : le serveur envoie une valeur aléatoire, le client la
+   signe avec la clé privée fraîchement générée, le serveur vérifie cette
+   signature avec la clé publique reçue. Sans cette étape — non implémentée
+   à ce jour — le backend fait confiance à une clé publique qu'il n'a aucun
+   moyen de relier à un appareil réellement en possession de la clé privée
+   correspondante.
+6. **Changement d'appareil.** Rejouer la séquence depuis le nouvel appareil
+   révoque automatiquement l'ancien (RF-09, déjà implémenté et testé). En
+   production, cette bascule devra vraisemblablement être encadrée
+   (notification, validation par le secrétariat, ou délai de carence) pour
+   éviter qu'un partage de compte ne se traduise par des ré-enrôlements en
+   série — règle de gestion à arbitrer avec l'établissement, hors périmètre
+   technique.
+
+**Ce qui est déjà définitif** dans le travail de l'Étape 4 : tout
+`CryptoService.js` (génération, non-extractabilité, IndexedDB, export PEM),
+tout le contrôleur d'enrôlement et sa transaction RF-09, le schéma. Seule la
+**couche de présentation** (`App.jsx`) et la **provenance de
+`etudiant_id`** changeront. La démarche est délibérément itérative :
+valider d'abord que la cryptographie fonctionne réellement de bout en bout,
+construire l'expérience utilisateur ensuite, plutôt que de soigner une
+interface au-dessus d'un socle non vérifié.
+
+## 7. Standard UI/UX et Tailwind CSS
+
+### Écart assumé : Tailwind v4, donc pas de `tailwind.config.js`
+
+La mission demandait de « configurer les fichiers `tailwind.config.js` et
+`index.css` ». Ce fichier **n'existe pas** dans ce projet, et son absence
+est volontaire : depuis Tailwind **v4** (version installée : 4.3.3, la
+version stable actuelle), la configuration est *CSS-first*. Il n'y a plus de
+`tailwind.config.js` généré par défaut, plus de `npx tailwindcss init`, et
+plus de chaîne PostCSS (`postcss.config.js` + `autoprefixer`) à câbler. La
+configuration se fait :
+
+- dans **`vite.config.js`**, via le plugin officiel `@tailwindcss/vite`
+  ajouté à `plugins` ;
+- dans **`src/index.css`**, via un unique `@import "tailwindcss";` (qui
+  remplace les trois directives `@tailwind base/components/utilities` de la
+  v3) et un bloc `@theme` pour les variables de thème (équivalent de
+  l'ancien `theme.extend`).
+
+Créer malgré tout un `tailwind.config.js` aurait produit un fichier **mort** :
+en v4, il n'est lu que s'il est explicitement référencé par une directive
+`@config`. Un fichier de configuration présent mais jamais chargé serait
+plus trompeur que son absence, en particulier devant un jury. Procédure
+vérifiée sur la documentation officielle (*Installing Tailwind CSS with
+Vite*, docs v4.3) avant implémentation, pas supposée depuis un tutoriel v3.
+
+`@theme` est ici volontairement **minimal** : seules les familles de polices
+sont redéfinies (pour un rendu identique sur les postes de démonstration
+Windows/macOS/Linux sans dépendre d'une police téléchargée). La palette et
+l'échelle typographique par défaut de Tailwind sont déjà sobres ; les
+surcharger sans nécessité serait exactement le type de personnalisation
+gratuite que la règle d'or UI/UX interdit.
+
+### Principes de design appliqués
+
+Palette réduite à **`slate`** (neutres) plus deux teintes sémantiques
+strictement fonctionnelles : `emerald` pour un succès, `red` pour une
+erreur, `amber` pour l'avertissement « outil de test ». Aucune couleur
+décorative, aucun dégradé, aucune ombre portée marquée, aucune animation
+autre que les transitions de survol. La hiérarchie repose sur l'espacement
+et la graisse typographique, pas sur la couleur.
+
+**Accessibilité**, traitée comme une contrainte de conception et non comme
+une finition :
+- Chaque champ a un `<label>` réellement associé (`htmlFor`/`id`), et son
+  texte d'aide est relié par `aria-describedby` — un lecteur d'écran annonce
+  donc l'aide en même temps que le champ, au lieu de l'ignorer.
+- `focus-visible` (et non `focus`) pour les anneaux de focus : ils
+  apparaissent à la navigation clavier, pas au clic souris — accessibilité
+  réelle, sans bruit visuel pour les autres utilisateurs.
+- Le bloc de résultat est enveloppé dans `aria-live="polite"` : il apparaît
+  après une opération asynchrone ; sans cette annonce, un utilisateur de
+  lecteur d'écran n'aurait aucun moyen de savoir que la réponse est arrivée.
+  `polite` plutôt qu'`assertive` pour ne pas interrompre une lecture en
+  cours.
+- Contrastes : `text-slate-900` sur `bg-white`/`bg-slate-50`, et
+  `text-white` sur `bg-slate-900` — largement au-delà du seuil WCAG AA
+  (4,5:1) dans les deux sens. Les textes secondaires n'utilisent pas de gris
+  plus clair que `slate-500`, qui reste conforme sur fond blanc.
+- Le bouton désactivé change de couleur **et** de curseur
+  (`disabled:cursor-not-allowed`) : l'état n'est pas signalé par la seule
+  opacité.
+
+`src/App.css` a été **supprimé** : son contenu est intégralement remplacé
+par des classes utilitaires. Conserver un fichier CSS quasi vide à côté de
+Tailwind aurait créé deux endroits concurrents où chercher un style.
+
+Vérifications exécutées, pas seulement supposées : `npm run build` et
+`npm run lint` (oxlint) passent sans erreur ni avertissement ; le CSS
+compilé (13,7 kB, contre 2,8 kB avant) contient bien les utilitaires
+réellement employés (`bg-slate-50`, `border-amber-300`, `focus-visible:*`,
+`disabled:bg-slate-400`…) **et** la variable `--font-sans` du bloc `@theme`,
+tandis qu'une classe jamais utilisée dans le code source (`bg-fuchsia-500`,
+testée exprès) en est bien absente — preuve que le plugin scanne réellement
+les sources et purge le reste. Le serveur Vite en mode développement sert
+également le CSS compilé sans erreur.
+
 ---
 
 ## Prochaine étape suggérée

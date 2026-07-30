@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
 //
@@ -7,7 +8,11 @@ import react from '@vitejs/plugin-react'
 // proxy HTTPS Caddy (cf. docker-compose.yml, Caddyfile, ANALYSE_CODE.md
 // section Etape 4).
 export default defineConfig({
-  plugins: [react()],
+  // tailwindcss() : plugin officiel Vite de Tailwind v4. Remplace l'ancienne
+  // chaine PostCSS (postcss.config.js + autoprefixer) qui etait necessaire
+  // en v3 -- voir ANALYSE_CODE.md, section "Standard UI/UX", pour la raison
+  // pour laquelle il n'existe PAS de tailwind.config.js dans ce projet.
+  plugins: [react(), tailwindcss()],
   server: {
     // host: true (equivalent a '0.0.0.0') : par defaut, le serveur de
     // developpement Vite n'ecoute que sur 127.0.0.1 A L'INTERIEUR du
