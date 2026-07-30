@@ -1391,3 +1391,110 @@ ne contiennent aucune erreur ; `/api/health` renvoie un JSON de statut OK ;
 volume neuf). Une fois ces quatre vérifications passées, les tests
 d'intégration (section « Stratégie de test automatisé ») peuvent reprendre
 normalement.
+
+---
+
+# Annexe B — Travailler avec DEUX dépôts distants (GitHub + GitLab de l'école)
+
+## Le problème vécu
+
+Une erreur `npm ci ... Missing: @emnapi/core` a « persisté » en CI à travers
+plusieurs correctifs successifs. Cause réelle : **la pipeline GitLab
+s'exécutait sur un dépôt différent de celui où les correctifs étaient
+poussés**. Trois indices l'ont établi, tous lisibles dans les logs du job :
+
+- le chemin de build (`/builds/<groupe-école>/…/Projet_innovant`) ne
+  correspondait pas au dépôt GitHub de développement ;
+- le commit testé (`91f5bbd8`) **n'existait dans aucun** des deux historiques
+  connus localement (`git cat-file -t 91f5bbd8` → *Not a valid object name*) ;
+- la ligne exécutée était `bash ./generate_keys.sh` alors que le
+  `.gitlab-ci.yml` du dépôt de développement écrit `./generate_keys.sh` — le
+  fichier CI lui-même différait donc entre les deux dépôts.
+
+**Règle à retenir** : quand une erreur de CI résiste à un correctif dont on a
+vérifié qu'il fonctionne en local, la première chose à contrôler n'est pas le
+correctif — c'est **quel commit la pipeline a réellement testé**. Le
+`Checking out <sha>` en tête de log répond immédiatement à la question.
+
+## Configurer les deux dépôts
+
+```bash
+git remote -v                        # etat actuel
+git remote add ecole <URL-DU-GITLAB-DE-L-ECOLE>
+git remote -v                        # doit lister origin ET ecole
+```
+
+Pousser vers les deux à chaque fois :
+```bash
+git push origin dev
+git push ecole dev
+```
+
+**Alternative — un seul `git push` pour les deux** (à préférer, car il rend
+l'oubli impossible) : configurer plusieurs URL de push sur `origin`.
+```bash
+git remote set-url --add --push origin <URL-GITHUB>
+git remote set-url --add --push origin <URL-DU-GITLAB-DE-L-ECOLE>
+git remote -v                        # origin doit afficher DEUX lignes (push)
+```
+Après cette configuration, `git push origin dev` écrit dans les deux dépôts.
+Attention : la première commande `set-url --add --push` **remplace** l'URL de
+push implicite, il faut donc bien ajouter les deux, GitHub compris — sinon
+les push vers GitHub cessent silencieusement.
+
+## Vérifier AVANT de pousser
+
+`verifier-avant-push.sh` (racine du projet) rejoue en local, dans l'image
+Docker exacte de la CI (`node:20`), les étapes qui échouent le plus souvent :
+
+```bash
+./verifier-avant-push.sh
+```
+
+Il contrôle deux choses :
+
+1. **`npm ci` réussit** pour `backend/` et `frontend/`. La vérification se
+   fait dans un conteneur Linux, jamais dans l'environnement Windows local :
+   seuls `package.json` et `package-lock.json` sont copiés dans un répertoire
+   vierge du conteneur, de sorte qu'aucun `node_modules` de l'hôte ne puisse
+   fausser le résultat. Le dossier est monté en lecture seule — le script ne
+   modifie jamais rien.
+2. **Chaque dépôt distant est à jour** sur la branche courante. C'est ce
+   contrôle qui aurait signalé immédiatement le problème ci-dessus, avec un
+   message du type :
+   ```
+   ecole  : EN RETARD de 3 commit(s) (50ffaf17)
+       -> git push ecole dev
+   ```
+
+Code de sortie `0` si tout va bien, `1` sinon.
+
+**Rendre la vérification automatique** (optionnel) :
+```bash
+cp outils/pre-push .git/hooks/pre-push
+chmod +x .git/hooks/pre-push
+```
+Le push est alors refusé si la vérification échoue. Contournement ponctuel :
+`git push --no-verify`. À noter : `.git/hooks/` n'est jamais versionné par
+Git (un dépôt ne doit pas pouvoir faire exécuter du code chez qui le clone),
+d'où cette copie manuelle en une commande.
+
+## Si le `dev` du GitLab a divergé
+
+Le `.gitlab-ci.yml` différant entre les deux dépôts, l'historique GitLab
+contient probablement des commits absents de GitHub. Un `git push ecole dev`
+sera alors refusé (*non-fast-forward*). Constater l'écart avant toute chose :
+
+```bash
+git fetch ecole
+git log --oneline -10 ecole/dev
+git log --oneline --left-right --boundary ecole/dev...dev
+```
+
+Ne **jamais** régler cela par un `--force` réflexe : il écraserait
+définitivement les commits présents uniquement côté école. Selon ce que
+montre le `log`, soit fusionner (`git merge ecole/dev`, puis résoudre les
+conflits — typiquement sur `.gitlab-ci.yml`), soit, si les commits côté école
+n'ont aucune valeur, forcer en connaissance de cause avec
+`git push --force-with-lease ecole dev` (`--force-with-lease` plutôt que
+`--force` : il refuse d'écraser si quelqu'un a poussé entre-temps).

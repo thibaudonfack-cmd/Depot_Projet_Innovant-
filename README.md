@@ -68,9 +68,26 @@ demarrages (volumes nommes). Pour tout reinitialiser, y compris les donnees :
 docker compose down -v
 ```
 
+## Avant de pousser
+
+Ce projet est heberge sur DEUX depots distants (developpement + GitLab de
+l'ecole, dont la pipeline CI fait foi). Pour eviter qu'un correctif
+n'atteigne qu'un seul des deux -- et qu'une erreur de CI semble "persister"
+alors qu'elle est corrigee ailleurs -- lancer avant chaque push :
+
+```bash
+./verifier-avant-push.sh
+```
+
+Il rejoue `npm ci` dans l'image Docker exacte de la CI et signale tout depot
+distant en retard. Procedure complete et configuration des deux remotes :
+`TESTING.md`, Annexe B.
+
 ## Etat du projet
 
-Etape 4 livree (enrolement cryptographique des appareils, ECDSA P-256 +
-WebCrypto + IndexedDB cote client, RF-07/RF-09 cote backend). Voir
-`ANALYSE_CODE.md` pour le detail de chaque partie livree et la prochaine
-etape prevue.
+Etape 5 livree : boucle de securite complete. L'appareil de l'etudiant signe
+le jeton de seance avec sa cle privee ECDSA P-256 non-extractable, et le
+backend verifie cette signature avec la cle publique enregistree lors de
+l'enrolement. Voir `ANALYSE_CODE.md` pour le detail de chaque partie livree,
+ce que cette chaine ferme reellement (et ce qu'elle ne ferme pas), et la
+prochaine etape prevue (geofencing, RF-13).

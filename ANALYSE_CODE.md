@@ -625,6 +625,39 @@ production (`devDependencies`). Vérifié après application : `npm install`
 puis `npm ci` à froid réussissent tous deux, les versions figées sont bien
 celles attendues dans le lockfile, et la suite de tests reste verte.
 
+### Effet de bord découvert : les scripts n'étaient pas exécutables dans Git
+
+En instrumentant la vérification pré-push, un défaut latent est apparu :
+`generate_keys.sh` et `database/03-privileges.sh` étaient enregistrés dans
+Git avec le mode `100644` (non exécutable) et non `100755`. Git versionne le
+bit d'exécution ; un fichier committé sans lui reste non exécutable après
+tout clone, sur toute machine. Conséquence : `./generate_keys.sh` — commande
+documentée dans `README.md`, `TESTING.md` **et** `.gitlab-ci.yml` — échoue
+avec *Permission denied* sur un clone frais.
+
+Cause probable : les fichiers ont été créés depuis un environnement dont le
+système de fichiers ne préserve pas les permissions POSIX (montage Windows),
+déjà identifié à l'Étape 0.1 comme une limitation de cet environnement. Le
+problème n'était jamais apparu localement, chaque poste ayant conservé le
+`chmod +x` appliqué après création — mais il apparaît sur tout clone neuf,
+donc sur **chaque exécution de CI**.
+
+Élément corroborant : la pipeline de l'école exécute `bash ./generate_keys.sh`
+là où le fichier CI de référence écrit `./generate_keys.sh`. Le préfixe
+`bash` contourne précisément l'absence de bit d'exécution — quelqu'un a
+rencontré ce blocage et l'a résolu ainsi, sans que la cause racine soit
+corrigée.
+
+Correction appliquée à tous les scripts du dépôt :
+```bash
+git update-index --chmod=+x generate_keys.sh database/03-privileges.sh \
+                            verifier-avant-push.sh outils/pre-push
+```
+(`git update-index --chmod` modifie le mode enregistré dans l'index Git même
+lorsque le système de fichiers local ne sait pas le représenter — c'est la
+seule méthode fiable depuis un environnement Windows.) Vérifié :
+`git ls-files -s '*.sh'` affiche désormais `100755` pour les quatre.
+
 ### Comment éviter cette désynchronisation à l'avenir
 
 Règle simple, à appliquer systématiquement avant tout commit touchant
