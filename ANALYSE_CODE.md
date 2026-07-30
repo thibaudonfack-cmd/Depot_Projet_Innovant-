@@ -580,6 +580,51 @@ pour la pipeline est le `package-lock.json` commité. Une fois ce fichier
 resynchronisé, le job n'a besoin d'aucun ajustement : il validera
 naturellement le nouvel arbre au prochain run.
 
+### Récidive et durcissement définitif (`overrides`)
+
+Malgré la régénération ci-dessus, la même erreur est réapparue en CI. Deux
+causes distinctes, découvertes ensemble :
+
+**Cause 1 — deux dépôts distincts.** La pipeline GitLab s'exécute sur un
+dépôt de l'établissement (`DTM-Henallux/…/Projet_innovant`), tandis que tout
+le développement était poussé sur un dépôt GitHub personnel
+(`thibaudonfack-cmd/Depot_Projet_Innovant-`). Aucun correctif n'atteignait
+donc jamais la pipeline : elle rejouait indéfiniment un `package-lock.json`
+antérieur au premier correctif. Symptôme trompeur — l'erreur « persiste »
+alors qu'elle est en réalité corrigée, mais ailleurs.
+
+**Cause 2 — dérive réelle des `peerDependencies` flottantes.** La chaîne
+fautive est entièrement transitive, optionnelle et limitée aux
+devDependencies : `jest-resolve` → `unrs-resolver` →
+`@unrs/resolver-binding-wasm32-wasi` (optionnel) → `@napi-rs/wasm-runtime`,
+qui déclare `peerDependencies: { "@emnapi/core": "^1.7.1" }`. npm installe
+automatiquement les *peer dependencies* et résout ce `^1.7.1` vers la
+**dernière version publiée au moment de la résolution**. Un lockfile généré
+un jour donné y fige `1.10.0` ; lorsque `@emnapi` publie `1.11.3`, le calcul
+d'arbre idéal effectué par `npm ci` (qui vérifie la cohérence
+`package.json` ↔ lockfile) réclame `1.11.3` et déclare le lockfile
+désynchronisé. Rien n'a changé dans le projet : c'est une publication
+**externe**, sur un paquet dont ce projet ignore jusqu'à l'existence, qui
+casse la CI. Régénérer le lockfile ne fait que repousser l'échéance jusqu'à
+la publication suivante.
+
+**Correctif définitif** : figer explicitement cette chaîne dans
+`backend/package.json`, ce qui rend la résolution déterministe quelle que
+soit la date d'exécution et quelle que soit la version de npm :
+```json
+"overrides": {
+  "@emnapi/core": "1.10.0",
+  "@emnapi/runtime": "1.10.0",
+  "@emnapi/wasi-threads": "1.2.1"
+}
+```
+Aucun risque fonctionnel : ces paquets ne servent qu'au repli WebAssembly du
+résolveur de modules de Jest, jamais exécuté quand les binaires natifs Linux
+sont disponibles (le cas en CI comme en conteneur), et jamais présent en
+production (`devDependencies`). Vérifié après application : `npm install`
+puis `npm ci` à froid réussissent tous deux, les versions figées sont bien
+celles attendues dans le lockfile, et la suite de tests reste verte.
+
 ### Comment éviter cette désynchronisation à l'avenir
 
 Règle simple, à appliquer systématiquement avant tout commit touchant
