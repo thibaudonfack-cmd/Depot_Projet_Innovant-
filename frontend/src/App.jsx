@@ -1,19 +1,26 @@
 // src/App.jsx
 //
 // OUTIL DE TEST DE DEVELOPPEMENT (test harness) -- PAS un ecran du produit
-// final. Cette page existe pour une seule raison : permettre de declencher
-// et d'observer manuellement la chaine cryptographique de l'Etape 4
-// (generation ECDSA P-256 -> IndexedDB -> POST /api/enrolements -> reponse
-// backend) sans avoir a passer par la console du navigateur.
+// final. Cette page existe pour une seule raison : declencher et observer
+// manuellement les chaines cryptographiques des Etapes 4 et 5 sans passer
+// par la console du navigateur :
+//   - Enrolement  : generation ECDSA P-256 -> IndexedDB -> POST /api/enrolements
+//   - Scan signe  : reception du jeton (WebSocket) -> signature ECDSA de
+//                   l'appareil -> POST /api/scans
 //
 // Le menu deroulant "Etudiant" en est le marqueur le plus evident : dans le
 // produit final, l'identite de l'etudiant ne sera JAMAIS choisie dans une
-// liste -- elle proviendra de la session authentifiee. Voir ANALYSE_CODE.md,
-// section Etape 4, "Role de l'interface temporaire", pour le detail du
-// parcours reel prevu et de ce qui separe cette page d'un ecran de production.
+// liste -- elle proviendra de la session authentifiee. De meme, un etudiant
+// ne collera jamais un JWT a la main : il scannera un QR code avec la camera
+// de son telephone. Voir ANALYSE_CODE.md, Etape 4, section "Role de
+// l'interface temporaire", pour le detail du parcours reel prevu.
 
-import { useState } from 'react';
-import { generateAndStoreKeyPair, exportPublicKey } from './services/CryptoService';
+import { useEffect, useRef, useState } from 'react';
+import {
+  generateAndStoreKeyPair,
+  exportPublicKey,
+  signData,
+} from './services/CryptoService';
 
 // UUID fixes du jeu de donnees de demonstration (database/02-seed.sql) --
 // deja utilises partout ailleurs dans ce projet (TESTING.md, scan.test.js)
@@ -25,44 +32,85 @@ const ETUDIANTS_DEMO = [
   { id: '33333333-3333-3333-3333-333333333334', nom: 'Driss El Amrani' },
 ];
 
+const UF_DEMO = '11111111-1111-1111-1111-111111111111';
+const SALLE_DEMO = '22222222-2222-2222-2222-222222222222';
+
 function deviceInfoParDefaut() {
-  // Description sommaire de l'appareil/navigateur courant, uniquement a
-  // titre indicatif pour le formateur (jamais utilisee comme identifiant de
-  // securite -- seule la cle publique ECDSA joue ce role).
   const ua = navigator.userAgent || '';
   const navigateur = ['Firefox', 'Edg', 'Chrome', 'Safari'].find((n) => ua.includes(n)) || 'Navigateur inconnu';
   return `${navigator.platform || 'Appareil'} - ${navigateur}`;
 }
 
-// Classes partagees par les deux champs de saisie -- extraites dans une
-// constante plutot que dupliquees : un seul endroit a modifier pour garder
-// les champs visuellement coherents. focus-visible (et non focus) : l'anneau
-// de focus n'apparait qu'au clavier, pas au clic souris -- accessibilite
-// sans bruit visuel.
 const CLASSES_CHAMP =
   'w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 ' +
   'shadow-sm transition-colors placeholder:text-slate-400 ' +
   'focus-visible:border-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/10';
 
+const CLASSES_BOUTON_PRIMAIRE =
+  'w-full rounded-md bg-slate-900 px-4 py-2.5 text-sm font-medium text-white transition-colors ' +
+  'hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 ' +
+  'focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-400';
+
+const CLASSES_BOUTON_SECONDAIRE =
+  'w-full rounded-md border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-900 ' +
+  'transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 ' +
+  'focus-visible:ring-slate-900 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:text-slate-400';
+
+/** Bloc de resultat reutilise par les deux sections (succes ou erreur). */
+function BlocResultat({ statut, resultat, titreSucces }) {
+  if (statut !== 'succes' && statut !== 'erreur') return null;
+
+  const succes = statut === 'succes';
+  return (
+    <div
+      className={`mt-4 rounded-lg border p-4 ${
+        succes ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'
+      }`}
+    >
+      <h3 className={`text-sm font-semibold ${succes ? 'text-emerald-900' : 'text-red-900'}`}>
+        {succes ? titreSucces : 'Échec'}
+      </h3>
+      <pre
+        className={`mt-2 overflow-x-auto font-mono text-xs leading-relaxed break-words whitespace-pre-wrap ${
+          succes ? 'text-emerald-950' : 'text-red-950'
+        }`}
+      >
+        {succes ? JSON.stringify(resultat, null, 2) : resultat.message}
+      </pre>
+    </div>
+  );
+}
+
 function App() {
   const [etudiantId, setEtudiantId] = useState(ETUDIANTS_DEMO[0].id);
+
+  // --- Section 1 : enrolement ---
   const [deviceInfo, setDeviceInfo] = useState(deviceInfoParDefaut);
-  const [statut, setStatut] = useState('repos'); // repos | en-cours | succes | erreur
-  const [resultat, setResultat] = useState(null);
+  const [statutEnrolement, setStatutEnrolement] = useState('repos');
+  const [resultatEnrolement, setResultatEnrolement] = useState(null);
+
+  // --- Section 2 : simulation de scan ---
+  const [seanceId, setSeanceId] = useState('');
+  const [jeton, setJeton] = useState('');
+  const [statutSeance, setStatutSeance] = useState('repos');
+  const [statutScan, setStatutScan] = useState('repos');
+  const [resultatScan, setResultatScan] = useState(null);
+  const [wsConnecte, setWsConnecte] = useState(false);
+  const wsRef = useRef(null);
+
+  // Fermeture de la connexion WebSocket au demontage du composant : sans ce
+  // nettoyage, la socket resterait ouverte et le backend continuerait a
+  // pousser un jeton toutes les 20s dans le vide (cf. qrBroadcaster.js, meme
+  // preoccupation de fuite cote serveur).
+  useEffect(() => () => wsRef.current?.close(), []);
 
   async function handleEnrolement() {
-    setStatut('en-cours');
-    setResultat(null);
-
+    setStatutEnrolement('en-cours');
+    setResultatEnrolement(null);
     try {
-      // 1. Generation locale (cle privee non-extractable, jamais transmise)
       await generateAndStoreKeyPair();
-      // 2. Export de la SEULE cle publique, au format PEM
       const clePublique = await exportPublicKey();
 
-      // 3. Envoi au backend -- chemin relatif : passe par Caddy (meme
-      // origine que le frontend), qui route /api/* vers le service backend.
-      // Aucune configuration CORS necessaire : meme origine de bout en bout.
       const reponse = await fetch('/api/enrolements', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -72,73 +120,155 @@ function App() {
           device_info: deviceInfo,
         }),
       });
-
       const corps = await reponse.json();
+      if (!reponse.ok) throw new Error(corps.message || `Erreur HTTP ${reponse.status}`);
 
+      setStatutEnrolement('succes');
+      setResultatEnrolement(corps);
+    } catch (erreur) {
+      setStatutEnrolement('erreur');
+      setResultatEnrolement({ message: erreur.message });
+    }
+  }
+
+  /** Cree une seance de test puis s'y abonne en WebSocket pour recevoir les jetons. */
+  async function handleOuvrirSeance() {
+    setStatutSeance('en-cours');
+    setJeton('');
+    wsRef.current?.close();
+
+    try {
+      const reponse = await fetch('/api/seances', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uf_id: UF_DEMO, salle_id: SALLE_DEMO }),
+      });
+      const corps = await reponse.json();
+      if (!reponse.ok) throw new Error(corps.message || `Erreur HTTP ${reponse.status}`);
+
+      setSeanceId(corps.seance_id);
+
+      // wss:// (et non ws://) : la page est servie en HTTPS par Caddy, un
+      // WebSocket non chiffre depuis une origine securisee serait bloque par
+      // le navigateur (mixed content). location.host conserve le port courant.
+      const ws = new WebSocket(`wss://${window.location.host}/api/ws/seances/${corps.seance_id}`);
+      wsRef.current = ws;
+
+      ws.onopen = () => { setWsConnecte(true); setStatutSeance('succes'); };
+      ws.onmessage = (evenement) => {
+        const message = JSON.parse(evenement.data);
+        // Chaque message remplace le jeton affiche : c'est exactement ce que
+        // voit un etudiant devant l'ecran du formateur, ou le QR code est
+        // regenere toutes les 20 secondes (RF-05).
+        if (message.type === 'token') setJeton(message.token);
+      };
+      ws.onerror = () => {
+        setWsConnecte(false);
+        setStatutSeance('erreur');
+      };
+      ws.onclose = () => setWsConnecte(false);
+    } catch (erreur) {
+      setStatutSeance('erreur');
+      setSeanceId('');
+      setResultatScan({ message: erreur.message });
+    }
+  }
+
+  async function handleSignerEtEnvoyer() {
+    setStatutScan('en-cours');
+    setResultatScan(null);
+    try {
+      // La signature porte sur le JETON COMPLET, exactement tel qu'il sera
+      // transmis -- le backend re-verifie sur cette meme chaine (cf.
+      // deviceSignatureService.js). Toute divergence (espace en trop, jeton
+      // tronque) invaliderait la signature.
+      const signature = await signData(jeton.trim());
+
+      const reponse = await fetch('/api/scans', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          etudiant_id: etudiantId,
+          jeton: jeton.trim(),
+          signature_appareil: signature,
+        }),
+      });
+      const corps = await reponse.json();
       if (!reponse.ok) {
-        throw new Error(corps.message || `Erreur HTTP ${reponse.status}`);
+        throw new Error(`[${corps.code || reponse.status}] ${corps.message || 'Erreur inconnue'}`);
       }
 
-      setStatut('succes');
-      setResultat(corps);
+      setStatutScan('succes');
+      setResultatScan(corps);
     } catch (erreur) {
-      setStatut('erreur');
-      setResultat({ message: erreur.message });
+      setStatutScan('erreur');
+      setResultatScan({ message: erreur.message });
     }
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 py-12 px-4">
+    <div className="min-h-screen bg-slate-50 px-4 py-12">
       <main className="mx-auto w-full max-w-xl">
-        {/* Bandeau d'avertissement : rend visible A L'ECRAN, et pas seulement
-            dans les commentaires du code, le fait que cette page est un outil
-            de test. role="note" plutot que role="alert" : l'information est
-            contextuelle et permanente, elle ne doit pas interrompre le
-            lecteur d'ecran a chaque rendu. */}
         <div
           role="note"
           className="mb-8 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
         >
           <span className="font-semibold">Outil de test — développement.</span>{' '}
-          Cette page sert à valider manuellement la chaîne cryptographique
-          d'enrôlement. Elle ne fait pas partie du produit final : l'identité
-          de l'étudiant y proviendra de la session authentifiée, jamais d'une
-          liste déroulante.
+          Cette page sert à valider manuellement les chaînes cryptographiques
+          d'enrôlement et de scan. Elle ne fait pas partie du produit final :
+          l'identité de l'étudiant y proviendra de la session authentifiée, et
+          le jeton d'un QR code scanné par la caméra — jamais d'une liste
+          déroulante ni d'un copier-coller.
         </div>
 
         <header className="mb-8">
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-            Enrôlement d'appareil
+            Présence numérique — banc de test
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-slate-600">
-            Génère une paire de clés ECDSA P-256 dans ce navigateur. La clé
-            privée est non-extractable et reste dans IndexedDB ; seule la clé
-            publique est transmise au serveur.
+            Enrôlement de l'appareil (clé ECDSA P-256 non-extractable), puis
+            simulation d'un scan signé par cette clé.
           </p>
         </header>
 
-        <section className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="space-y-5">
-            <div>
-              <label htmlFor="etudiant" className="block text-sm font-medium text-slate-900">
-                Étudiant
-              </label>
-              <p id="etudiant-aide" className="mt-1 text-xs text-slate-500">
-                Jeu de données de démonstration (<code className="font-mono">02-seed.sql</code>).
-              </p>
-              <select
-                id="etudiant"
-                aria-describedby="etudiant-aide"
-                value={etudiantId}
-                onChange={(e) => setEtudiantId(e.target.value)}
-                className={`mt-2 ${CLASSES_CHAMP}`}
-              >
-                {ETUDIANTS_DEMO.map((etudiant) => (
-                  <option key={etudiant.id} value={etudiant.id}>{etudiant.nom}</option>
-                ))}
-              </select>
-            </div>
+        {/* Selection d'etudiant : partagee par les deux sections, donc
+            remontee au-dessus d'elles plutot que dupliquee. */}
+        <div className="mb-6 rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+          <label htmlFor="etudiant" className="block text-sm font-medium text-slate-900">
+            Étudiant
+          </label>
+          <p id="etudiant-aide" className="mt-1 text-xs text-slate-500">
+            Jeu de données de démonstration (<code className="font-mono">02-seed.sql</code>).
+            S'applique à l'enrôlement comme au scan.
+          </p>
+          <select
+            id="etudiant"
+            aria-describedby="etudiant-aide"
+            value={etudiantId}
+            onChange={(e) => setEtudiantId(e.target.value)}
+            className={`mt-2 ${CLASSES_CHAMP}`}
+          >
+            {ETUDIANTS_DEMO.map((etudiant) => (
+              <option key={etudiant.id} value={etudiant.id}>{etudiant.nom}</option>
+            ))}
+          </select>
+        </div>
 
+        {/* ---------- Section 1 : enrolement ---------- */}
+        <section
+          aria-labelledby="titre-enrolement"
+          className="mb-6 rounded-lg border border-slate-200 bg-white p-6 shadow-sm"
+        >
+          <h2 id="titre-enrolement" className="text-base font-semibold text-slate-900">
+            1 · Enrôlement de l'appareil
+          </h2>
+          <p className="mt-1 text-sm leading-relaxed text-slate-600">
+            Génère une paire ECDSA P-256 dans ce navigateur. La clé privée est
+            non-extractable et reste dans IndexedDB ; seule la clé publique est
+            transmise au serveur.
+          </p>
+
+          <div className="mt-5 space-y-5">
             <div>
               <label htmlFor="device" className="block text-sm font-medium text-slate-900">
                 Description de l'appareil
@@ -159,41 +289,102 @@ function App() {
             <button
               type="button"
               onClick={handleEnrolement}
-              disabled={statut === 'en-cours'}
-              className="w-full rounded-md bg-slate-900 px-4 py-2.5 text-sm font-medium text-white
-                         transition-colors hover:bg-slate-800
-                         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2
-                         disabled:cursor-not-allowed disabled:bg-slate-400"
+              disabled={statutEnrolement === 'en-cours'}
+              className={CLASSES_BOUTON_PRIMAIRE}
             >
-              {statut === 'en-cours' ? 'Enrôlement en cours…' : "Générer une clé et s'enrôler"}
+              {statutEnrolement === 'en-cours' ? 'Enrôlement en cours…' : "Générer une clé et s'enrôler"}
             </button>
+          </div>
+
+          <div aria-live="polite">
+            <BlocResultat
+              statut={statutEnrolement}
+              resultat={resultatEnrolement}
+              titreSucces="Enrôlement réussi"
+            />
           </div>
         </section>
 
-        {/* aria-live="polite" : le resultat apparait apres une action
-            asynchrone -- sans cette annonce, un utilisateur de lecteur
-            d'ecran n'aurait aucun moyen de savoir que la reponse est
-            arrivee. "polite" et non "assertive" : l'annonce attend une
-            pause naturelle plutot que de couper la lecture en cours. */}
-        <div aria-live="polite" className="mt-6">
-          {statut === 'succes' && (
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
-              <h2 className="text-sm font-semibold text-emerald-900">Enrôlement réussi</h2>
-              <pre className="mt-2 overflow-x-auto font-mono text-xs leading-relaxed text-emerald-950">
-                {JSON.stringify(resultat, null, 2)}
-              </pre>
-            </div>
-          )}
+        {/* ---------- Section 2 : simulation de scan ---------- */}
+        <section
+          aria-labelledby="titre-scan"
+          className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm"
+        >
+          <h2 id="titre-scan" className="text-base font-semibold text-slate-900">
+            2 · Simulation de scan
+          </h2>
+          <p className="mt-1 text-sm leading-relaxed text-slate-600">
+            Ouvre une séance de test, reçoit ses jetons en temps réel
+            (WebSocket, rotation toutes les 20 s), puis signe le jeton courant
+            avec la clé privée de cet appareil avant de l'envoyer.
+          </p>
 
-          {statut === 'erreur' && (
-            <div className="rounded-lg border border-red-200 bg-red-50 p-4">
-              <h2 className="text-sm font-semibold text-red-900">Échec de l'enrôlement</h2>
-              <p className="mt-2 font-mono text-xs leading-relaxed break-words text-red-950">
-                {resultat.message}
-              </p>
+          <div className="mt-5 space-y-5">
+            <div>
+              <button
+                type="button"
+                onClick={handleOuvrirSeance}
+                disabled={statutSeance === 'en-cours'}
+                className={CLASSES_BOUTON_SECONDAIRE}
+              >
+                {statutSeance === 'en-cours'
+                  ? 'Ouverture…'
+                  : seanceId
+                    ? 'Ouvrir une nouvelle séance de test'
+                    : 'Ouvrir une séance de test'}
+              </button>
+
+              {seanceId && (
+                <p className="mt-2 flex items-center gap-2 text-xs text-slate-500">
+                  {/* Pastille d'etat : doublee d'un texte explicite, jamais
+                      la couleur seule -- une information transmise uniquement
+                      par la couleur serait inaccessible (WCAG 1.4.1). */}
+                  <span
+                    aria-hidden="true"
+                    className={`inline-block size-2 rounded-full ${wsConnecte ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                  />
+                  {wsConnecte ? 'WebSocket connecté' : 'WebSocket déconnecté'} — séance{' '}
+                  <code className="font-mono">{seanceId}</code>
+                </p>
+              )}
             </div>
-          )}
-        </div>
+
+            <div>
+              <label htmlFor="jeton" className="block text-sm font-medium text-slate-900">
+                Jeton de séance (JWT)
+              </label>
+              <p id="jeton-aide" className="mt-1 text-xs text-slate-500">
+                Rempli automatiquement par le WebSocket, ou collé manuellement.
+              </p>
+              <textarea
+                id="jeton"
+                rows={4}
+                aria-describedby="jeton-aide"
+                value={jeton}
+                onChange={(e) => setJeton(e.target.value)}
+                placeholder="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9…"
+                className={`mt-2 resize-y font-mono text-xs break-all ${CLASSES_CHAMP}`}
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={handleSignerEtEnvoyer}
+              disabled={statutScan === 'en-cours' || jeton.trim().length === 0}
+              className={CLASSES_BOUTON_PRIMAIRE}
+            >
+              {statutScan === 'en-cours' ? 'Signature et envoi…' : 'Signer et envoyer'}
+            </button>
+          </div>
+
+          <div aria-live="polite">
+            <BlocResultat
+              statut={statutScan}
+              resultat={resultatScan}
+              titreSucces="Présence validée"
+            />
+          </div>
+        </section>
       </main>
     </div>
   );

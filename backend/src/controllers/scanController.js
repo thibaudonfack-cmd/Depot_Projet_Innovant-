@@ -11,15 +11,34 @@
 // justifie dans ANALYSE_CODE.md, section Etape 3, plutot que suivi
 // silencieusement ou laisse incoherent avec /api/seances.
 //
-// Cascade STRICTE imposee par la mission :
-//   a) Signature RS256 (verificationService.js, cle PUBLIQUE)
-//   b) Expiration (exp, TTL 25s)                 -- ferme V1 (partage differe)
-//   c) Unicite du nonce (jti, etudiant_id)        -- ferme V4 (rejeu crypto)
-//   d) Unicite de la presence (seance_id, etudiant_id) -- regle METIER
+// Cascade STRICTE (Etapes 3 puis 5) :
+//   a) Signature RS256 du JETON (verificationService.js, cle publique du
+//      SERVEUR)                                   -- le jeton vient bien de nous
+//   b) Expiration (exp, TTL 25s)                  -- ferme V1 (partage differe)
+//   c) Signature ECDSA de l'APPAREIL (deviceSignatureService.js, cle
+//      publique de l'APPAREIL lue en base)        -- ferme l'usurpation et
+//      le relais par un tiers non enrole (Etape 5, RF-07 complet)
+//   d) Unicite du nonce (jti, etudiant_id)        -- ferme V4 (rejeu crypto)
+//   e) Unicite de la presence (seance_id, etudiant_id) -- regle METIER
 //      (un etudiant, une presence par seance, meme avec plusieurs jetons
 //      DIFFERENTS tous individuellement valides -- cf. ANALYSE_CODE.md,
 //      section Etape 3, "Regle metier d'unicite de presence" pour la
-//      distinction complete avec c).
+//      distinction complete avec d).
+//
+// ORDRE : ECART ASSUME PAR RAPPORT A L'ENONCE DE L'ETAPE 5.
+// La mission demandait d'ajouter la verification de signature d'appareil
+// "juste apres avoir valide l'authenticite du JWT et son expiration/nonce".
+// Prise au pied de la lettre, cette formulation placerait c) APRES d)/e) --
+// c'est-a-dire APRES l'INSERT, puisque le controle du nonce EST l'INSERT
+// (cf. plus bas). Ce serait une faille : un jeton valide presente SANS
+// signature d'appareil valide aurait alors deja consomme le nonce et cree
+// une ligne de presence en base avant d'etre rejete. L'attaquant echouerait
+// a se faire pointer, mais aurait au passage detruit la possibilite pour le
+// VRAI etudiant d'utiliser ce meme jeton (nonce consomme) -- un deni de
+// service trivial. La verification de signature est donc placee AVANT toute
+// ecriture, conformement au principe applique depuis le debut du projet :
+// aucun effet de bord persistant tant que toutes les validations ne sont
+// pas franchies.
 //
 // c) ET d) sont TOUTES DEUX implementees en laissant l'INSERT echouer sur
 // la contrainte UNIQUE correspondante de la table scans (01-schema.sql),
@@ -46,27 +65,44 @@
 const crypto = require('crypto');
 const pool = require('../config/db');
 const { verifierJetonScan, TokenInvalideError } = require('../services/verificationService');
+const {
+  verifierSignatureAppareil,
+  SignatureAppareilInvalideError,
+} = require('../services/deviceSignatureService');
 
 /**
  * POST /api/scans
- * Corps attendu : { jeton: string, etudiant_id: string }
+ * Corps attendu : { jeton: string, etudiant_id: string, signature_appareil: string }
  *
- * Limitation connue et assumee a ce stade (documentee dans ANALYSE_CODE.md) :
- * etudiant_id est fourni tel quel par le client, sans authentification de
- * l'appareil qui l'envoie -- l'enrolement cryptographique par appareil
- * (RF-07) est explicitement hors perimetre de cette Etape 3, qui ferme
- * uniquement V1 et V4 (cf. mission). La cascade actuelle prouve "ce jeton
- * est authentique, frais, et pas encore consomme par cet etudiant", pas
- * encore "presente par l'appareil enrole de cet etudiant" -- cette derniere
- * garantie (et la fermeture du vecteur associe) arrivera avec RF-07.
+ * signature_appareil est OBLIGATOIRE depuis l'Etape 5 : c'est la preuve que
+ * le jeton est presente par l'appareil enrole de l'etudiant. La rendre
+ * facultative (accepter un scan sans signature quand aucun appareil n'est
+ * enrole, par exemple) aurait offert un contournement trivial de toute la
+ * chaine -- il aurait suffi de ne jamais s'enroler pour echapper au controle.
+ *
+ * Limitation connue et assumee, INCHANGEE depuis l'Etape 3 : etudiant_id est
+ * toujours fourni par le client, pas extrait d'une session authentifiee
+ * (l'authentification n'existe pas encore dans le prototype). L'Etape 5 ne
+ * corrige PAS ce point -- elle prouve "cette requete vient de l'appareil dont
+ * la cle publique est enregistree pour cet etudiant_id", pas "cette requete
+ * vient de cet etudiant". La difference est fine mais reelle : un tiers qui
+ * enrolerait son propre appareil sous l'identifiant d'un autre etudiant (rien
+ * ne l'en empeche aujourd'hui, cf. enrolementController.js) passerait cette
+ * verification. Fermer ce dernier angle mort suppose l'authentification, et
+ * une preuve de possession lors de l'enrolement -- cf. ANALYSE_CODE.md,
+ * Etape 4, section "Role de l'interface temporaire", et Etape 5.
  */
 async function scannerJeton(req, res) {
-  const { jeton, etudiant_id: etudiantId } = req.body || {};
+  const {
+    jeton,
+    etudiant_id: etudiantId,
+    signature_appareil: signatureAppareil,
+  } = req.body || {};
 
-  if (!jeton || !etudiantId) {
+  if (!jeton || !etudiantId || !signatureAppareil) {
     return res.status(400).json({
       status: 'error',
-      message: 'jeton et etudiant_id sont obligatoires.',
+      message: 'jeton, etudiant_id et signature_appareil sont obligatoires.',
     });
   }
 
@@ -103,9 +139,74 @@ async function scannerJeton(req, res) {
   }
 
   const { sessionId, jti } = decoded;
+
+  // --- c) : signature ECDSA de l'appareil enrole. AVANT toute ecriture
+  // (voir l'en-tete de ce fichier pour l'ecart assume sur l'ordre). ---
+  let appareil;
+  try {
+    const [appareils] = await pool.query(
+      `SELECT cle_publique FROM appareils_enroles
+       WHERE etudiant_id = ? AND statut = 'actif'
+       LIMIT 1`,
+      [etudiantId]
+    );
+    appareil = appareils[0];
+  } catch (error) {
+    console.error('[scanController] Erreur lors de la lecture de l\'appareil enrole :', error.message);
+    return res.status(500).json({
+      status: 'error',
+      message: "Erreur serveur lors de la verification de l'appareil.",
+    });
+  }
+
+  if (!appareil) {
+    // Aucun appareil actif pour cet etudiant : le scan ne peut pas etre
+    // verifie, donc il est refuse. 403 (et non 401) : la requete est
+    // parfaitement formee et le jeton authentique -- c'est l'ETAT du compte
+    // (aucun appareil enrole) qui interdit l'operation, pas un defaut
+    // d'authentification de la requete elle-meme.
+    return res.status(403).json({
+      status: 'error',
+      code: 'AUCUN_APPAREIL_ENROLE',
+      message: "Aucun appareil actif n'est enrole pour cet etudiant : enrolez cet appareil avant de scanner.",
+    });
+  }
+
+  try {
+    // La chaine signee est le JETON COMPLET, exactement tel qu'il a ete
+    // recu -- pas un condense ni un sous-ensemble de ses champs. Consequence
+    // volontaire : la signature est indissociable de CE jeton precis (donc
+    // de ce jti, de cette seance et de cette fenetre de 25 secondes). Une
+    // signature capturee sur un scan legitime ne peut pas etre rejouee avec
+    // un autre jeton : elle ne le validerait pas.
+    verifierSignatureAppareil(jeton, signatureAppareil, appareil.cle_publique);
+  } catch (err) {
+    if (err instanceof SignatureAppareilInvalideError) {
+      if (err.code === 'CLE_ILLISIBLE') {
+        // Donnee corrompue cote serveur, pas une fraude du client -- ne pas
+        // l'imputer a l'utilisateur par un 401 trompeur.
+        console.error('[scanController] Cle publique d\'appareil illisible :', err.message);
+        return res.status(500).json({
+          status: 'error',
+          message: "La cle publique enregistree pour cet appareil est illisible : re-enrolez l'appareil.",
+        });
+      }
+      return res.status(401).json({
+        status: 'error',
+        code: 'SIGNATURE_APPAREIL_INVALIDE',
+        message: "La signature de l'appareil est invalide : ce jeton n'a pas ete signe par l'appareil enrole de cet etudiant.",
+      });
+    }
+    console.error('[scanController] Erreur inattendue lors de la verification de signature :', err.message);
+    return res.status(500).json({
+      status: 'error',
+      message: "Erreur serveur lors de la verification de la signature de l'appareil.",
+    });
+  }
+
   const scanId = crypto.randomUUID();
 
-  // --- c) et d) : unicite du nonce ET unicite de la presence, chacune
+  // --- d) et e) : unicite du nonce ET unicite de la presence, chacune
   // appliquee par sa propre contrainte UNIQUE sur la table scans -- voir
   // l'en-tete de ce fichier pour la justification complete du choix
   // "laisser l'INSERT echouer" plutot qu'un SELECT prealable, dans les deux cas.

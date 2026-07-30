@@ -1323,12 +1323,219 @@ les sources et purge le reste. Le serveur Vite en mode développement sert
 
 ---
 
+# Étape 5 — Signature par l'appareil et boucle de vérification (RF-07 complet)
+
+## La cascade complète, et les deux paires de clés
+
+La validation d'un scan traverse désormais cinq contrôles, dans cet ordre
+strict :
+
+```
+POST /api/scans   { jeton, etudiant_id, signature_appareil }
+        │
+   a) Signature RS256 du JETON  (clé publique du SERVEUR)   ─ échec ─▶ 401 JETON_INVALIDE
+        │ ok
+   b) Expiration (exp, 25 s)                                ─ échec ─▶ 401 JETON_EXPIRE      (V1)
+        │ ok
+   c) Signature ECDSA de l'APPAREIL (clé publique en base)  ─ échec ─▶ 401 SIGNATURE_APPAREIL_INVALIDE
+        │                                                   ─ absent ▶ 403 AUCUN_APPAREIL_ENROLE
+        │ ok
+   d) INSERT → UNIQUE(jti, etudiant_id)                     ─ échec ─▶ 409 REJEU_DETECTE     (V4)
+   e) INSERT → UNIQUE(seance_id, etudiant_id)               ─ échec ─▶ 409 DOUBLE_SCAN
+        │ ok
+      201 { resultat: 'valide' }
+```
+
+**Deux paires de clés, deux frontières de confiance qu'il ne faut jamais
+confondre** — c'est le point central de cette étape :
+
+| | Paire RS256 (Étape 2) | Paire ECDSA P-256 (Étapes 4-5) |
+|---|---|---|
+| Clé privée détenue par | le **serveur** (`keys/private.pem`) | l'**appareil de l'étudiant** (IndexedDB, non-extractable) |
+| Clé publique connue de | tous (vérificateurs tiers) | le **serveur** (`appareils_enroles.cle_publique`) |
+| Répond à la question | « ce jeton vient-il bien de nous, et est-il frais ? » | « ce jeton est-il présenté par l'appareil enrôlé de cet étudiant ? » |
+| Vérifiée par | `verificationService.js` | `deviceSignatureService.js` |
+
+Les deux sens sont **inverses** : dans le premier, le serveur signe et le
+client (ou un tiers) pourrait vérifier ; dans le second, le client signe et
+le serveur vérifie. C'est cette inversion qui ferme la boucle — chaque partie
+prouve à l'autre quelque chose que l'autre ne peut pas fabriquer seule.
+
+## Ce que la combinaison ferme réellement
+
+**Sans c) (état à la fin de l'Étape 3)** : un jeton valide capturé pendant sa
+fenêtre de 25 secondes — photographié depuis le fond de la salle, relayé par
+messagerie, ou intercepté — pouvait être soumis par n'importe qui, depuis
+n'importe quel appareil, au nom de n'importe quel `etudiant_id`. Les
+contrôles a) et b) ne regardent que le jeton lui-même ; ils ne peuvent pas
+distinguer l'étudiant présent du complice resté chez lui.
+
+**Avec c)** : soumettre le jeton exige de produire une signature ECDSA valide
+sur ce jeton précis. Cette signature ne peut être produite que par la clé
+privée de l'appareil enrôlé — clé qui, par construction (`extractable:
+false`, Étape 4), ne peut **pas** être copiée, exportée, ni transmise. Un
+complice à distance ne peut donc plus rien faire du jeton : il lui manque la
+seule chose qui n'est pas copiable dans toute la chaîne.
+
+**Non-rejouabilité de la signature elle-même** : la signature porte sur le
+**jeton complet** — pas sur un condensé ni un sous-ensemble de ses champs.
+Elle est donc indissociable de ce `jti`, de cette séance et de cette fenêtre
+de 25 secondes. Une signature capturée sur un scan légitime ne peut pas être
+réutilisée avec un autre jeton : elle ne le validerait pas. Vérifié par un
+test dédié (« une signature valide pour UN jeton ne valide PAS un AUTRE
+jeton »).
+
+### Ce que la combinaison NE ferme PAS (honnêteté requise pour la soutenance)
+
+1. **Le relais en temps réel par un appareil enrôlé.** Un étudiant présent
+   peut transmettre le jeton à un absent **dont l'appareil est déjà enrôlé**,
+   qui le signe lui-même avec sa propre clé et le soumet dans les 25 secondes.
+   Chaque signature est valide, chaque `etudiant_id` correspond à son propre
+   appareil : la cryptographie est parfaitement satisfaite. Seul le
+   **géofencing** (RF-13, non implémenté) peut trancher ce cas, en exigeant
+   que la position du soumetteur soit dans le polygone de la salle. C'est le
+   vecteur résiduel principal, et il est structurel : aucune signature ne peut
+   prouver une position physique.
+2. **L'usurpation à l'enrôlement.** `etudiant_id` reste fourni par le client,
+   à l'enrôlement comme au scan (l'authentification n'existe pas encore).
+   Rien n'empêche aujourd'hui quelqu'un d'enrôler son propre appareil sous
+   l'identifiant d'un autre étudiant, puis de scanner « pour lui » en toute
+   validité cryptographique. L'Étape 5 prouve *« cette requête vient de
+   l'appareil dont la clé publique est enregistrée pour cet `etudiant_id` »*,
+   **pas** *« cette requête vient de cet étudiant »*. Fermer ce point exige
+   l'authentification + une preuve de possession à l'enrôlement (cf. Étape 4,
+   section « Rôle de l'interface temporaire »).
+3. **Un appareil physiquement compromis** (téléphone déverrouillé prêté sur
+   place) reste hors de portée de tout mécanisme logiciel.
+
+## Le piège d'interopérabilité : `dsaEncoding: 'ieee-p1363'`
+
+**Point le plus important de cette étape sur le plan technique**, et le plus
+facile à manquer. La mission demandait d'utiliser
+`crypto.createVerify('SHA256')`. Utilisé tel quel, **ce code rejette
+silencieusement toutes les signatures légitimes du frontend**.
+
+Raison : pour ECDSA, `crypto.subtle.sign()` (WebCrypto, navigateur) produit
+une signature au format **brut `r||s`** — exactement 64 octets pour P-256,
+format dit *IEEE P1363*. Node.js, lui, attend par **défaut** le format
+**DER/ASN.1** (~70-72 octets, longueur variable). Les deux encodent la même
+signature mathématique, mais ne sont pas interchangeables octet pour octet.
+
+Le mode d'échec est particulièrement pernicieux : `verify()` ne lève
+**aucune exception**, il retourne simplement `false`. Symptôme observé : « la
+signature est toujours invalide », alors que les clés sont les bonnes, que le
+code paraît correct, et qu'aucune erreur n'apparaît nulle part.
+
+Mesuré avant d'écrire une ligne de `deviceSignatureService.js` (Node +
+WebCrypto, en conditions réelles) :
+
+```
+Signature WebCrypto (r||s brut)          : 64 octets
+Signature Node crypto.createSign (DER)   : 71 octets
+Vérification WebCrypto SANS dsaEncoding  : REJETÉE  ← le piège
+Vérification WebCrypto AVEC ieee-p1363   : VALIDE
+```
+
+D'où, dans `deviceSignatureService.js` :
+```js
+verificateur.verify({ key: clePublique, dsaEncoding: 'ieee-p1363' }, signature);
+```
+Cette option n'est pas un détail de configuration : c'est **la** condition
+pour que les deux moitiés du système se comprennent.
+
+Conséquence directe sur les **tests** : `scan.test.js` génère ses paires via
+`crypto.webcrypto.subtle` (l'API du navigateur, disponible aussi dans Node),
+et **non** via `crypto.generateKeyPairSync` + `createSign`. Ce dernier
+produirait des signatures DER — que le backend rejette, à juste titre. Des
+tests écrits ainsi auraient validé un format que le vrai client n'envoie
+jamais, tout en paraissant verts.
+
+## Écart assumé : l'ordre de la cascade
+
+La mission demandait d'insérer la vérification de signature « juste après
+avoir validé l'authenticité du JWT et son expiration/nonce ». Prise au pied
+de la lettre, cette formulation place c) **après** d)/e) — c'est-à-dire
+**après l'`INSERT`**, puisque le contrôle du nonce *est* l'`INSERT` (choix
+architectural de l'Étape 3).
+
+Ce serait une faille exploitable : un jeton valide soumis **sans** signature
+d'appareil valide aurait alors déjà consommé le nonce et créé une ligne de
+présence avant d'être rejeté. L'attaquant ne se ferait pas pointer — mais il
+aurait détruit la possibilité, pour le vrai étudiant, d'utiliser ce même
+jeton (nonce consommé) : un déni de service trivial, réalisable en boucle sur
+chaque jeton diffusé. La vérification est donc placée **avant toute
+écriture**, conformément au principe appliqué depuis le début du projet :
+aucun effet de bord persistant tant que toutes les validations ne sont pas
+franchies.
+
+## Choix de codes HTTP : 403 pour « aucun appareil enrôlé »
+
+`AUCUN_APPAREIL_ENROLE` renvoie **403**, pas 401. La distinction est
+sémantique et volontaire : la requête est parfaitement formée, le jeton est
+authentique et frais — c'est l'**état du compte** (aucun appareil enrôlé) qui
+interdit l'opération, pas un défaut d'authentification de la requête. Un 401
+suggérerait à tort au client de « se réauthentifier » ; le 403 l'oriente vers
+la bonne action : enrôler l'appareil.
+
+De même, une **clé publique illisible en base** (PEM corrompu) renvoie **500**
+et non 401 : c'est une donnée corrompue côté serveur, pas une fraude du
+client. L'imputer à l'utilisateur par un 401 masquerait un vrai problème
+d'intégrité. Ce cas est distingué explicitement par le code d'erreur
+`CLE_ILLISIBLE` de `SignatureAppareilInvalideError`.
+
+## `signature_appareil` est obligatoire, sans exception
+
+Aucun mode dégradé n'est prévu : une requête sans `signature_appareil` est
+rejetée en 400, et un étudiant sans appareil enrôlé en 403. Rendre ce champ
+facultatif — par exemple « accepter le scan si aucun appareil n'est enrôlé »,
+ce qui aurait pu sembler une commodité de transition — offrirait un
+contournement trivial de toute la chaîne : il suffirait de **ne jamais
+s'enrôler** pour échapper au contrôle. C'est exactement le type de repli
+« pratique » qui vide une mesure de sécurité de sa substance.
+
+## Vérifications effectuées
+
+**Interopérabilité réelle frontend ↔ backend**, en important les **vrais**
+fichiers des deux côtés (`CryptoService.js` du frontend via `fake-indexeddb`,
+`deviceSignatureService.js` du backend), sans réécrire quoi que ce soit pour
+l'occasion : signature Base64 de 64 octets confirmée (format brut, pas DER) ;
+signature acceptée par le backend ; signature rejetée pour un autre jeton ;
+signature d'un autre appareil rejetée ; clé malformée distinguée
+(`CLE_ILLISIBLE`) d'une signature invalide ; signature toujours possible
+après relecture de la clé depuis IndexedDB (donc après un rechargement de
+page).
+
+**Suite backend** : **23/23 tests verts** (7 tokenService + 2 health + 10
+scan + 4 enrolement) contre un vrai MySQL 8.0.45 éphémère, schéma + seed +
+privilèges rejoués tels quels. Les 4 nouveaux tests d'Étape 5 couvrent :
+signature d'un autre appareil, signature syntaxiquement invalide, signature
+non rejouable sur un autre jeton, étudiant sans appareil enrôlé. Les
+scénarios existants (V1, V4, double scan) ont tous été mis à jour pour
+enrôler un appareil et signer réellement — aucun n'a été affaibli ou
+contourné pour « passer ».
+
+`npm ci` à froid validé pour `backend/` et `frontend/` ; `npm run build` et
+`npm run lint` verts pour le frontend.
+
+**Aucun paquet npm n'a été ajouté** à cette étape, ni côté backend ni côté
+frontend : `crypto` (Node) et `window.crypto.subtle` (navigateur) sont tous
+deux natifs. Le `package-lock.json` des deux projets est donc **inchangé** —
+la consigne CI/CD sur l'installation de paquets dans le conteneur ne
+s'applique pas ici, faute de paquet à installer.
+
+---
+
 ## Prochaine étape suggérée
 
-Le géofencing (RF-13, contrôle `polygone_geojson` de la salle, algorithme
-PNPOLY/ray casting côté application — cf. Étape 1) reste la brique de
-sécurité restante pour compléter la cascade de validation du scan. Vient
-ensuite la fermeture du dernier angle mort documenté à l'Étape 3 : lier la
-vérification du scan à l'appareil enrôlé ici (RF-07 complet — une preuve de
-possession de la clé privée, ex. un défi signé, plutôt que la simple
-confiance en la clé publique fournie à l'enrôlement).
+**Géofencing (RF-13)** — désormais la priorité claire : c'est le seul
+mécanisme capable de fermer le vecteur résiduel documenté ci-dessus (relais
+en temps réel entre deux appareils tous deux enrôlés). Le polygone GeoJSON de
+la salle est déjà en base depuis l'Étape 1 (`salles.polygone_geojson`), et
+l'algorithme retenu (PNPOLY / ray casting côté application) y est déjà
+justifié. Le scan devrait alors transmettre les coordonnées obtenues via la
+Geolocation API, elles-mêmes idéalement incluses dans les données signées
+pour qu'elles ne puissent pas être altérées en transit.
+
+Ensuite : **authentification** (pour que `etudiant_id` cesse de venir du
+client) et **preuve de possession à l'enrôlement**, qui ferment ensemble le
+second angle mort listé plus haut.

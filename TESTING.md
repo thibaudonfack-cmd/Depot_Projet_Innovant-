@@ -1150,8 +1150,147 @@ et en base (section 5, jamais deux actifs simultanés) ; la console du
 navigateur confirme `extractable: false` sur la clé privée et l'échec de
 son export (section 3) ; IndexedDB contient bien les deux clés et la clé
 privée persiste entre rechargements (section 4) ; et
-`docker compose exec backend npm test` confirme `19 passed, 19 total`
-(section 6).
+`docker compose exec backend npm test` confirme `23 passed, 23 total`
+(section 6 — 19 tests à l'Étape 4, 23 depuis l'Étape 5 ; ce critère est
+donc validé par le total courant).
+
+---
+
+# Étape 5 — Signature par l'appareil et boucle de vérification
+
+Ce protocole suppose l'Étape 4 validée (appareil enrôlé). Aucun changement de
+schéma à cette étape : **pas besoin de `docker compose down -v`**, un simple
+`git pull` + rebuild suffit.
+
+```bash
+git pull origin dev
+docker compose up -d --build
+docker compose ps
+```
+
+## 1. Parcours complet dans l'interface (le plus rapide)
+
+Ouvrir `https://localhost/`. La page comporte désormais **deux sections**
+sous le sélecteur d'étudiant.
+
+**Étape 1 — enrôler l'appareil** (si ce n'est pas déjà fait pour l'étudiant
+sélectionné) : section « 1 · Enrôlement de l'appareil » → *Générer une clé et
+s'enrôler*. Attendu : bloc vert avec `"statut": "actif"`.
+
+**Étape 2 — ouvrir une séance** : section « 2 · Simulation de scan » →
+*Ouvrir une séance de test*. Attendu : une pastille verte
+« WebSocket connecté » avec l'identifiant de séance, et le champ « Jeton de
+séance (JWT) » se remplit **automatiquement** en moins d'une seconde. Laisser
+la page ouverte 25 s : le jeton doit être **remplacé** par un nouveau
+(rotation toutes les 20 s, RF-05).
+
+**Étape 3 — signer et envoyer** : *Signer et envoyer*. Attendu, bloc vert :
+```json
+{
+  "status": "ok",
+  "scan_id": "<uuid>",
+  "seance_id": "<uuid>",
+  "etudiant_id": "33333333-3333-3333-3333-333333333331",
+  "resultat": "valide"
+}
+```
+Ce seul parcours valide la chaîne entière : jeton signé RS256 par le serveur
+→ diffusé en WebSocket → signé ECDSA par l'appareil → vérifié par le backend
+avec la clé publique lue en base.
+
+## 2. Cas d'échec à vérifier dans l'interface
+
+**Rejeu (V4)** : recliquer sur *Signer et envoyer* sans attendre de nouveau
+jeton. Attendu : `[REJEU_DETECTE] Ce jeton a deja ete utilise…` (409).
+
+**Double scan** : attendre la rotation (nouveau jeton, `jti` différent), puis
+*Signer et envoyer*. Attendu : `[DOUBLE_SCAN] Presence deja validee pour
+cette seance.` (409) — le même étudiant ne peut valider qu'une présence par
+séance, même avec un jeton différent et correctement signé.
+
+**Signature d'un autre appareil (le cœur de l'Étape 5)** : changer
+l'étudiant dans le sélecteur du haut **sans ré-enrôler** — la clé présente
+dans IndexedDB reste celle de l'étudiant précédent — puis *Signer et
+envoyer* avec un jeton frais. Attendu :
+`[SIGNATURE_APPAREIL_INVALIDE] La signature de l'appareil est invalide…`
+(401). C'est exactement le scénario « un tiers relaie le jeton depuis son
+propre téléphone ».
+
+**Aucun appareil enrôlé** : sélectionner un étudiant qui n'a jamais été
+enrôlé (`Driss El Amrani` si les tests précédents ne l'ont pas utilisé), et
+*Signer et envoyer*. Attendu :
+`[AUCUN_APPAREIL_ENROLE] Aucun appareil actif n'est enrole…` (403 — et non
+401 : c'est l'état du compte qui bloque, pas l'authentification).
+
+## 3. Vérification bas niveau dans la console du navigateur
+
+```js
+// Le jeton courant est visible dans le champ de la section 2 ; on le reprend ici.
+const jwt = document.getElementById('jeton').value.trim();
+const signature = await window.CryptoService.signData(jwt);
+console.log('Signature Base64 :', signature);
+// Preuve du format BRUT r||s (IEEE P1363) et non DER :
+console.log('Taille décodée :', atob(signature).length, 'octets (attendu : 64)');
+```
+Attendu : exactement **64 octets**. Une taille de ~70-72 octets indiquerait
+du DER — format que le backend rejette (cf. `ANALYSE_CODE.md`, Étape 5,
+« Le piège d'interopérabilité »).
+
+**Test négatif — signature altérée** :
+```js
+const signatureCassee = btoa(atob(signature).slice(0, 63) + '\x00');
+const r = await fetch('/api/scans', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    etudiant_id: '33333333-3333-3333-3333-333333333331',
+    jeton: jwt,
+    signature_appareil: signatureCassee,
+  }),
+});
+console.log(r.status, await r.json());
+```
+Attendu : `401` et `code: "SIGNATURE_APPAREIL_INVALIDE"`.
+
+## 4. Vérification en base
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT s.id, s.etudiant_id, s.resultat, s.horodatage, a.info_appareil
+      FROM db_logs.scans s
+      JOIN db_logs.appareils_enroles a
+        ON a.etudiant_id = s.etudiant_id AND a.statut = 'actif'
+      ORDER BY s.horodatage DESC LIMIT 5\G"
+```
+Attendu : les scans validés à la section 1, chacun rattaché à l'appareil
+actif de son étudiant. **Aucune ligne ne doit exister** pour les tentatives
+rejetées des sections 2 et 3 (signature invalide, aucun appareil) — preuve
+que la vérification de signature intervient bien **avant** toute écriture.
+
+## 5. Tests automatisés
+
+```bash
+docker compose exec backend npm test -- scan.test.js
+```
+Attendu : 10 tests verts, dont les 4 spécifiques à l'Étape 5 (signature d'un
+autre appareil, signature syntaxiquement invalide, signature non rejouable
+sur un autre jeton, étudiant sans appareil enrôlé).
+
+```bash
+docker compose exec backend npm test
+```
+Attendu : `23 passed, 23 total` sur 4 suites.
+
+## Critère de succès global — Étape 5
+
+Validée si et seulement si : le parcours complet de la section 1 aboutit à
+`resultat: "valide"` avec un jeton reçu automatiquement par WebSocket ; les
+quatre cas d'échec de la section 2 renvoient bien `REJEU_DETECTE` (409),
+`DOUBLE_SCAN` (409), `SIGNATURE_APPAREIL_INVALIDE` (401) et
+`AUCUN_APPAREIL_ENROLE` (403) ; la signature mesurée dans la console fait
+exactement 64 octets (section 3) ; aucune ligne n'est écrite en base pour
+les tentatives rejetées (section 4) ; et
+`docker compose exec backend npm test` confirme `23 passed, 23 total`
+(section 5).
 
 ---
 

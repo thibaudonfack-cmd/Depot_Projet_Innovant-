@@ -108,6 +108,60 @@ export async function exportPublicKey() {
 }
 
 /**
+ * Signe une chaine de caracteres avec la cle privee de cet appareil
+ * (Etape 5, RF-07 complet). Utilise pour prouver au serveur que le jeton de
+ * seance scanne est bien presente par l'appareil ENROLE de l'etudiant, et
+ * pas simplement par quelqu'un qui a obtenu une copie du jeton.
+ *
+ * La cle privee est relue depuis IndexedDB a chaque appel plutot que gardee
+ * en variable de module : la page peut avoir ete rechargee entre
+ * l'enrolement et le scan, et une cle en memoire ne survit pas a un
+ * rechargement -- contrairement a IndexedDB, dont c'est precisement le role
+ * ici (cf. en-tete de ce fichier). Cette relecture ne degrade pas la
+ * garantie de securite : l'objet CryptoKey restitue reste non-extractable
+ * (verifie explicitement, cf. ANALYSE_CODE.md, Etape 4).
+ *
+ * FORMAT DE LA SIGNATURE -- point d'interoperabilite critique :
+ * crypto.subtle.sign() produit, pour ECDSA, une signature au format BRUT
+ * (concatenation r||s, 64 octets pour P-256), dit "IEEE P1363". Ce n'est
+ * PAS le format DER/ASN.1 (~70-72 octets, longueur variable) que la plupart
+ * des bibliotheques serveur attendent par defaut, Node.js compris. Le
+ * backend doit donc explicitement demander ce format a la verification
+ * (option dsaEncoding: 'ieee-p1363', cf.
+ * backend/src/services/deviceSignatureService.js) -- sans quoi il rejette
+ * SILENCIEUSEMENT (sans exception, simplement en retournant false) toutes
+ * les signatures pourtant parfaitement valides produites ici.
+ *
+ * @param {string} dataString - la chaine a signer (en pratique : le JWT de seance)
+ * @returns {Promise<string>} la signature encodee en Base64
+ * @throws {Error} si aucune cle privee n'existe sur cet appareil
+ */
+export async function signData(dataString) {
+  if (typeof dataString !== 'string' || dataString.length === 0) {
+    throw new Error('signData attend une chaine de caracteres non vide.');
+  }
+
+  const clePrivee = await get(CLE_PRIVEE_ID, magasinAppareil);
+
+  if (!clePrivee) {
+    throw new Error(
+      "Aucune cle privee trouvee dans IndexedDB -- cet appareil n'est pas enrole. "
+      + 'Appelez generateAndStoreKeyPair() (et enrolez-vous) avant de signer.'
+    );
+  }
+
+  const donnees = new TextEncoder().encode(dataString);
+
+  const signature = await window.crypto.subtle.sign(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    clePrivee,
+    donnees
+  );
+
+  return arrayBufferVersBase64(signature);
+}
+
+/**
  * Indique si une paire de cles existe deja localement pour cet appareil --
  * utile pour distinguer, cote UI, un premier enrolement d'un ré-enrolement.
  * Ne lit jamais la cle privee elle-meme, seulement sa presence.
@@ -118,18 +172,26 @@ export async function possedeDejaUneCle() {
 }
 
 /**
+ * Encode un ArrayBuffer en Base64. window.btoa n'accepte qu'une chaine
+ * "binaire" (un caractere par octet), d'ou la conversion prealable octet par
+ * octet -- passer directement l'ArrayBuffer produirait "[object ArrayBuffer]".
+ */
+function arrayBufferVersBase64(buffer) {
+  const octets = new Uint8Array(buffer);
+  let binaire = '';
+  for (let i = 0; i < octets.byteLength; i += 1) {
+    binaire += String.fromCharCode(octets[i]);
+  }
+  return window.btoa(binaire);
+}
+
+/**
  * Encode un DER (ArrayBuffer) en PEM avec l'en-tete/pied de page standard,
  * lignes de 64 caracteres (RFC 7468) -- meme convention que
  * generate_keys.sh (OpenSSL) cote serveur.
  */
 function derVersPem(derBuffer, etiquette) {
-  const octets = new Uint8Array(derBuffer);
-  let binaire = '';
-  for (let i = 0; i < octets.byteLength; i += 1) {
-    binaire += String.fromCharCode(octets[i]);
-  }
-  const base64 = window.btoa(binaire);
-  const lignes = base64.match(/.{1,64}/g).join('\n');
+  const lignes = arrayBufferVersBase64(derBuffer).match(/.{1,64}/g).join('\n');
   return `-----BEGIN ${etiquette}-----\n${lignes}\n-----END ${etiquette}-----\n`;
 }
 
@@ -139,5 +201,5 @@ function derVersPem(derBuffer, etiquette) {
 // sans avoir a passer par un import dynamique). Jamais expose en dehors du
 // mode developpement -- ce n'est pas une surface d'API destinee a la production.
 if (import.meta.env && import.meta.env.DEV) {
-  window.CryptoService = { generateAndStoreKeyPair, exportPublicKey, possedeDejaUneCle };
+  window.CryptoService = { generateAndStoreKeyPair, exportPublicKey, signData, possedeDejaUneCle };
 }
