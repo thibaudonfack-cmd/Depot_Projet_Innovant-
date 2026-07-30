@@ -93,3 +93,26 @@ test_backend:
     - cd backend
     - npm ci
     - npm test
+
+# Job SEPARE du backend, volontairement : le frontend n'a besoin ni de MySQL,
+# ni des cles RS256, ni du client mysql -- lui imposer le "before_script"
+# lourd de test_backend rallongerait chaque execution sans rien valider de
+# plus. Les deux jobs s'executent en parallele dans le meme stage.
+test_frontend:
+  stage: test
+  image: node:20
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    - cd frontend
+    - npm ci
+    # Le test qui compte ici : la liberation du flux camera (jsdom, aucune
+    # camera reelle requise). Cf. src/components/QRScanner.test.jsx.
+    - npm test
+    - npm run lint
+    # Verifie que le bundle de production se construit reellement -- une
+    # erreur d'import ou de syntaxe JSX ne se voit pas autrement, "npm test"
+    # ne compilant que les fichiers qu'il execute.
+    - npm run build

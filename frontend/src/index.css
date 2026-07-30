@@ -26,3 +26,21 @@
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas,
     "Liberation Mono", monospace;
 }
+
+/* Animation de la ligne de balayage du scanner de QR code
+ * (src/components/QRScanner.jsx). Definie ici et non en style inline : les
+ * @keyframes ne peuvent pas etre exprimees en classes utilitaires, meme en
+ * Tailwind v4 -- seule leur INVOCATION l'est
+ * (animate-[balayage_2.4s_ease-in-out_infinite]).
+ *
+ * Purement decorative : elle signale que le scanner est actif, elle ne
+ * reflete pas la progression du decodage (jsQR analyse l'image entiere a
+ * chaque frame). Elle n'est appliquee que via le variant motion-safe:, donc
+ * jamais lorsque l'utilisateur a active la reduction des animations dans son
+ * systeme. */
+@keyframes balayage {
+  0%   { top: 0.5rem;              opacity: 0; }
+  15%  {                           opacity: 1; }
+  85%  {                           opacity: 1; }
+  100% { top: calc(100% - 0.5rem); opacity: 0; }
+}

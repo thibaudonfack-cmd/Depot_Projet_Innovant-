@@ -1603,6 +1603,200 @@ s'applique pas ici, faute de paquet à installer.
 
 ---
 
+# Étape 6 — Lecteur de QR code natif web (getUserMedia + jsQR)
+
+## Pourquoi ces deux API, et pas une application native
+
+**`getUserMedia`** (Media Capture and Streams) est l'API standard du W3C
+donnant accès au flux caméra depuis une page web. Elle rend possible ce qui
+est, pour ce projet, une contrainte forte : **aucune application à
+installer**. Un étudiant ouvre une URL et scanne — pas de passage par un
+store, pas de version Android *et* iOS à maintenir, pas de délai de
+validation. Contrepartie assumée : l'API n'est disponible que dans un
+*contexte sécurisé* (HTTPS, ou l'exception `http://localhost`). C'est la
+même exigence que WebCrypto (Étape 4), déjà satisfaite par Caddy — la
+décision d'imposer HTTPS dès l'Étape 0.2 continue de payer.
+
+**`jsQR`** décode le QR à partir d'une `ImageData` brute. Trois raisons de
+l'avoir retenu : il est en **JavaScript pur, sans dépendance** (`npm view
+jsqr dependencies` → vide), ce qui évite tout binaire natif à compiler et
+donc toute divergence entre Windows, Linux et le conteneur — préoccupation
+d'autant plus concrète après les incidents de lockfile des étapes
+précédentes ; il n'accède **jamais** lui-même à la caméra, ce qui laisse au
+projet la maîtrise complète du cycle de vie du flux (voir plus bas, c'est
+décisif) ; et son API tient en une fonction, sans état interne à gérer.
+
+L'alternative envisagée était la `BarcodeDetector` API, native au
+navigateur et matériellement accélérée — écartée car absente de Safari/iOS
+et de Firefox, alors que le public visé est constitué d'étudiants avec leurs
+propres téléphones, dont on ne maîtrise ni la marque ni le navigateur.
+
+## Le cycle de vie de la caméra : trois fuites, trois natures différentes
+
+C'est le cœur technique de cette étape. `QRScanner.jsx` doit libérer trois
+ressources, et chacune fuit d'une façon distincte :
+
+**1. Les `MediaStreamTrack`.** Tant qu'un track n'a pas reçu `.stop()`, la
+caméra reste **physiquement active** : voyant allumé sur le téléphone,
+capteur alimenté, batterie consommée en continu. Démonter le composant React
+ne suffit pas — React détruit le DOM, pas le flux matériel, qui n'appartient
+pas à React.
+
+**2. La boucle `requestAnimationFrame`.** Sans `cancelAnimationFrame`, elle
+continue de s'exécuter après le démontage, tentant de lire une vidéo
+détachée à chaque frame : erreurs en console et calcul inutile permanent.
+
+**3. Le cas de course du démontage précoce** — le plus pernicieux, et celui
+que la plupart des implémentations manquent. `getUserMedia()` est
+asynchrone et peut mettre **plusieurs secondes** à se résoudre : le
+navigateur attend que l'utilisateur réponde à la demande de permission. Si
+le composant est démonté pendant cette attente — l'utilisateur ferme le
+scanner, ou React remonte le composant, ce que `StrictMode` fait
+systématiquement en développement — la fonction de nettoyage s'exécute
+**avant que le flux n'existe** : elle n'a rien à arrêter. Le flux arrive
+ensuite, pour un composant qui n'est plus monté, et n'est **jamais coupé**.
+La caméra reste allumée indéfiniment, **sans aucun signe dans l'interface**.
+
+D'où le drapeau `annule`, local à chaque exécution de l'effet : si le flux
+arrive après un démontage, il est coupé immédiatement. Un second garde-fou
+(`if (!video)`) couvre le même scénario par un autre chemin — défense en
+profondeur délibérée, et vérifiée : retirer l'un seul ne suffit pas à
+provoquer la fuite, il faut retirer les deux (voir « Vérification par
+mutation » ci-dessous).
+
+Les refs (`fluxRef`, `animationRef`) plutôt qu'un state pour ces ressources
+ne relèvent pas du style : une valeur de state capturée dans la fonction de
+nettoyage serait **figée** à ce qu'elle valait quand l'effet a été créé,
+alors qu'une ref donne toujours la valeur courante — donc le flux réellement
+en cours.
+
+**Conséquence directe sur la batterie**, qui est l'enjeu réel : une caméra
+active consomme de façon continue et significative. Sur un usage en cours —
+plusieurs séances par jour, scan de quelques secondes à chaque fois — une
+seule fuite non corrigée transformerait une fonctionnalité de trois secondes
+en drain permanent, avec la conclusion prévisible que « cette application
+vide la batterie ». C'est précisément le genre de défaut qui condamne
+l'adoption d'un outil, indépendamment de la qualité de sa sécurité.
+
+## Économies de calcul (donc d'autonomie)
+
+Trois réglages, chacun mesurable en travail évité par frame :
+- **Analyse à 480 px de côté maximum**, pas à la résolution native de la
+  vidéo (souvent 1080p). Analyser 4 fois plus de pixels n'améliore pas la
+  détection d'un QR qui occupe une bonne part du cadre.
+- **`willReadFrequently: true`** sur le contexte canvas : indique au
+  navigateur que ce canvas sera lu à chaque frame. Sans cette option,
+  certains moteurs le conservent en mémoire GPU et chaque `getImageData()`
+  déclenche un transfert GPU→CPU coûteux.
+- **`inversionAttempts: 'dontInvert'`** : jsQR ne cherche pas les codes en
+  vidéo inversée (clair sur fond sombre). Le QR affiché par ce projet est
+  toujours sombre sur clair — supprimer cette seconde passe divise par deux
+  le travail de décodage.
+
+## Détails d'implémentation non évidents
+
+- **`facingMode: 'environment'` en contrainte souple**, jamais
+  `exact: 'environment'`. Un ordinateur portable n'a qu'une webcam frontale :
+  une contrainte stricte y ferait échouer `getUserMedia` avec
+  `OverconstrainedError`. En souple, le navigateur prend la caméra arrière si
+  elle existe, la seule disponible sinon — le scanner reste donc testable sur
+  un poste de développement, ce qui est déterminant pour la validation (voir
+  `TESTING.md`).
+- **`playsInline`** sur l'élément vidéo : sans cet attribut, Safari iOS
+  ouvre la vidéo en plein écran natif et masque tout l'habillage du scanner.
+- **`video.play()` dans un `.catch(() => {})`** : cette promesse **rejette**
+  (`AbortError`) si l'élément est détaché avant le démarrage effectif — cas
+  courant lors d'un démontage rapide. Sans ce catch, une promesse non gérée
+  apparaît en console pour une situation parfaitement bénigne.
+- **Verrou `dejaDetecteRef`** : plusieurs frames peuvent être en vol au
+  moment où un QR est reconnu. Sans verrou, `onDetection()` serait appelé
+  plusieurs fois pour un même code — donc plusieurs requêtes de scan, dont la
+  seconde serait rejetée en `REJEU_DETECTE` (Étape 3) alors que l'utilisateur
+  n'a scanné qu'une fois. Un rejet de sécurité déclenché par un défaut
+  d'interface est la pire forme de faux positif : il discrédite le mécanisme.
+- **`onDetection` enveloppé dans `useCallback` côté `App.jsx`** : le
+  `useEffect` de `QRScanner` en dépend. Une fonction recréée à chaque rendu
+  relancerait l'effet, donc **couperait et redemanderait la caméra en
+  boucle** — chaque redémarrage rouvrant potentiellement la demande de
+  permission.
+
+## Vérification par mutation (et non « le test passe »)
+
+`frontend/src/components/QRScanner.test.jsx` (vitest + jsdom) couvre cinq
+scénarios : démontage pendant l'attente de permission, démontage après
+démarrage normal, double montage `StrictMode`, permission refusée, absence de
+caméra. Aucune caméra réelle n'est requise : `getUserMedia` est remplacé par
+un faux flux instrumenté qui compte les appels à `track.stop()`.
+
+Un test qui passe ne prouve pourtant rien s'il passerait aussi sans la
+protection qu'il est censé garantir. La valeur du test a donc été établie par
+**mutation** :
+
+| Mutation appliquée à `QRScanner.jsx` | Résultat |
+|---|---|
+| Retrait du seul garde-fou `annule` | 5/5 passent encore — le second filet (`if (!video)`) prend le relais |
+| Retrait des **deux** garde-fous | Le test « CAS CRITIQUE » **échoue** |
+| Restauration | 5/5 repassent |
+
+Le premier résultat est instructif en soi : il a révélé que la protection
+était doublée, ce que la lecture du code seule ne montrait pas clairement. Le
+second établit que le test détecte réellement la fuite, et n'est pas une
+formalité verte.
+
+Ce test tourne en CI dans un **job dédié** (`test_frontend`,
+`.gitlab-ci.yml`), séparé de `test_backend` : le frontend n'a besoin ni de
+MySQL, ni des clés RS256, ni du client `mysql` — lui imposer le
+`before_script` du backend rallongerait chaque exécution sans rien valider de
+plus. Le job enchaîne `npm test`, `npm run lint` et `npm run build`, ce
+dernier parce qu'une erreur d'import ou de syntaxe JSX ne se voit pas
+autrement : `npm test` ne compile que les fichiers qu'il exécute.
+
+## Ajout au-delà de la mission : l'affichage du QR côté formateur
+
+La mission ne demandait que le lecteur. Mais un scanner sans rien à scanner
+n'est pas démontrable : il aurait fallu coller le JWT dans un générateur de
+QR en ligne — fastidieux, et discutable puisque cela revient à transmettre un
+jeton de séance à un service tiers. `qrcode.react` (zéro dépendance runtime)
+affiche donc le QR directement dans la section « Séance — affichage
+formateur », qui se met à jour automatiquement à chaque rotation du jeton.
+
+Ce n'est d'ailleurs pas un ajout hors sujet : c'est la moitié « formateur »
+de RF-05, jusqu'ici représentée par un simple champ texte. L'interface de
+test reflète désormais les **deux** côtés réels du système — écran projeté
+d'un côté, téléphone de l'autre — ce qui permet de dérouler la chaîne
+complète sur un seul poste, en scannant l'écran avec la webcam.
+
+La saisie manuelle du jeton est **conservée** en repli : un poste sans
+caméra, une permission refusée au niveau du système d'exploitation, ou une
+démonstration à distance rendraient sinon le scan intestable — et elle reste
+le seul moyen de reproduire volontairement un cas d'erreur précis (jeton
+expiré, altéré).
+
+## Accessibilité et sobriété visuelle
+
+L'assombrissement périphérique est obtenu par une **ombre portée intérieure
+démesurée** (`shadow-[0_0_0_9999px_…]`) sur la fenêtre de visée, plutôt que
+par quatre panneaux positionnés autour : une seule règle, aucun calcul de
+dimensions, rendu exact quelle que soit la taille du conteneur.
+
+La ligne de balayage animée et le spinner sont placés sous le variant
+`motion-safe:` — ils ne s'affichent donc **pas** si l'utilisateur a activé la
+réduction des animations dans son système. Les mouvements répétitifs peuvent
+déclencher des troubles vestibulaires ; une animation purement décorative
+(elle ne reflète aucune progression réelle, jsQR analysant l'image entière à
+chaque frame) ne justifie pas de l'imposer.
+
+Les messages d'erreur sont dérivés de `err.name`, normalisé par la
+spécification, et **jamais** de `err.message`, texte libre variable selon le
+navigateur et la langue du système. Chacun est formulé comme une action à
+faire, pas comme un diagnostic : « Autorisez-le dans les paramètres du site »
+plutôt que « NotAllowedError ». Refus de permission et absence de caméra
+donnent des messages **distincts**, car ils appellent des actions opposées —
+les confondre enverrait l'utilisateur chercher un réglage qui ne résoudra
+rien.
+
+---
+
 ## Prochaine étape suggérée
 
 **Géofencing (RF-13)** — désormais la priorité claire : c'est le seul

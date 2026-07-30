@@ -85,7 +85,11 @@ distant en retard. Procedure complete et configuration des deux remotes :
 
 ## Etat du projet
 
-Etape 5 livree : boucle de securite complete. L'appareil de l'etudiant signe
+Etape 6 livree : lecteur de QR code par la camera (getUserMedia + jsQR),
+avec affichage du QR cote formateur. La liberation du flux camera est
+couverte par un test de non-regression (validee par mutation).
+
+Etape 5 : boucle de securite complete. L'appareil de l'etudiant signe
 le jeton de seance avec sa cle privee ECDSA P-256 non-extractable, et le
 backend verifie cette signature avec la cle publique enregistree lors de
 l'enrolement. Voir `ANALYSE_CODE.md` pour le detail de chaque partie livree,

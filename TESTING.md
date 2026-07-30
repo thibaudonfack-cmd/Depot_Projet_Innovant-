@@ -1294,6 +1294,134 @@ les tentatives rejetées (section 4) ; et
 
 ---
 
+# Étape 6 — Lecteur de QR code (caméra)
+
+Aucun changement de schéma : pas de `docker compose down -v` nécessaire.
+Le conteneur frontend doit en revanche réinstaller ses dépendances
+(`jsqr`, `qrcode.react`, `vitest`) :
+
+```bash
+git pull origin dev
+docker compose up -d --build
+docker compose ps
+```
+
+## 1. Le piège du test sur téléphone — à lire AVANT d'essayer
+
+Tester le scanner avec un vrai téléphone se heurte à deux obstacles réels,
+indépendants du code :
+
+1. **`localhost` ne désigne pas ton PC depuis le téléphone.** Il faut
+   l'adresse LAN de la machine (`ipconfig` sous Windows), donc une URL du
+   type `https://192.168.1.42/`.
+2. **Le certificat de Caddy n'est pas reconnu par le téléphone.** `tls
+   internal` émet un certificat pour `localhost`, pas pour cette IP, et son
+   autorité est inconnue du téléphone. Le navigateur mobile bloquera — et
+   comme `getUserMedia` exige un contexte sécurisé, **la caméra sera refusée**
+   même en acceptant l'avertissement, dans plusieurs navigateurs.
+
+**Le test recommandé n'utilise donc qu'un seul poste** : afficher le QR code
+à l'écran (section 2 de l'interface) et le scanner avec **la webcam du même
+ordinateur** (section 3). `https://localhost` est un contexte sécurisé
+valide, le certificat est déjà accepté, et la chaîne testée est
+rigoureusement la même. C'est aussi la raison pour laquelle `facingMode` est
+en contrainte souple : sur un portable, la webcam frontale est acceptée.
+
+Pour un vrai test mobile ultérieur, il faudra soit un certificat valide sur
+un nom de domaine réel, soit un tunnel HTTPS public — hors périmètre de ce
+prototype.
+
+## 2. Parcours nominal (un seul poste)
+
+Ouvrir `https://localhost/`.
+
+1. **Section 1** — sélectionner un étudiant, *Générer une clé et s'enrôler*.
+   Attendu : bloc vert, `"statut": "actif"`.
+2. **Section 2** — *Ouvrir une séance de test*. Attendu : pastille verte
+   « WebSocket connecté », puis **un QR code s'affiche**. Le laisser tourner
+   ~25 s : le QR doit **changer visiblement** (nouveau jeton, RF-05).
+3. **Section 3** — *Scanner le QR code*. Attendu, dans l'ordre :
+   - une demande d'autorisation caméra du navigateur ;
+   - pendant l'attente, un **spinner** et le texte « Accès à la caméra… » ;
+   - après autorisation, le **flux vidéo** avec fenêtre de visée, coins
+     blancs, pourtour assombri, ligne verte de balayage et le texte
+     « Placez le QR code au centre » ;
+   - présenter l'écran affichant le QR devant la webcam → **écran vert
+     immédiat « QR code détecté »**, la caméra se coupe ;
+   - puis le bloc vert « Présence validée » avec `"resultat": "valide"`.
+
+**Vérification anti-fuite, à faire systématiquement** : dès l'écran vert, le
+**voyant de la webcam doit s'éteindre**. S'il reste allumé, le flux n'a pas
+été libéré — c'est exactement le défaut que
+`src/components/QRScanner.test.jsx` est chargé de prévenir.
+
+Refaire le test en cliquant *Fermer le scanner* au lieu de scanner : le
+voyant doit s'éteindre là aussi. Puis une troisième fois en fermant **pendant
+que la demande de permission est encore affichée** — c'est le cas de course
+le plus délicat, celui où la caméra peut rester allumée silencieusement.
+
+## 3. Refus de permission
+
+**Chrome / Edge** : icône à gauche de la barre d'adresse → *Paramètres du
+site* → *Caméra* → **Bloquer**. Recharger, puis *Scanner le QR code*.
+Attendu : écran sombre, icône d'alerte rouge, et le message
+« Accès à la caméra refusé. Autorisez-le dans les paramètres du site… ».
+Aucun code technique brut (`NotAllowedError`) ne doit apparaître.
+
+**Firefox** : bouton d'informations du site → *Autorisations* → *Utiliser la
+caméra* → **Bloquer**.
+
+Remettre ensuite sur *Autoriser*, recharger, vérifier que le scanner
+redémarre normalement.
+
+**Absence de caméra** : sur une machine sans webcam, le message attendu est
+différent — « Aucune caméra détectée sur cet appareil. Utilisez la saisie
+manuelle du jeton. » Les deux cas doivent rester distincts : ils appellent
+des actions opposées.
+
+## 4. Repli manuel
+
+Cliquer *Saisir le jeton manuellement (sans caméra)*, coller le JWT visible
+en section 2 (ou obtenu via la console), *Signer et envoyer*. Attendu :
+identique au parcours caméra. Ce chemin reste le seul moyen de reproduire
+volontairement un jeton expiré ou altéré (cf. Étape 5, section 2).
+
+## 5. Réduction des animations
+
+Activer la réduction des animations du système (Windows : *Paramètres →
+Accessibilité → Effets visuels → Effets d'animation* → désactivé), recharger,
+ouvrir le scanner. Attendu : la ligne de balayage et le spinner **ne sont pas
+animés** (`motion-safe:`), tout le reste fonctionne à l'identique.
+
+## 6. Tests automatisés
+
+```bash
+docker compose exec frontend npm test
+```
+Attendu : `5 passed` — dont « CAS CRITIQUE : démontage PENDANT que
+getUserMedia() est en attente ». Aucune caméra réelle n'est utilisée.
+
+```bash
+docker compose exec frontend npm run lint
+docker compose exec frontend npm run build
+docker compose exec backend npm test
+```
+Attendu : 0 erreur, build réussi, et `23 passed, 23 total` côté backend
+(non-régression : l'Étape 6 ne touche pas au backend).
+
+## Critère de succès global — Étape 6
+
+Validée si et seulement si : le QR s'affiche et se renouvelle en section 2 ;
+le scan par webcam aboutit à `"resultat": "valide"` (section 2) ; **le voyant
+de la caméra s'éteint** après un scan réussi, après une fermeture manuelle, et
+après une fermeture pendant la demande de permission ; un refus de permission
+affiche un message actionnable distinct de celui de l'absence de caméra
+(section 3) ; le repli manuel fonctionne (section 4) ; les animations sont
+désactivées en mode réduction de mouvement (section 5) ; et
+`docker compose exec frontend npm test` confirme `5 passed` (section 6).
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte
