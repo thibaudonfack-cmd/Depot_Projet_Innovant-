@@ -12,6 +12,11 @@
 // Etape 4                : enrolement cryptographique d'un appareil
 //                          (RF-07/RF-09) -- cf.
 //                          src/controllers/enrolementController.js.
+// Etape 7a/7c            : authentification par cookie de session
+//                          (src/routes/authRoutes.js) et extraction de
+//                          l'identite depuis la session -- /api/scans et
+//                          /api/enrolements ne font plus AUCUNE confiance a
+//                          un identifiant fourni par le client.
 // Strategie de test        : app et httpServer exportes pour Supertest ;
 //                          httpServer.listen() n'est declenche que lorsque ce
 //                          fichier est execute directement (node server.js),
@@ -28,6 +33,7 @@ const pool = require('./src/config/db');
 const seanceRoutes = require('./src/routes/seanceRoutes');
 const scanRoutes = require('./src/routes/scanRoutes');
 const enrolementRoutes = require('./src/routes/enrolementRoutes');
+const authRoutes = require('./src/routes/authRoutes');
 const { attachQrBroadcaster } = require('./src/services/qrBroadcaster');
 
 const app = express();
@@ -61,6 +67,7 @@ app.get('/api/db-health', async (req, res) => {
   }
 });
 
+app.use('/api/auth', authRoutes);
 app.use('/api/seances', seanceRoutes);
 app.use('/api/scans', scanRoutes);
 app.use('/api/enrolements', enrolementRoutes);

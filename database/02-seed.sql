@@ -50,3 +50,33 @@ INSERT INTO inscriptions (etudiant_id, uf_id) VALUES
   ('33333333-3333-3333-3333-333333333332', '11111111-1111-1111-1111-111111111111'),
   ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111'),
   ('33333333-3333-3333-3333-333333333334', '11111111-1111-1111-1111-111111111111');
+
+-- -----------------------------------------------------------------------------
+-- Comptes de connexion (Etape 7a)
+--
+-- Mots de passe EN CLAIR, uniquement pour ce jeu de demonstration :
+--   - les 4 etudiants  : Etudiant123!
+--   - le formateur     : Formateur123!
+-- Ces identifiants sont volontairement documentes ici : ce fichier n'est
+-- charge que par le seed de demonstration, jamais en production (cf. 3.1.2,
+-- "jeu de donnees de demonstration provisionne au deploiement"). Les
+-- documenter dans le depot vaut mieux que de les transmettre par un canal
+-- parallele ou de les laisser deviner.
+--
+-- Les empreintes ci-dessous sont de VRAIS hachages scrypt, produits par
+-- backend/src/services/passwordService.js -- et non des valeurs inventees a
+-- la main. Chacune embarque son propre sel aleatoire : c'est pourquoi les
+-- quatre etudiants, bien qu'ayant le MEME mot de passe, ont des empreintes
+-- entierement differentes. C'est exactement la propriete recherchee, et elle
+-- est directement observable dans ce fichier.
+--
+-- Sophie Lambert (formateur) n'a PAS de ligne dans la table etudiants :
+-- son etudiant_id vaut NULL, comme l'impose la contrainte
+-- chk_utilisateur_role_lien (01-schema.sql).
+-- -----------------------------------------------------------------------------
+INSERT INTO utilisateurs (id, email, mot_de_passe_hash, nom, role, etudiant_id) VALUES
+  ('44444444-4444-4444-4444-444444444441', 'amara.diallo@example.org', 'scrypt$32768$8$1$NzNJUfWYW1Or+EhwdJo6Rw==$AHOmuTk1z/J/Bk/O8Oa4wpBIrSabEqnMbW1tfWU87YkfvsUbINAPkT1uJ4UTKLFXemFDqHAZshL45+Jod85wcg==', 'Amara Diallo', 'etudiant', '33333333-3333-3333-3333-333333333331'),
+  ('44444444-4444-4444-4444-444444444442', 'bilal.ozturk@example.org', 'scrypt$32768$8$1$b8GXVA5oGdIDqPo71DSxTQ==$xJAi5E/nUA6+Wz0KRK9muuvf/rAH2dhClKUSz2jgVt56Ji0zxgyUVqthJ08ePdkhlMlS0nylbQbPIEaR9KJaeg==', 'Bilal Ozturk', 'etudiant', '33333333-3333-3333-3333-333333333332'),
+  ('44444444-4444-4444-4444-444444444443', 'chiara.rossi@example.org', 'scrypt$32768$8$1$eQ20MqufQ7banr64v/9OGg==$VLaW7a3W4X5PSs2XepsFeg7BMUcug6KoA94tWSZOvTJvs0b4oQ0bGg+9KR/zh4ZryAUBRjA7HCk7edcEnDq3wQ==', 'Chiara Rossi', 'etudiant', '33333333-3333-3333-3333-333333333333'),
+  ('44444444-4444-4444-4444-444444444444', 'driss.elamrani@example.org', 'scrypt$32768$8$1$/944Q3FanCbZIF0uvDJc8g==$BvfcsNu5N6j4gACmv6q+m/TUJuuwSmAAkTZILMfRPlk2eHIEto0TleJcgIOxaPoA4M0+J6BFsBd+Uyt4Rb7OJg==', 'Driss El Amrani', 'etudiant', '33333333-3333-3333-3333-333333333334'),
+  ('44444444-4444-4444-4444-444444444445', 'formateur@example.org', 'scrypt$32768$8$1$vVeexzYpFK669hCgHe5y8A==$gQCubHfvu1h6DgbZEzQbC73AmYpZ8dT/QoESnkXwUwfbTlb5l2ealq3HMkKmeQIiBD2vzZAbdJ3A9x44bOZtLg==', 'Sophie Lambert', 'formateur', NULL);

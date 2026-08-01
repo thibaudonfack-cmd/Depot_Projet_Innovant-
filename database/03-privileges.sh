@@ -68,6 +68,25 @@ mysql -h "${MYSQL_HOST:-localhost}" -uroot -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
   GRANT UPDATE, DELETE ON db_logs.seances TO '${MYSQL_USER}'@'%';
   GRANT UPDATE, DELETE ON db_logs.appareils_enroles TO '${MYSQL_USER}'@'%';
 
+  -- Etape 7a : DELETE sur sessions est indispensable pour que la
+  -- deconnexion soit REELLE (suppression de la ligne) et pour purger les
+  -- sessions expirees. C'est precisement l'interet d'une session cote
+  -- serveur par rapport a un JWT : sans ce privilege, "se deconnecter" ne
+  -- ferait qu'effacer le cookie cote navigateur tandis que la session
+  -- resterait valide en base -- un jeton recupere avant la deconnexion
+  -- continuerait de fonctionner.
+  -- Aucun UPDATE accorde : une session ne se modifie jamais, elle est creee
+  -- puis supprimee. Ne pas accorder un privilege dont on n'a pas l'usage.
+  GRANT DELETE ON db_logs.sessions TO '${MYSQL_USER}'@'%';
+
+  -- Aucun privilege d'ECRITURE sur utilisateurs : le pool applicatif lit les
+  -- comptes pour authentifier (SELECT, deja couvert plus haut) mais ne doit
+  -- jamais pouvoir en creer, en modifier ni en supprimer. La creation de
+  -- comptes releve du provisionnement (02-seed.sql, execute en root), pas de
+  -- l'application -- coherent avec le perimetre acte : l'administration des
+  -- comptes reste hors du prototype (cf. 3.1.2), seule l'AUTHENTIFICATION
+  -- est implementee.
+
   FLUSH PRIVILEGES;
 EOSQL
 

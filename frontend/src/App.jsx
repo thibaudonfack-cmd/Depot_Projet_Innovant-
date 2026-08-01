@@ -122,7 +122,11 @@ function App() {
       const reponse = await fetch('/api/enrolements', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ etudiant_id: etudiantId, public_key: clePublique, device_info: deviceInfo }),
+        // ETAPE 7c : etudiant_id n'est plus transmis -- le backend le lit
+        // dans la session. credentials 'same-origin' pour que le cookie de
+        // session accompagne la requete.
+        credentials: 'same-origin',
+        body: JSON.stringify({ public_key: clePublique, device_info: deviceInfo }),
       });
       const corps = await reponse.json();
       if (!reponse.ok) throw new Error(corps.message || `Erreur HTTP ${reponse.status}`);
@@ -186,11 +190,8 @@ function App() {
       const reponse = await fetch('/api/scans', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          etudiant_id: etudiantId,
-          jeton: jetonPropre,
-          signature_appareil: signature,
-        }),
+        credentials: 'same-origin',
+        body: JSON.stringify({ jeton: jetonPropre, signature_appareil: signature }),
       });
       const corps = await reponse.json();
       if (!reponse.ok) throw new Error(`[${corps.code || reponse.status}] ${corps.message || 'Erreur inconnue'}`);
@@ -200,7 +201,7 @@ function App() {
       setStatutScan('erreur');
       setResultatScan({ message: erreur.message });
     }
-  }, [etudiantId]);
+  }, []);
 
   /**
    * Appelee par QRScanner des qu'un QR est decode. useCallback OBLIGATOIRE :

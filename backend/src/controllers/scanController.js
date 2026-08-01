@@ -72,37 +72,40 @@ const {
 
 /**
  * POST /api/scans
- * Corps attendu : { jeton: string, etudiant_id: string, signature_appareil: string }
+ * Corps attendu : { jeton: string, signature_appareil: string }
+ * Route PROTEGEE : exige une session authentifiee de role 'etudiant'.
  *
- * signature_appareil est OBLIGATOIRE depuis l'Etape 5 : c'est la preuve que
- * le jeton est presente par l'appareil enrole de l'etudiant. La rendre
- * facultative (accepter un scan sans signature quand aucun appareil n'est
- * enrole, par exemple) aurait offert un contournement trivial de toute la
- * chaine -- il aurait suffi de ne jamais s'enroler pour echapper au controle.
+ * ETAPE 7c -- etudiant_id N'EST PLUS LU DANS LE CORPS DE LA REQUETE.
+ * Il provient exclusivement de req.utilisateur.etudiant_id, c'est-a-dire de
+ * la session resolue cote serveur a partir du cookie httpOnly. C'est le
+ * correctif de la limitation signalee depuis l'Etape 3 : jusqu'ici,
+ * n'importe qui pouvait scanner "au nom de" n'importe quel etudiant en
+ * changeant une valeur dans le corps JSON, ce qui vidait de sens toute la
+ * chaine cryptographique construite aux Etapes 4 et 5. Un champ etudiant_id
+ * eventuellement present dans le corps est desormais purement et simplement
+ * IGNORE -- et non rejete : le refuser explicitement renseignerait un
+ * attaquant sur le mecanisme, sans aucun gain de securite.
  *
- * Limitation connue et assumee, INCHANGEE depuis l'Etape 3 : etudiant_id est
- * toujours fourni par le client, pas extrait d'une session authentifiee
- * (l'authentification n'existe pas encore dans le prototype). L'Etape 5 ne
- * corrige PAS ce point -- elle prouve "cette requete vient de l'appareil dont
- * la cle publique est enregistree pour cet etudiant_id", pas "cette requete
- * vient de cet etudiant". La difference est fine mais reelle : un tiers qui
- * enrolerait son propre appareil sous l'identifiant d'un autre etudiant (rien
- * ne l'en empeche aujourd'hui, cf. enrolementController.js) passerait cette
- * verification. Fermer ce dernier angle mort suppose l'authentification, et
- * une preuve de possession lors de l'enrolement -- cf. ANALYSE_CODE.md,
- * Etape 4, section "Role de l'interface temporaire", et Etape 5.
+ * signature_appareil reste OBLIGATOIRE (Etape 5) : c'est la preuve que le
+ * jeton est presente par l'appareil enrole de l'etudiant. La rendre
+ * facultative aurait offert un contournement trivial -- il aurait suffi de
+ * ne jamais s'enroler pour echapper au controle.
+ *
+ * Les deux garanties se completent et ne se remplacent pas : la session
+ * prouve QUI, la signature d'appareil prouve DEPUIS QUEL APPAREIL. Un compte
+ * vole sans l'appareil enrole ne permet pas de scanner ; un appareil enrole
+ * sans la session non plus.
  */
 async function scannerJeton(req, res) {
-  const {
-    jeton,
-    etudiant_id: etudiantId,
-    signature_appareil: signatureAppareil,
-  } = req.body || {};
+  const { jeton, signature_appareil: signatureAppareil } = req.body || {};
 
-  if (!jeton || !etudiantId || !signatureAppareil) {
+  // Identite issue de la SESSION, jamais du client (cf. en-tete de fonction).
+  const etudiantId = req.utilisateur.etudiant_id;
+
+  if (!jeton || !signatureAppareil) {
     return res.status(400).json({
       status: 'error',
-      message: 'jeton, etudiant_id et signature_appareil sont obligatoires.',
+      message: 'jeton et signature_appareil sont obligatoires.',
     });
   }
 

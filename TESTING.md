@@ -1422,6 +1422,176 @@ désactivées en mode réduction de mouvement (section 5) ; et
 
 ---
 
+# Étape 7a/7c — Authentification et identité issue de la session
+
+**Migration OBLIGATOIRE** : le schéma et le seed changent (tables
+`utilisateurs` et `sessions`, comptes de connexion). Un volume déjà
+initialisé ne les recevra pas.
+
+```bash
+git pull origin dev
+docker compose down -v
+docker compose up -d --build
+docker compose ps
+```
+
+## Comptes de démonstration
+
+| Email | Mot de passe | Rôle |
+|---|---|---|
+| `amara.diallo@example.org` | `Etudiant123!` | étudiant |
+| `bilal.ozturk@example.org` | `Etudiant123!` | étudiant |
+| `chiara.rossi@example.org` | `Etudiant123!` | étudiant |
+| `driss.elamrani@example.org` | `Etudiant123!` | étudiant |
+| `formateur@example.org` | `Formateur123!` | formateur |
+
+## 1. Connexion et cookie de session
+
+```bash
+curl -k -i -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"amara.diallo@example.org","mot_de_passe":"Etudiant123!"}'
+```
+Attendu : `200`, un en-tête `Set-Cookie` contenant **`HttpOnly`**,
+**`Secure`** et **`SameSite=Strict`**, et un corps JSON décrivant
+l'utilisateur. **Le jeton de session ne doit apparaître nulle part dans le
+corps** — uniquement dans le cookie.
+
+Pour la suite, conserver le cookie dans un fichier :
+```bash
+curl -k -c cookies.txt -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"amara.diallo@example.org","mot_de_passe":"Etudiant123!"}'
+curl -k -b cookies.txt https://localhost/api/auth/moi
+```
+Attendu : le second appel renvoie `200` avec `"role":"etudiant"`.
+
+## 2. Anti-énumération de comptes
+
+```bash
+curl -k -s -X POST https://localhost/api/auth/login -H "Content-Type: application/json" \
+  -d '{"email":"amara.diallo@example.org","mot_de_passe":"FAUX"}'
+echo
+curl -k -s -X POST https://localhost/api/auth/login -H "Content-Type: application/json" \
+  -d '{"email":"nexiste.pas@example.org","mot_de_passe":"FAUX"}'
+```
+Attendu : **exactement la même réponse** dans les deux cas (`401`,
+`IDENTIFIANTS_INVALIDES`, message identique). Comparer aussi les temps de
+réponse — ils doivent être du même ordre (~130 ms) :
+```bash
+curl -k -s -o /dev/null -w "compte existant  : %{time_total}s\n" -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" -d '{"email":"amara.diallo@example.org","mot_de_passe":"FAUX"}'
+curl -k -s -o /dev/null -w "compte inexistant: %{time_total}s\n" -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" -d '{"email":"nexiste.pas@example.org","mot_de_passe":"FAUX"}'
+```
+Un écart marqué (1 ms contre 130 ms) signalerait que le leurre ne fonctionne
+plus, et permettrait de déterminer quelles adresses possèdent un compte.
+
+## 3. Les routes protégées refusent l'accès sans session
+
+```bash
+curl -k -s -X POST https://localhost/api/scans -H "Content-Type: application/json" -d '{}'
+echo
+curl -k -s -X POST https://localhost/api/enrolements -H "Content-Type: application/json" -d '{}'
+```
+Attendu : `401` avec `"code":"NON_AUTHENTIFIE"` dans les deux cas.
+
+Avec un cookie inventé :
+```bash
+curl -k -s -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" -H "Cookie: presence_session=invente" -d '{}'
+```
+Attendu : `401` avec `"code":"SESSION_INVALIDE"`.
+
+## 4. Le formateur ne peut ni scanner ni enrôler
+
+```bash
+curl -k -c form.txt -s -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"formateur@example.org","mot_de_passe":"Formateur123!"}' > /dev/null
+curl -k -b form.txt -s -X POST https://localhost/api/enrolements \
+  -H "Content-Type: application/json" -d '{"public_key":"x"}'
+```
+Attendu : `403` avec `"code":"ROLE_INSUFFISANT"` — et non 401 : le formateur
+est bien authentifié, c'est son rôle qui ne l'autorise pas.
+
+## 5. L'usurpation par le corps de la requête ne fonctionne plus
+
+Le test central de l'Étape 7c. Connecté en tant qu'Amara, tenter d'enrôler
+un appareil au nom de Bilal :
+```bash
+curl -k -b cookies.txt -s -X POST https://localhost/api/enrolements \
+  -H "Content-Type: application/json" \
+  -d '{"public_key":"-----BEGIN PUBLIC KEY-----\nMFkw...\n-----END PUBLIC KEY-----\n",
+       "etudiant_id":"33333333-3333-3333-3333-333333333332"}'
+```
+Attendu : la réponse contient `"etudiant_id":"33333333-3333-3333-3333-333333333331"`
+(**Amara**, celle de la session) et **jamais** l'identifiant de Bilal. Le
+champ envoyé est silencieusement ignoré.
+
+## 6. La déconnexion invalide réellement la session
+
+```bash
+curl -k -b cookies.txt -s https://localhost/api/auth/moi | head -c 80; echo
+curl -k -b cookies.txt -s -X POST https://localhost/api/auth/logout; echo
+curl -k -b cookies.txt -s https://localhost/api/auth/moi
+```
+Attendu : `200`, puis `{"status":"ok"}`, puis **`401 SESSION_INVALIDE`** en
+rejouant le **même** cookie. C'est ce qu'un JWT auto-porteur ne permettrait
+pas : il resterait valide jusqu'à son expiration.
+
+## 7. Le jeton n'est pas stocké en clair
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, utilisateur_id, LEFT(jeton_hash,16) AS empreinte, date_expiration FROM db_logs.sessions\G"
+```
+Attendu : `jeton_hash` est une empreinte hexadécimale de 64 caractères,
+**jamais** la valeur présente dans le cookie. Vérifier aussi que les mots de
+passe sont bien hachés :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT email, LEFT(mot_de_passe_hash,20) AS debut, role FROM db_logs.utilisateurs;"
+```
+Attendu : chaque valeur commence par `scrypt$32768$8$1$`, et **les quatre
+étudiants ont des empreintes différentes** bien qu'ayant le même mot de
+passe — preuve directe du sel par compte.
+
+## 8. La contrainte de cohérence rôle/lien est portée par la base
+
+```bash
+docker compose exec mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" \
+  -e "INSERT INTO db_logs.utilisateurs (id,email,mot_de_passe_hash,nom,role,etudiant_id)
+      VALUES (UUID(),'test@x.org','x','Test','formateur','33333333-3333-3333-3333-333333333331');"
+```
+Attendu : **échec** avec une violation de `chk_utilisateur_role_lien` — un
+formateur ne peut pas être rattaché à un étudiant, même en root, même en SQL
+direct.
+
+## 9. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+```
+Attendu : **`44 passed, 44 total`** sur 5 suites (`tokenService`, `health`,
+`scan`, `enrolement`, `auth`).
+
+## Critère de succès global — Étape 7a/7c
+
+Validée si et seulement si : la connexion pose un cookie
+`HttpOnly; Secure; SameSite=Strict` sans exposer le jeton dans le corps
+(section 1) ; compte inexistant et mot de passe erroné sont indistinguables
+en statut, message **et** durée (section 2) ; les routes protégées répondent
+401 sans session et avec un cookie inventé (section 3) ; un formateur reçoit
+403 (section 4) ; un `etudiant_id` glissé dans le corps est ignoré au profit
+de celui de la session (section 5) ; la déconnexion invalide réellement le
+cookie (section 6) ; jetons et mots de passe ne sont jamais en clair en base
+(section 7) ; la contrainte `CHECK` refuse un formateur rattaché à un
+étudiant (section 8) ; et `docker compose exec backend npm test` confirme
+`44 passed` (section 9).
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

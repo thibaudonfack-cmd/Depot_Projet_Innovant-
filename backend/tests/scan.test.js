@@ -38,6 +38,7 @@ const request = require('supertest');
 const { app } = require('../server');
 const pool = require('../src/config/db');
 const { generateSessionToken } = require('../src/services/tokenService');
+const { connecter } = require('./aide-auth');
 
 // UUID fixes du seed de demonstration (02-seed.sql).
 const UF_ID = '11111111-1111-1111-1111-111111111111';
@@ -57,12 +58,27 @@ const ETUDIANT_V4 = '33333333-3333-3333-3333-333333333332';
 const ETUDIANT_DOUBLE_SCAN = '33333333-3333-3333-3333-333333333333';
 const ETUDIANT_SANS_APPAREIL = '33333333-3333-3333-3333-333333333334';
 
+// ETAPE 7c : etudiant_id n'est plus envoye dans le corps des requetes -- il
+// provient de la session. Chaque scenario doit donc etre execute SOUS
+// L'IDENTITE de l'etudiant concerne, d'ou un cookie de session par compte.
+// Les identifiants ci-dessus ne servent plus qu'aux verifications directes
+// en base et a l'enrolement des appareils de test.
+const cookies = {};
+
 const PRIVATE_KEY_PATH = process.env.JWT_PRIVATE_KEY_PATH
   ? path.resolve(process.env.JWT_PRIVATE_KEY_PATH)
   : path.resolve(__dirname, '../../keys/private.pem');
 const privateKey = fs.readFileSync(PRIVATE_KEY_PATH, 'utf8');
 
 let seanceId;
+// Seconde seance, reservee au test d'usurpation d'identite (Etape 7c).
+// Necessaire, et non un confort : la contrainte uq_scan_presence
+// (Etape 3 bis) n'autorise qu'UNE presence par etudiant et par seance. Or
+// les quatre etudiants du seed ont deja tous scanne -- ou ne peuvent pas
+// signer -- sur la seance principale au moment ou ce test s'execute. Le
+// reutiliser donnerait un 409 DOUBLE_SCAN parfaitement legitime, qui
+// masquerait ce que le test cherche reellement a verifier.
+let seanceUsurpation;
 // Cles ECDSA des appareils "enroles" par cette suite, indexees par etudiant.
 const appareils = new Map();
 
@@ -107,9 +123,10 @@ beforeAll(async () => {
   // via POST /api/seances : ce fichier ne doit pas dependre du controller
   // d'un autre endpoint pour etre lisible et executable isolement.
   seanceId = crypto.randomUUID();
+  seanceUsurpation = crypto.randomUUID();
   await pool.query(
-    'INSERT INTO seances (id, uf_id, salle_id) VALUES (?, ?, ?)',
-    [seanceId, UF_ID, SALLE_ID]
+    'INSERT INTO seances (id, uf_id, salle_id) VALUES (?, ?, ?), (?, ?, ?)',
+    [seanceId, UF_ID, SALLE_ID, seanceUsurpation, UF_ID, SALLE_ID]
   );
 
   // Trois des quatre etudiants ont un appareil enrole. ETUDIANT_SANS_APPAREIL
@@ -117,6 +134,24 @@ beforeAll(async () => {
   await enrolerAppareilPour(ETUDIANT_NOMINAL);
   await enrolerAppareilPour(ETUDIANT_V4);
   await enrolerAppareilPour(ETUDIANT_DOUBLE_SCAN);
+
+  // Une session par etudiant concerne. Le compte "driss" correspond a
+  // ETUDIANT_SANS_APPAREIL : il est authentifie comme les autres, mais
+  // n'a volontairement aucun appareil enrole.
+  for (const [cle, id] of [
+    ['amara', ETUDIANT_NOMINAL],
+    ['bilal', ETUDIANT_V4],
+    ['chiara', ETUDIANT_DOUBLE_SCAN],
+    ['driss', ETUDIANT_SANS_APPAREIL],
+  ]) {
+    const { cookie, utilisateur } = await connecter(cle);
+    cookies[cle] = cookie;
+    // Verification de coherence du seed : la session doit bien pointer vers
+    // l'etudiant attendu. Sans ce controle, une erreur de correspondance
+    // dans 02-seed.sql produirait des echecs de test tres difficiles a
+    // diagnostiquer plus loin (un scan attribue au mauvais etudiant).
+    expect(utilisateur.etudiant_id).toBe(id);
+  }
 });
 
 afterAll(async () => {
@@ -144,7 +179,8 @@ describe('POST /api/scans -- cascade de validation (RF-12, Etapes 3 et 5)', () =
 
     const response = await request(app)
       .post('/api/scans')
-      .send({ jeton, etudiant_id: ETUDIANT_NOMINAL, signature_appareil: signature });
+      .set('Cookie', cookies.amara)
+      .send({ jeton, signature_appareil: signature });
 
     expect(response.status).toBe(201);
     expect(response.body.status).toBe('ok');
@@ -168,7 +204,8 @@ describe('POST /api/scans -- cascade de validation (RF-12, Etapes 3 et 5)', () =
 
     const response = await request(app)
       .post('/api/scans')
-      .send({ jeton: jetonExpire, etudiant_id: ETUDIANT_NOMINAL, signature_appareil: signature });
+      .set('Cookie', cookies.amara)
+      .send({ jeton: jetonExpire, signature_appareil: signature });
 
     expect(response.status).toBe(401);
     expect(response.body.code).toBe('JETON_EXPIRE');
@@ -189,7 +226,8 @@ describe('POST /api/scans -- cascade de validation (RF-12, Etapes 3 et 5)', () =
 
     const response = await request(app)
       .post('/api/scans')
-      .send({ jeton: jetonForge, etudiant_id: ETUDIANT_NOMINAL, signature_appareil: signature });
+      .set('Cookie', cookies.amara)
+      .send({ jeton: jetonForge, signature_appareil: signature });
 
     expect(response.status).toBe(401);
     expect(response.body.code).toBe('JETON_INVALIDE');
@@ -204,11 +242,8 @@ describe('POST /api/scans -- cascade de validation (RF-12, Etapes 3 et 5)', () =
 
     const response = await request(app)
       .post('/api/scans')
-      .send({
-        jeton,
-        etudiant_id: ETUDIANT_NOMINAL,
-        signature_appareil: signatureDuMauvaisAppareil,
-      });
+      .set('Cookie', cookies.amara)
+      .send({ jeton, signature_appareil: signatureDuMauvaisAppareil });
 
     expect(response.status).toBe(401);
     expect(response.body.code).toBe('SIGNATURE_APPAREIL_INVALIDE');
@@ -219,7 +254,8 @@ describe('POST /api/scans -- cascade de validation (RF-12, Etapes 3 et 5)', () =
 
     const response = await request(app)
       .post('/api/scans')
-      .send({ jeton, etudiant_id: ETUDIANT_NOMINAL, signature_appareil: 'AAAAAAAA' });
+      .set('Cookie', cookies.amara)
+      .send({ jeton, signature_appareil: 'AAAAAAAA' });
 
     expect(response.status).toBe(401);
     expect(response.body.code).toBe('SIGNATURE_APPAREIL_INVALIDE');
@@ -235,11 +271,8 @@ describe('POST /api/scans -- cascade de validation (RF-12, Etapes 3 et 5)', () =
 
     const response = await request(app)
       .post('/api/scans')
-      .send({
-        jeton: secondJeton,
-        etudiant_id: ETUDIANT_NOMINAL,
-        signature_appareil: signatureDuPremier,
-      });
+      .set('Cookie', cookies.amara)
+      .send({ jeton: secondJeton, signature_appareil: signatureDuPremier });
 
     expect(response.status).toBe(401);
     expect(response.body.code).toBe('SIGNATURE_APPAREIL_INVALIDE');
@@ -254,11 +287,8 @@ describe('POST /api/scans -- cascade de validation (RF-12, Etapes 3 et 5)', () =
 
     const response = await request(app)
       .post('/api/scans')
-      .send({
-        jeton,
-        etudiant_id: ETUDIANT_SANS_APPAREIL,
-        signature_appareil: signature,
-      });
+      .set('Cookie', cookies.driss)
+      .send({ jeton, signature_appareil: signature });
 
     expect(response.status).toBe(403);
     expect(response.body.code).toBe('AUCUN_APPAREIL_ENROLE');
@@ -270,12 +300,14 @@ describe('POST /api/scans -- cascade de validation (RF-12, Etapes 3 et 5)', () =
 
     const premiere = await request(app)
       .post('/api/scans')
-      .send({ jeton, etudiant_id: ETUDIANT_V4, signature_appareil: signature });
+      .set('Cookie', cookies.bilal)
+      .send({ jeton, signature_appareil: signature });
     expect(premiere.status).toBe(201);
 
     const deuxieme = await request(app)
       .post('/api/scans')
-      .send({ jeton, etudiant_id: ETUDIANT_V4, signature_appareil: signature });
+      .set('Cookie', cookies.bilal)
+      .send({ jeton, signature_appareil: signature });
 
     expect(deuxieme.status).toBe(409);
     expect(deuxieme.body.code).toBe('REJEU_DETECTE');
@@ -295,34 +327,107 @@ describe('POST /api/scans -- cascade de validation (RF-12, Etapes 3 et 5)', () =
 
     const premier = await request(app)
       .post('/api/scans')
-      .send({ jeton: jetonA, etudiant_id: ETUDIANT_DOUBLE_SCAN, signature_appareil: signatureA });
+      .set('Cookie', cookies.chiara)
+      .send({ jeton: jetonA, signature_appareil: signatureA });
     expect(premier.status).toBe(201);
 
     const second = await request(app)
       .post('/api/scans')
-      .send({ jeton: jetonB, etudiant_id: ETUDIANT_DOUBLE_SCAN, signature_appareil: signatureB });
+      .set('Cookie', cookies.chiara)
+      .send({ jeton: jetonB, signature_appareil: signatureB });
 
     expect(second.status).toBe(409);
     expect(second.body.code).toBe('DOUBLE_SCAN');
   });
 
-  test('champs obligatoires manquants (jeton, etudiant_id ou signature_appareil) : 400 explicite, avant toute verification cryptographique', async () => {
+  test('champs obligatoires manquants (jeton ou signature_appareil) : 400 explicite, avant toute verification cryptographique', async () => {
     const jeton = generateSessionToken(seanceId, SALLE_ID);
     const signature = await signerAvecAppareilDe(ETUDIANT_NOMINAL, jeton);
 
-    const sansEtudiant = await request(app)
-      .post('/api/scans').send({ jeton, signature_appareil: signature });
-    expect(sansEtudiant.status).toBe(400);
-
     const sansJeton = await request(app)
-      .post('/api/scans').send({ etudiant_id: ETUDIANT_NOMINAL, signature_appareil: signature });
+      .post('/api/scans').set('Cookie', cookies.amara)
+      .send({ signature_appareil: signature });
     expect(sansJeton.status).toBe(400);
 
     // signature_appareil manquante : rejetee en 400, JAMAIS acceptee par
     // defaut -- la rendre facultative offrirait un contournement trivial de
     // toute la chaine de securite de l'Etape 5.
     const sansSignature = await request(app)
-      .post('/api/scans').send({ jeton, etudiant_id: ETUDIANT_NOMINAL });
+      .post('/api/scans').set('Cookie', cookies.amara).send({ jeton });
     expect(sansSignature.status).toBe(400);
+  });
+
+  // --------------------------------------------------------------------
+  // ETAPE 7c : l'identite ne vient plus du client
+  // --------------------------------------------------------------------
+
+  test("ETAPE 7c : sans cookie de session, la route est refusee (401) -- aucun scan possible sans authentification", async () => {
+    const jeton = generateSessionToken(seanceId, SALLE_ID);
+    const signature = await signerAvecAppareilDe(ETUDIANT_NOMINAL, jeton);
+
+    const response = await request(app)
+      .post('/api/scans')
+      .send({ jeton, signature_appareil: signature });
+
+    expect(response.status).toBe(401);
+    expect(response.body.code).toBe('NON_AUTHENTIFIE');
+  });
+
+  test('ETAPE 7c : un cookie de session invente est refuse (401)', async () => {
+    const jeton = generateSessionToken(seanceId, SALLE_ID);
+    const signature = await signerAvecAppareilDe(ETUDIANT_NOMINAL, jeton);
+
+    const response = await request(app)
+      .post('/api/scans')
+      .set('Cookie', 'presence_session=jeton-totalement-invente')
+      .send({ jeton, signature_appareil: signature });
+
+    expect(response.status).toBe(401);
+    expect(response.body.code).toBe('SESSION_INVALIDE');
+  });
+
+  test("ETAPE 7c : un etudiant_id glisse dans le corps est IGNORE -- le scan est attribue a l'utilisateur de la session, pas a l'identifiant fourni", async () => {
+    // C'EST LE TEST CENTRAL DE L'ETAPE 7c. Bilal est authentifie, mais tente
+    // de faire enregistrer une presence au nom d'Amara en placant son
+    // identifiant dans le corps de la requete -- exactement l'attaque que
+    // rendait triviale l'absence d'authentification jusqu'ici.
+    // Seance DEDIEE : voir le commentaire de seanceUsurpation plus haut.
+    const jeton = generateSessionToken(seanceUsurpation, SALLE_ID);
+    const signature = await signerAvecAppareilDe(ETUDIANT_V4, jeton);
+
+    const response = await request(app)
+      .post('/api/scans')
+      .set('Cookie', cookies.bilal)
+      .send({
+        jeton,
+        signature_appareil: signature,
+        etudiant_id: ETUDIANT_NOMINAL, // tentative d'usurpation
+      });
+
+    // La requete aboutit (Bilal a le droit de scanner)...
+    expect(response.status).toBe(201);
+    // ...mais la presence est enregistree pour BILAL, jamais pour Amara.
+    expect(response.body.etudiant_id).toBe(ETUDIANT_V4);
+    expect(response.body.etudiant_id).not.toBe(ETUDIANT_NOMINAL);
+
+    // Verification EN BASE, et pas seulement sur la reponse HTTP.
+    const [lignes] = await pool.query(
+      'SELECT etudiant_id FROM scans WHERE id = ?', [response.body.scan_id]
+    );
+    expect(lignes[0].etudiant_id).toBe(ETUDIANT_V4);
+  });
+
+  test("ETAPE 7c : un formateur authentifie ne peut pas scanner (403, role insuffisant)", async () => {
+    const { cookie } = await connecter('formateur');
+    const jeton = generateSessionToken(seanceId, SALLE_ID);
+    const signature = await signerAvecAppareilDe(ETUDIANT_NOMINAL, jeton);
+
+    const response = await request(app)
+      .post('/api/scans')
+      .set('Cookie', cookie)
+      .send({ jeton, signature_appareil: signature });
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('ROLE_INSUFFISANT');
   });
 });

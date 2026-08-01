@@ -12,11 +12,17 @@ const request = require('supertest');
 
 const { app } = require('../server');
 const pool = require('../src/config/db');
+const { connecter } = require('./aide-auth');
 
 // UUID fixes du seed de demonstration (02-seed.sql).
 const ETUDIANT_ENROLEMENT = '33333333-3333-3333-3333-333333333331';
-const ETUDIANT_SANS_DB = '33333333-3333-3333-3333-333333333334';
-const ETUDIANT_INEXISTANT = '00000000-0000-0000-0000-000000000000';
+
+// ETAPE 7c : etudiant_id vient desormais de la session. Les tests
+// "etudiant_id manquant" et "etudiant_id inconnu" de l'Etape 4 n'ont donc
+// plus d'objet -- un client ne peut plus fournir cette valeur du tout. Ils
+// sont remplaces par des tests d'authentification et d'autorisation, qui
+// couvrent la meme surface de risque au bon niveau.
+let cookieAmara;
 
 // Cles PEM REELLES (pas des chaines arbitraires) : genere deux paires ECDSA
 // P-256 distinctes via l'API crypto native de Node (independante de
@@ -31,6 +37,13 @@ function genererClePubliquePem() {
   });
   return publicKey;
 }
+
+beforeAll(async () => {
+  const { cookie, utilisateur } = await connecter('amara');
+  cookieAmara = cookie;
+  // Coherence du seed : la session doit bien correspondre a l'etudiant teste.
+  expect(utilisateur.etudiant_id).toBe(ETUDIANT_ENROLEMENT);
+});
 
 afterAll(async () => {
   // Nettoyage : contrairement a scans (Etape 3, volontairement en ecriture
@@ -49,11 +62,8 @@ describe('POST /api/enrolements -- enrolement cryptographique (RF-07/RF-09)', ()
 
     const response = await request(app)
       .post('/api/enrolements')
-      .send({
-        etudiant_id: ETUDIANT_ENROLEMENT,
-        public_key: clePublique,
-        device_info: 'Test Suite - Appareil 1',
-      });
+      .set('Cookie', cookieAmara)
+      .send({ public_key: clePublique, device_info: 'Test Suite - Appareil 1' });
 
     expect(response.status).toBe(201);
     expect(response.body.status).toBe('ok');
@@ -75,11 +85,8 @@ describe('POST /api/enrolements -- enrolement cryptographique (RF-07/RF-09)', ()
 
     const response = await request(app)
       .post('/api/enrolements')
-      .send({
-        etudiant_id: ETUDIANT_ENROLEMENT,
-        public_key: deuxiemeClePublique,
-        device_info: 'Test Suite - Appareil 2 (remplacement)',
-      });
+      .set('Cookie', cookieAmara)
+      .send({ public_key: deuxiemeClePublique, device_info: 'Test Suite - Appareil 2 (remplacement)' });
 
     expect(response.status).toBe(201);
     expect(response.body.appareil_precedent_revoque).toBe(true);
@@ -103,34 +110,63 @@ describe('POST /api/enrolements -- enrolement cryptographique (RF-07/RF-09)', ()
     expect(revoques[0].date_revocation).not.toBeNull();
   });
 
-  test('etudiant_id ou public_key manquant : 400 explicite, avant toute ecriture', async () => {
+  test('public_key manquante : 400 explicite, avant toute ecriture', async () => {
     const sansClePublique = await request(app)
       .post('/api/enrolements')
-      .send({ etudiant_id: ETUDIANT_SANS_DB });
+      .set('Cookie', cookieAmara)
+      .send({});
     expect(sansClePublique.status).toBe(400);
-
-    const sansEtudiant = await request(app)
-      .post('/api/enrolements')
-      .send({ public_key: genererClePubliquePem() });
-    expect(sansEtudiant.status).toBe(400);
   });
 
-  test('etudiant_id inconnu : 400 (violation de contrainte FOREIGN KEY), transaction annulee proprement', async () => {
+  // --------------------------------------------------------------------
+  // ETAPE 7c : l'identite ne vient plus du client
+  // --------------------------------------------------------------------
+
+  test('ETAPE 7c : sans cookie de session, l\'enrolement est refuse (401)', async () => {
     const response = await request(app)
       .post('/api/enrolements')
+      .send({ public_key: genererClePubliquePem() });
+
+    expect(response.status).toBe(401);
+    expect(response.body.code).toBe('NON_AUTHENTIFIE');
+  });
+
+  test("ETAPE 7c : un etudiant_id glisse dans le corps est IGNORE -- l'appareil est enrole pour l'utilisateur de la session", async () => {
+    // Amara est authentifiee, mais tente d'enroler un appareil au nom de
+    // Bilal. C'etait, jusqu'a l'Etape 7c, le contournement le plus direct de
+    // toute la chaine : enroler SON appareil sous l'identite d'un autre
+    // permettait ensuite de scanner legitimement a sa place.
+    const AUTRE_ETUDIANT = '33333333-3333-3333-3333-333333333332';
+    const clePublique = genererClePubliquePem();
+
+    const response = await request(app)
+      .post('/api/enrolements')
+      .set('Cookie', cookieAmara)
       .send({
-        etudiant_id: ETUDIANT_INEXISTANT,
-        public_key: genererClePubliquePem(),
+        public_key: clePublique,
+        device_info: 'Test Suite - tentative usurpation',
+        etudiant_id: AUTRE_ETUDIANT, // ignore
       });
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(201);
+    expect(response.body.etudiant_id).toBe(ETUDIANT_ENROLEMENT);
 
-    // Aucune ligne ne doit avoir ete inseree malgre l'echec -- confirme que
-    // le rollback de la transaction a bien eu lieu.
+    // Verification EN BASE : rien n'a ete enrole pour l'autre etudiant.
     const [lignes] = await pool.query(
-      'SELECT id FROM appareils_enroles WHERE etudiant_id = ?',
-      [ETUDIANT_INEXISTANT]
+      'SELECT id FROM appareils_enroles WHERE etudiant_id = ? AND info_appareil = ?',
+      [AUTRE_ETUDIANT, 'Test Suite - tentative usurpation']
     );
     expect(lignes).toHaveLength(0);
+  });
+
+  test('ETAPE 7c : un formateur ne peut pas enroler d\'appareil (403)', async () => {
+    const { cookie } = await connecter('formateur');
+    const response = await request(app)
+      .post('/api/enrolements')
+      .set('Cookie', cookie)
+      .send({ public_key: genererClePubliquePem() });
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('ROLE_INSUFFISANT');
   });
 });

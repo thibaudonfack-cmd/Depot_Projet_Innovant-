@@ -64,6 +64,90 @@ CREATE TABLE appareils_enroles (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------------------------------------------------------
+-- utilisateurs  (Etape 7a -- EXTENSION MVP)
+--
+-- ECART ASSUME PAR RAPPORT AU PERIMETRE INITIAL. Le commentaire de la table
+-- "corrections" plus bas indique que "la gestion des comptes est explicitement
+-- hors perimetre du prototype (cf. 3.1.2)". Cette table contredit donc une
+-- decision de perimetre ecrite dans le memoire. Ce n'est pas un oubli : les
+-- tests de l'Etape 6 ont montre qu'un scanner utilisable exige une identite
+-- reelle -- sans authentification, etudiant_id est choisi librement par le
+-- client, ce qui vide de sens toute la chaine cryptographique des Etapes 4 et
+-- 5. Extension revendiquee comme telle en soutenance, le rapport initial
+-- n'etant pas modifie retroactivement.
+--
+-- LIEN VERS etudiants, ET NON FUSION. La table etudiants est referencee par
+-- des cles etrangeres dans inscriptions, appareils_enroles et scans ; la
+-- remplacer imposerait de reprendre tout le schema. utilisateurs porte donc
+-- uniquement l'IDENTITE DE CONNEXION (email, mot de passe, role) et pointe
+-- vers l'etudiant metier quand il y a lieu. Un formateur n'a pas de ligne
+-- dans etudiants -- d'ou etudiant_id NULLABLE.
+--
+-- La contrainte CHECK garantit la coherence role <-> lien : un compte
+-- 'etudiant' DOIT referencer un etudiant, un compte 'formateur' ne doit
+-- JAMAIS en referencer. Sans elle, un formateur pourrait etre rattache a un
+-- etudiant et scanner en son nom -- exactement le contournement que l'Etape
+-- 7c cherche a fermer. Verifie au niveau du SCHEMA et pas seulement dans le
+-- code applicatif (MySQL applique reellement CHECK depuis la version 8.0.16 ;
+-- l'image utilisee par ce projet est mysql:8.0, donc au-dela).
+--
+-- UNIQUE(etudiant_id) : un etudiant ne peut avoir qu'UN seul compte. MySQL
+-- autorise plusieurs NULL dans un index UNIQUE, donc cette contrainte
+-- n'entrave pas les formateurs (tous a NULL) -- meme propriete que celle
+-- exploitee par appareils_enroles.actif_key.
+-- -----------------------------------------------------------------------------
+CREATE TABLE utilisateurs (
+  id                CHAR(36)     NOT NULL DEFAULT (UUID()) PRIMARY KEY,
+  email             VARCHAR(255) NOT NULL,
+  mot_de_passe_hash VARCHAR(255) NOT NULL,
+  nom               VARCHAR(255) NOT NULL,
+  role              ENUM('etudiant', 'formateur') NOT NULL,
+  etudiant_id       CHAR(36)     NULL,
+  date_creation     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_utilisateur_etudiant FOREIGN KEY (etudiant_id) REFERENCES etudiants(id),
+  CONSTRAINT chk_utilisateur_role_lien CHECK (
+    (role = 'etudiant'  AND etudiant_id IS NOT NULL) OR
+    (role = 'formateur' AND etudiant_id IS NULL)
+  ),
+  UNIQUE KEY uq_utilisateur_email (email),
+  UNIQUE KEY uq_utilisateur_etudiant (etudiant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -----------------------------------------------------------------------------
+-- sessions  (Etape 7a)
+--
+-- Sessions COTE SERVEUR plutot qu'un jeton auto-porteur (JWT) : choix
+-- delibere, justifie en detail dans ANALYSE_CODE.md (Etape 7a). En resume,
+-- un JWT reste valide jusqu'a son expiration meme apres une deconnexion --
+-- il n'existe aucun moyen de le revoquer sans introduire, precisement, une
+-- liste cote serveur. Une table de sessions rend la deconnexion reelle et
+-- fait de la base la seule autorite sur la validite d'une session, ce qui
+-- est la ligne de conduite suivie partout ailleurs dans ce projet (cf.
+-- qrBroadcaster.js : "la base est la seule autorite sur salle_id").
+--
+-- jeton_hash, ET NON LE JETON : seule l'empreinte SHA-256 du jeton de
+-- session est stockee. Une fuite de la base (sauvegarde egaree, injection
+-- SQL en lecture, acces DBA non autorise) ne permet donc PAS d'usurper une
+-- session en cours -- l'attaquant obtiendrait des empreintes, pas les
+-- valeurs a placer dans un cookie. Meme raisonnement que pour les mots de
+-- passe : ce que le serveur n'a pas besoin de connaitre en clair, il ne le
+-- stocke pas en clair. SHA-256 sans sel suffit ici, contrairement aux mots
+-- de passe : le jeton fait 256 bits d'entropie aleatoire, il n'est donc pas
+-- attaquable par dictionnaire ou table precalculee.
+-- -----------------------------------------------------------------------------
+CREATE TABLE sessions (
+  id              CHAR(36)  NOT NULL DEFAULT (UUID()) PRIMARY KEY,
+  utilisateur_id  CHAR(36)  NOT NULL,
+  jeton_hash      CHAR(64)  NOT NULL,
+  date_creation   DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  date_expiration DATETIME  NOT NULL,
+  CONSTRAINT fk_session_utilisateur FOREIGN KEY (utilisateur_id) REFERENCES utilisateurs(id),
+  UNIQUE KEY uq_session_jeton (jeton_hash),
+  KEY idx_session_utilisateur (utilisateur_id),
+  KEY idx_session_expiration (date_expiration)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -----------------------------------------------------------------------------
 -- uf (unites de formation)
 -- -----------------------------------------------------------------------------
 CREATE TABLE uf (

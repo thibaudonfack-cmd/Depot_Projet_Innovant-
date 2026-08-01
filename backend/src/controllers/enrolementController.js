@@ -20,16 +20,24 @@
 // preuve de possession sera necessaire au moment ou une cle enrolee doit
 // authentifier un scan (etape ulterieure, RF-07 complet), pas au moment de
 // l'enrolement initial lui-meme (qui a lieu sur un appareil qui vient tout
-// juste de generer sa propre paire, cf. CryptoService.js -- rien ne prouve
-// encore l'IDENTITE de l'etudiant a ce stade non plus, cette route n'est pas
-// une authentification, c'est un enregistrement).
+// juste de generer sa propre paire, cf. CryptoService.js).
+//
+// ETAPE 7c : en revanche, l'IDENTITE de l'etudiant est desormais etablie.
+// Elle provient de la session authentifiee, plus du corps de la requete --
+// il n'est donc plus possible d'enroler son propre appareil sous
+// l'identifiant d'un autre etudiant, ce qui etait jusqu'ici le contournement
+// le plus direct de toute la chaine (documente comme angle mort a l'Etape 5).
 
 const crypto = require('crypto');
 const pool = require('../config/db');
 
 /**
  * POST /api/enrolements
- * Corps attendu : { etudiant_id: string, public_key: string, device_info?: string }
+ * Corps attendu : { public_key: string, device_info?: string }
+ * Route PROTEGEE : exige une session authentifiee de role 'etudiant'.
+ *
+ * etudiant_id provient de req.utilisateur.etudiant_id (session), jamais du
+ * corps de la requete -- cf. en-tete de ce fichier, Etape 7c.
  *
  * public_key est stockee TELLE QUELLE (colonne cle_publique, TEXT) --
  * attendue au format PEM (cf. CryptoService.js, exportPublicKey()), mais ce
@@ -52,16 +60,15 @@ const pool = require('../config/db');
  *   2. INSERT : le nouvel appareil est enregistre avec statut='actif'.
  */
 async function enrolerAppareil(req, res) {
-  const {
-    etudiant_id: etudiantId,
-    public_key: clePublique,
-    device_info: infoAppareil,
-  } = req.body || {};
+  const { public_key: clePublique, device_info: infoAppareil } = req.body || {};
 
-  if (!etudiantId || !clePublique) {
+  // Identite issue de la SESSION, jamais du client (cf. en-tete de fonction).
+  const etudiantId = req.utilisateur.etudiant_id;
+
+  if (!clePublique) {
     return res.status(400).json({
       status: 'error',
-      message: 'etudiant_id et public_key sont obligatoires.',
+      message: 'public_key est obligatoire.',
     });
   }
 

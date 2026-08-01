@@ -1797,9 +1797,200 @@ rien.
 
 ---
 
+# Étape 7a/7c — Authentification et coupure de la confiance au client
+
+## Écart de périmètre assumé (extension MVP)
+
+`01-schema.sql` documentait jusqu'ici que *« la gestion des comptes est
+explicitement hors périmètre du prototype, cf. 3.1.2 »*. Cette étape
+contredit donc une décision écrite dans le mémoire. C'est **assumé et
+revendiqué comme tel** : les tests de l'Étape 6 ont montré qu'un scanner
+réellement utilisable exige une identité vérifiée. Sans authentification,
+`etudiant_id` était choisi librement par le client — ce qui vidait de sens
+l'intégralité de la chaîne cryptographique construite aux Étapes 4 et 5. Le
+rapport initial n'est **pas** modifié rétroactivement ; l'extension est
+présentée en soutenance comme une conséquence documentée de la validation.
+
+Le périmètre reste néanmoins borné : **authentification seulement, pas
+administration**. Il n'existe ni création de compte, ni réinitialisation de
+mot de passe, ni interface d'administration. Le secrétariat reste hors
+périmètre (RF-17/RF-18). Ce bornage est appliqué **au niveau des privilèges
+MySQL** et pas seulement par absence de code : `app_logs` ne reçoit aucun
+privilège d'écriture sur `utilisateurs` (`03-privileges.sh`). Même si un
+défaut applicatif tentait de créer un compte, la base refuserait.
+
+## Ce que 7c corrige exactement
+
+Avant : `POST /api/scans` et `POST /api/enrolements` lisaient `etudiant_id`
+**dans le corps de la requête**. Changer une valeur dans un JSON suffisait
+pour scanner au nom de n'importe qui, ou pour enrôler son propre appareil
+sous l'identité d'un autre — ce dernier point étant le contournement le plus
+direct de toute la chaîne, puisqu'il rendait ensuite tous les scans
+« légitimes » au sens de l'Étape 5.
+
+Après : l'identité provient exclusivement de `req.utilisateur.etudiant_id`,
+résolu côté serveur depuis le cookie de session. Un `etudiant_id` présent
+dans le corps est **ignoré**, et non rejeté — le refuser explicitement
+renseignerait un attaquant sur le mécanisme sans aucun gain.
+
+Les deux garanties se complètent sans se remplacer : **la session prouve
+QUI, la signature d'appareil prouve DEPUIS QUEL APPAREIL**. Un compte volé
+sans l'appareil enrôlé ne permet pas de scanner ; un appareil enrôlé sans la
+session non plus.
+
+## Session côté serveur plutôt que JWT
+
+Le projet dispose déjà de clés RS256 : un JWT de session aurait été immédiat.
+Il a été écarté pour une raison précise — **un JWT reste valide jusqu'à son
+expiration, même après une déconnexion**. Le révoquer suppose une liste de
+révocation côté serveur, c'est-à-dire exactement la table qu'on prétendait
+éviter, mais avec une sémantique inversée et plus fragile.
+
+Une table `sessions` rend la déconnexion **réelle** (`DELETE`) et fait de la
+base la seule autorité sur la validité d'une session — ligne de conduite déjà
+suivie ailleurs (`qrBroadcaster.js` : « la base est la seule autorité sur
+`salle_id` »). Un test dédié le vérifie : le même cookie rejoué après
+déconnexion est refusé.
+
+**Le jeton n'est jamais stocké en clair.** Seule son empreinte SHA-256 figure
+en base. Une fuite de la base (sauvegarde égarée, injection SQL en lecture,
+accès DBA non autorisé) ne permet donc pas d'usurper une session en cours.
+SHA-256 sans sel suffit ici, contrairement aux mots de passe : le jeton fait
+256 bits d'entropie aléatoire, il n'est attaquable ni par dictionnaire ni par
+table précalculée. Vérifié par un test qui cherche le jeton brut en base et
+constate qu'il n'y est pas, puis retrouve la ligne par son empreinte.
+
+**Attributs du cookie**, chacun fermant un vecteur précis : `httpOnly` (la
+session est invisible à JavaScript — une XSS ne peut pas la voler, ce qui
+prolonge exactement le raisonnement mené à l'Étape 4 sur la clé privée
+ECDSA) ; `secure` ; `sameSite: 'strict'` (protection CSRF : un site tiers ne
+peut pas faire valider une présence à l'insu de l'étudiant, `strict` plutôt
+que `lax` car aucun parcours n'arrive depuis un lien externe).
+
+## scrypt : un choix dicté par l'historique du projet
+
+bcrypt et argon2 sont d'excellents KDF, mais leurs implémentations Node sont
+des **modules natifs à compiler**. Ce projet a déjà perdu plusieurs
+allers-retours de pipeline sur des dépendances liées à la plateforme (cf.
+« Fix CI : package-lock.json désynchronisé » et « Récidive et durcissement
+définitif »). Introduire un binaire dont la compilation diffère entre l'hôte
+Windows, le conteneur Linux et le runner rouvrirait exactement cette classe
+de problème.
+
+`crypto.scrypt` est fourni **par Node**, sans dépendance — même raisonnement
+que `crypto.randomUUID()` (Étape 2) et `crypto.subtle` (Étape 4). Ce n'est
+pas un repli au rabais : scrypt est normalisé (RFC 7914), conçu pour résister
+au calcul massivement parallèle par son coût **mémoire** — la propriété même
+qui fait la valeur d'argon2 — et recommandé par l'OWASP comme alternative
+acceptable. Paramètres retenus : `N=32768, r=8, p=1`, au-dessus du minimum
+OWASP. Coût mesuré : **~127 ms par hachage**, payé une seule fois à la
+connexion (c'est tout l'intérêt d'une session : le mot de passe n'est jamais
+revérifié ensuite).
+
+Deux détails qui ne s'improvisent pas :
+- **`maxmem` doit être relevé explicitement.** La valeur par défaut de Node
+  (32 Mio) est inférieure à ce que `N=32768` exige, et scrypt échouerait
+  avec un message peu explicite (« Invalid scrypt params »).
+- **Les paramètres sont encodés dans la chaîne stockée**
+  (`scrypt$N$r$p$sel$empreinte`) plutôt que figés dans le code. Cela permet
+  de durcir le coût plus tard sans invalider les comptes existants. Un code
+  qui suppose des paramètres constants rend toute évolution impossible sans
+  réinitialiser tous les mots de passe.
+- **`timingSafeEqual`, jamais `===`.** Une comparaison classique s'arrête au
+  premier octet différent : sa *durée* révèle combien d'octets initiaux
+  étaient corrects, ce qui permet de reconstituer l'empreinte octet par
+  octet.
+
+## Anti-énumération de comptes
+
+Si l'email est inconnu, `connexion()` ne retourne pas immédiatement : il
+vérifie le mot de passe contre une **empreinte leurre** calculée au
+démarrage. Sans cette précaution, un email inexistant répondrait en ~1 ms
+(simple `SELECT`) contre ~127 ms pour un email valide (le coût de scrypt).
+Cet écart, parfaitement mesurable à distance, permettrait de tester une liste
+d'adresses et de déterminer lesquelles possèdent un compte — exploitable pour
+du hameçonnage ciblé, et donnée personnelle au sens du RGPD. Le message
+d'erreur est identique dans les deux cas, pour la même raison. Un test
+compare explicitement statut, code et message des deux scénarios.
+
+## Contraintes portées par le schéma, pas seulement par le code
+
+`chk_utilisateur_role_lien` (contrainte `CHECK`, appliquée réellement depuis
+MySQL 8.0.16) garantit qu'un compte `etudiant` référence un étudiant et
+qu'un compte `formateur` n'en référence **jamais**. Sans elle, un formateur
+pourrait être rattaché à un étudiant et scanner en son nom — précisément le
+contournement que 7c ferme. `UNIQUE(etudiant_id)` limite à un compte par
+étudiant, en exploitant la même propriété des `NULL` multiples que
+`appareils_enroles.actif_key`.
+
+## Un piège de test qui aurait pu faire perdre beaucoup de temps
+
+Le cookie de session porte l'attribut `Secure`. Or **Supertest sert
+l'application en HTTP simple**, et le magasin de cookies de superagent — comme
+un vrai navigateur — refuse de renvoyer un cookie `Secure` sur une connexion
+en clair. Un `request.agent(app)` reçoit donc bien le `Set-Cookie`, puis ne le
+renvoie jamais : *toutes* les routes protégées répondent 401, et le
+diagnostic est trompeur — on croit à un bug d'authentification.
+
+La tentation évidente est de conditionner `secure` à `NODE_ENV`. **Écarté
+délibérément** : cela reviendrait à ne pas tester la configuration réellement
+déployée, et ce type de réglage conditionnel finit régulièrement par se
+retrouver actif en production. La configuration stricte est préservée, et
+`tests/aide-auth.js` rejoue le cookie explicitement — ce qui a l'avantage de
+rendre visible, dans chaque test, ce que le navigateur enverrait.
+
+## Vérification par mutation
+
+Comme pour la fuite caméra (Étape 6), la valeur des tests a été établie en
+cassant volontairement le code plutôt qu'en se contentant du vert :
+
+| Mutation | Résultat |
+|---|---|
+| `etudiantId = req.body.etudiant_id \|\| req.utilisateur.etudiant_id` (retour à l'état pré-7c) | Le test d'usurpation **échoue** |
+| Restauration | 44/44 repassent |
+
+**44 tests verts** sur 5 suites (7 tokenService + 2 health + 14 scan + 8
+enrolement + 13 auth), contre un vrai MySQL 8.0.45 éphémère.
+
+Un échec transitoire mérite d'être noté, car il illustre l'interaction entre
+règles : le test d'usurpation échouait initialement en `409 DOUBLE_SCAN`. Ce
+n'était pas un bug — la contrainte `uq_scan_presence` (Étape 3 bis) faisait
+correctement son travail, l'étudiant utilisé ayant déjà scanné plus tôt dans
+la suite. Corrigé en créant une **séance dédiée** à ce test, plutôt qu'en
+affaiblissant la contrainte.
+
+## Migration obligatoire
+
+`01-schema.sql` change (deux nouvelles tables) et `02-seed.sql` aussi
+(comptes). Un environnement déjà initialisé **ne les recevra pas** :
+```bash
+docker compose down -v
+docker compose up -d --build
+```
+
+## Ce qui reste ouvert
+
+Le frontend n'a **pas encore de page de connexion** (Étape 7b) : l'interface
+de test envoie désormais ses requêtes avec `credentials: 'same-origin'` mais
+recevra 401 tant qu'aucune session n'est ouverte via l'API. C'est l'état
+attendu à l'issue de 7a/7c — et c'est délibérément dans cet ordre que le
+travail a été mené : sécuriser les endpoints **avant** de construire l'écran
+de connexion, pour ne jamais avoir d'interface qui *paraît* protégée
+au-dessus d'une API qui ne l'est pas.
+
+Non traité, et à ne pas oublier : **limitation du nombre de tentatives de
+connexion**. Rien n'empêche aujourd'hui un attaquant d'essayer des milliers
+de mots de passe. Le coût de scrypt (~127 ms) ralentit l'attaque sans la
+rendre impossible.
+
+---
+
 ## Prochaine étape suggérée
 
-**Géofencing (RF-13)** — désormais la priorité claire : c'est le seul
+**Étape 7b** — page de connexion, routage et tableaux de bord distincts
+formateur/étudiant. Puis 7d (séance dynamique) et 7e (géofencing).
+
+**Géofencing (RF-13)** — analyse conservée ci-dessous : c'est le seul
 mécanisme capable de fermer le vecteur résiduel documenté ci-dessus (relais
 en temps réel entre deux appareils tous deux enrôlés). Le polygone GeoJSON de
 la salle est déjà en base depuis l'Étape 1 (`salles.polygone_geojson`), et
