@@ -1592,6 +1592,164 @@ cookie (section 6) ; jetons et mots de passe ne sont jamais en clair en base
 
 ---
 
+# Étape 7b — Interface de connexion, routage et tableaux de bord
+
+Aucun changement de schéma : **pas besoin de `docker compose down -v`** si
+l'Étape 7a/7c a déjà été appliquée. Le conteneur frontend doit en revanche
+réinstaller ses dépendances (`react-router-dom`).
+
+```bash
+git pull origin dev
+docker compose up -d --build
+docker compose ps
+```
+
+Ouvrir `https://localhost/` (accepter l'avertissement de certificat comme
+depuis l'Étape 0.2).
+
+## 1. Redirection et écran de connexion
+
+Attendu à l'ouverture de `https://localhost/` : redirection automatique vers
+`/login`, puis un écran centré avec le logo, les champs e-mail et mot de
+passe, un bouton principal, et deux boutons discrets de pré-remplissage.
+
+Vérifier que le bouton **Se connecter est désactivé** tant qu'un des deux
+champs est vide.
+
+Ouvrir directement `https://localhost/etudiant` sans être connecté. Attendu :
+redirection vers `/login`. **Point à vérifier après connexion** : vous devez
+arriver sur `/etudiant`, la destination demandée ayant été mémorisée.
+
+## 2. Erreur d'identifiants
+
+Saisir `amara.diallo@example.org` avec un mot de passe erroné. Attendu : un
+encadré rouge avec une icône et le message « Email ou mot de passe
+incorrect. », les champs passant en bordure rouge, et le mot de passe effacé.
+Aucun code technique ne doit apparaître.
+
+Essayer ensuite avec un e-mail inexistant. Attendu : **exactement le même
+message** (anti-énumération, cf. Étape 7a).
+
+## 3. Connexion étudiant
+
+Cliquer sur **Pré-remplir étudiant**, puis **Se connecter**. Attendu :
+- un bref état de chargement sur le bouton ;
+- redirection automatique vers `/etudiant` ;
+- en-tête affichant « Amara Diallo » et « Espace étudiant ».
+
+## 4. Le rôle est respecté
+
+Connecté en tant qu'étudiant, ouvrir `https://localhost/formateur`. Attendu :
+redirection immédiate vers `/etudiant`, sans message d'erreur. Inversement,
+connecté en formateur, `/etudiant` renvoie vers `/formateur`.
+
+## 5. Parcours étudiant complet
+
+Sur `/etudiant`, la carte « Votre appareil » affiche une puce d'état.
+Cliquer sur **Associer cet appareil**. Attendu : puce passant à « Associé »
+et message vert de confirmation. Recliquer : le message doit indiquer que
+l'appareil précédent a été révoqué (RF-09).
+
+**Vérification centrale de l'Étape 7c** : ouvrir les outils de développement
+(F12), onglet **Réseau**, puis relancer l'association. Inspecter la requête
+`POST /api/enrolements` :
+
+- l'onglet **Charge utile** ne doit contenir que `public_key` et
+  `device_info` ; **aucun `etudiant_id`** ;
+- l'onglet **Cookies** doit montrer que `presence_session` a bien été envoyé ;
+- dans **Application → Cookies**, `presence_session` doit porter la mention
+  `HttpOnly` cochée. Taper `document.cookie` dans la console doit renvoyer
+  une chaîne **ne contenant pas** `presence_session` : c'est la preuve
+  directe qu'une faille XSS ne pourrait pas voler la session.
+
+Ouvrir ensuite une séance depuis un second navigateur connecté en formateur
+n'est pas encore possible (Étape 7d). Pour tester le scan dès maintenant,
+générer un jeton en ligne de commande :
+
+```bash
+curl -k -c form.txt -s -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"formateur@example.org","mot_de_passe":"Formateur123!"}' > /dev/null
+
+curl -k -b form.txt -s -X POST https://localhost/api/seances \
+  -H "Content-Type: application/json" \
+  -d '{"uf_id":"11111111-1111-1111-1111-111111111111","salle_id":"22222222-2222-2222-2222-222222222222"}'
+```
+Puis afficher son QR code avec le jeton obtenu (voir Étape 6, section 2) et
+le scanner depuis `/etudiant`. Attendu : écran vert « QR code détecté », puis
+message « Votre présence a bien été enregistrée. »
+
+Vérifier dans l'onglet Réseau que `POST /api/scans` n'envoie que `jeton` et
+`signature_appareil`.
+
+## 6. Tableau de bord formateur
+
+Se déconnecter, puis **Pré-remplir formateur** et se connecter. Attendu :
+`/formateur`, une carte « Votre compte » avec nom et e-mail, et une carte
+« Ouvrir une séance » présentant un aperçu grisé avec l'étiquette
+« Étape 7d ». Les champs de cet aperçu sont volontairement inertes.
+
+## 7. Déconnexion et expiration de session
+
+Cliquer sur **Se déconnecter**. Attendu : retour à `/login`. Utiliser le
+bouton **Précédent** du navigateur : vous ne devez **pas** revenir dans
+l'espace connecté, mais être redirigé vers `/login`.
+
+**Test de la session perdue en cours d'utilisation** : se reconnecter, puis
+supprimer manuellement le cookie (Application → Cookies → supprimer
+`presence_session`), et déclencher une action (associer l'appareil).
+Attendu : redirection automatique vers `/login`, sans page blanche ni erreur
+technique affichée.
+
+## 8. Rendu mobile
+
+Dans les outils de développement, activer le mode appareil mobile (par
+exemple iPhone SE, 375 px). Attendu : une seule colonne, aucun débordement
+horizontal, texte lisible sans zoom, boutons occupant toute la largeur, et
+en-tête où le libellé « Se déconnecter » est remplacé par une icône afin de
+ne pas écraser le nom.
+
+Vérifier également que l'en-tête reste visible en faisant défiler la page.
+
+## 9. Réduction des animations
+
+Activer la réduction des animations du système. Attendu : les apparitions de
+cartes, le spinner et la ligne de balayage du scanner ne sont plus animés,
+tout le reste fonctionnant à l'identique.
+
+## 10. Vérifications automatisées
+
+```bash
+docker compose exec frontend npm run lint
+docker compose exec frontend npm test
+docker compose exec frontend npm run build
+docker compose exec backend npm test
+```
+Attendu : 0 avertissement au lint, `5 passed` côté frontend, build réussi,
+et `44 passed, 44 total` côté backend.
+
+**Contrôle de sécurité sur le build** : les identifiants de démonstration ne
+doivent pas se retrouver dans le bundle de production.
+```bash
+docker compose exec frontend sh -c "npm run build > /dev/null && grep -r 'Etudiant123' dist/ || echo 'ABSENT du bundle (attendu)'"
+```
+
+## Critère de succès global — Étape 7b
+
+Validée si et seulement si : `/` redirige vers `/login` puis vers le bon
+tableau de bord après connexion (sections 1 et 3) ; une destination demandée
+avant connexion est restaurée ensuite (section 1) ; les identifiants erronés
+et les comptes inexistants donnent le même message (section 2) ; l'accès à
+un tableau de bord d'un autre rôle redirige sans erreur (section 4) ;
+`POST /api/enrolements` et `POST /api/scans` n'envoient **aucun**
+`etudiant_id` et `document.cookie` ne révèle pas la session (section 5) ; la
+déconnexion empêche le retour arrière et la perte de session redirige
+proprement (section 7) ; le rendu mobile tient en 375 px sans débordement
+(section 8) ; et les quatre commandes de la section 10 passent, identifiants
+de démonstration absents du bundle.
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

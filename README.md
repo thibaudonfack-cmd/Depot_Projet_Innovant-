@@ -85,11 +85,13 @@ distant en retard. Procedure complete et configuration des deux remotes :
 
 ## Etat du projet
 
-Etape 7a/7c livree : authentification par cookie de session (scrypt natif,
+Etape 7b livree : interface de connexion, routage React et tableaux de bord
+distincts etudiant/formateur. L'ancienne page de test unifiee a disparu.
+
+Etape 7a/7c : authentification par cookie de session (scrypt natif,
 sessions cote serveur revocables) et coupure de la confiance au client --
 etudiant_id provient desormais exclusivement de la session, plus jamais du
-corps de la requete. Page de connexion a venir (Etape 7b) : en attendant,
-l'authentification se fait via l'API (cf. TESTING.md).
+corps de la requete.
 
 Etape 6 : lecteur de QR code par la camera (getUserMedia + jsQR),
 avec affichage du QR cote formateur. La liberation du flux camera est

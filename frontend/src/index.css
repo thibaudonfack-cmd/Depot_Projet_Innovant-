@@ -1,46 +1,74 @@
 /* src/index.css
  *
- * Point d'entree unique des styles (importe par src/main.jsx).
+ * Point d'entrée unique des styles, importé par src/main.jsx.
  *
- * Tailwind CSS v4 : une SEULE ligne d'import remplace les trois directives
- * @tailwind base/components/utilities de la v3, et il n'existe PAS de
- * tailwind.config.js -- la configuration se fait desormais directement en
- * CSS, via le bloc @theme ci-dessous. Voir ANALYSE_CODE.md, section
- * "Standard UI/UX et Tailwind CSS", pour la justification de ce choix de
- * version (et l'ecart assume avec l'enonce de la mission, qui decrivait la
- * convention v3).
+ * Tailwind CSS v4 : une seule ligne d'import remplace les trois directives
+ * @tailwind base/components/utilities de la v3, et il n'existe pas de
+ * tailwind.config.js. La configuration se fait ici, en CSS, via @theme.
+ * Voir ANALYSE_CODE.md, section "Standard UI/UX et Tailwind CSS".
  */
 @import "tailwindcss";
 
-/* @theme : configuration CSS-first de Tailwind v4 (equivalent du
- * theme.extend de l'ancien tailwind.config.js). Volontairement minimal --
- * la palette et l'echelle typographique par defaut de Tailwind sont deja
- * sobres et coherentes ; en rajouter serait exactement le genre de
- * personnalisation gratuite que la regle d'or UI/UX de ce projet interdit.
- * Seule la famille de polices est fixee, pour garantir un rendu identique
- * sur les postes de demonstration (Windows, macOS, Linux) sans dependre
- * d'une police telechargee. */
+/* Jetons de thème.
+ *
+ * La palette reste volontairement resserrée : une famille de gris pour la
+ * structure, une seule couleur d'accent pour l'identité et les actions, et
+ * trois teintes sémantiques (succès, erreur, avertissement) réservées aux
+ * retours d'état. Une interface institutionnelle gagne à être calme.
+ *
+ * L'accent retenu est un bleu profond légèrement violacé : suffisamment
+ * soutenu pour porter les actions principales et un logo, assez sobre pour
+ * un contexte scolaire. Il conserve un contraste supérieur à 4,5:1 sur fond
+ * blanc dans ses tons 600 et au-delà. */
 @theme {
-  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
-    Arial, sans-serif;
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas,
     "Liberation Mono", monospace;
+
+  --color-accent-50:  oklch(0.97 0.014 275);
+  --color-accent-100: oklch(0.94 0.030 275);
+  --color-accent-200: oklch(0.89 0.055 275);
+  --color-accent-400: oklch(0.68 0.145 275);
+  --color-accent-500: oklch(0.60 0.170 275);
+  --color-accent-600: oklch(0.52 0.180 275);
+  --color-accent-700: oklch(0.45 0.165 275);
+  --color-accent-900: oklch(0.30 0.110 275);
+
+  /* Ombres douces et étagées. Des ombres larges et très peu opaques
+   * suggèrent l'élévation sans dessiner de contour dur, ce qui donne le
+   * rendu « posé » d'une interface soignée plutôt que l'effet de carte
+   * découpée. */
+  --shadow-douce: 0 1px 2px oklch(0.2 0.03 275 / 0.04),
+                  0 4px 12px oklch(0.2 0.03 275 / 0.06);
+  --shadow-elevee: 0 2px 4px oklch(0.2 0.03 275 / 0.04),
+                   0 12px 32px oklch(0.2 0.03 275 / 0.10);
+}
+
+/* Un léger dégradé de fond, presque imperceptible, évite l'aplat de blanc
+ * pur qui fait « page non finie ». */
+body {
+  background:
+    radial-gradient(60rem 60rem at 50% -20rem, var(--color-accent-50), transparent 70%),
+    var(--color-slate-50);
+  min-height: 100svh;
 }
 
 /* Animation de la ligne de balayage du scanner de QR code
- * (src/components/QRScanner.jsx). Definie ici et non en style inline : les
- * @keyframes ne peuvent pas etre exprimees en classes utilitaires, meme en
- * Tailwind v4 -- seule leur INVOCATION l'est
- * (animate-[balayage_2.4s_ease-in-out_infinite]).
- *
- * Purement decorative : elle signale que le scanner est actif, elle ne
- * reflete pas la progression du decodage (jsQR analyse l'image entiere a
- * chaque frame). Elle n'est appliquee que via le variant motion-safe:, donc
- * jamais lorsque l'utilisateur a active la reduction des animations dans son
- * systeme. */
+ * (src/components/QRScanner.jsx). Définie ici car les @keyframes ne peuvent
+ * pas s'exprimer en classes utilitaires, même en Tailwind v4 : seule leur
+ * invocation l'est. Purement décorative, elle n'est appliquée que via le
+ * variant motion-safe:. */
 @keyframes balayage {
   0%   { top: 0.5rem;              opacity: 0; }
   15%  {                           opacity: 1; }
   85%  {                           opacity: 1; }
   100% { top: calc(100% - 0.5rem); opacity: 0; }
+}
+
+/* Entrée douce des cartes et des messages. Suffisamment brève pour ne jamais
+ * donner l'impression d'attendre. */
+@keyframes apparition {
+  from { opacity: 0; transform: translateY(0.5rem); }
+  to   { opacity: 1; transform: translateY(0); }
 }

@@ -1985,10 +1985,164 @@ rendre impossible.
 
 ---
 
+---
+
+# Étape 7b — Authentification frontend, routage et tableaux de bord
+
+## Le problème central : le frontend ne peut pas savoir s'il est connecté
+
+Le cookie de session est `httpOnly`. C'est exactement ce qu'on voulait
+(Étape 7a : une faille XSS ne peut pas voler la session), mais cela a une
+conséquence que l'on sous-estime facilement : **JavaScript ne peut ni lire
+ce cookie, ni même constater son existence**. `document.cookie` ne le voit
+pas. Le frontend est donc structurellement incapable de déterminer seul s'il
+existe une session.
+
+La seule méthode possible est de **demander au serveur**, via
+`GET /api/auth/moi`. C'est ce que fait `AuthContext` au premier montage.
+
+D'où un état intermédiaire souvent oublié, entre « connecté » et
+« anonyme » : celui pendant lequel la réponse n'est pas encore arrivée. Le
+confondre avec « anonyme » ferait clignoter la page de connexion à chaque
+rafraîchissement, y compris pour une session parfaitement valide. C'est
+pourquoi le contexte expose `sessionVerifiee` en plus de `utilisateur`, et
+que `RouteProtegee` affiche un écran d'attente tant que cette valeur est
+fausse, sans rien décider.
+
+## Écart assumé : `/api/auth/moi`, pas `/api/auth/me`
+
+La mission mentionnait une route `GET /api/auth/me`. La route réellement
+implémentée à l'Étape 7a est **`/api/auth/moi`**, en français, comme
+`/api/seances`, `/api/scans` et `/api/enrolements`. Aucun renommage n'a été
+fait : introduire un unique endpoint en anglais au milieu d'une API
+entièrement francophone créerait une incohérence visible dans le mémoire.
+
+## `api.js` : un point de passage unique, pour trois raisons
+
+**1. `credentials: 'same-origin'` partout, sans exception possible.** Le
+navigateur n'attache le cookie à une requête `fetch` que si cette option est
+présente. L'oublier sur un seul appel produit un 401 isolé, difficile à
+diagnostiquer puisque tous les autres appels fonctionnent. Centraliser
+supprime cette classe d'erreur au lieu de compter sur la vigilance.
+
+`'same-origin'` plutôt que `'include'` : frontend et API partagent la même
+origine (Caddy route `/` vers le frontend et `/api/*` vers le backend).
+`'include'` n'apporterait rien et autoriserait l'envoi du cookie vers une
+origine tierce si une URL absolue se glissait un jour dans le code.
+
+**2. Interception centralisée des 401.** Une session peut expirer (12 h) ou
+être révoquée pendant que l'onglet reste ouvert. Sans traitement, chaque
+écran afficherait sa propre erreur incompréhensible.
+
+Le mécanisme mérite une précision : `api.js` **n'appelle pas `navigate()`**.
+Naviguer impérativement depuis un module extérieur à React ferait sortir le
+routeur de son cycle normal. À la place, `api.js` déclenche un gestionnaire
+enregistré par `AuthContext`, lequel remet simplement `utilisateur` à `null` ;
+les routes protégées redirigent alors d'elles-mêmes. Le module signale, React
+décide.
+
+Un cas particulier a demandé une option dédiée (`silencieuxSi401`) : lors du
+contrôle de session au chargement, un 401 signifie « personne n'est
+connecté », ce qui est un état normal et non la perte d'une session. Sans
+cette exception, l'application déclencherait une redirection vers `/login`
+alors que l'utilisateur s'y trouve déjà.
+
+## Ce que `RouteProtegee` protège, et ce qu'il ne protège pas
+
+Il protège **l'affichage**, pas les données. La sécurité réelle est
+entièrement portée par le backend (Étape 7c) : contourner cette garde côté
+navigateur ne donnerait accès à aucune donnée, les écrans seraient vides et
+chaque appel répondrait 401. C'est précisément la raison de l'ordre de
+travail retenu, 7a puis 7c puis 7b, et cette hiérarchie mérite d'être
+énoncée telle quelle en soutenance : une garde de routage n'est pas une
+mesure de sécurité, c'est du confort d'utilisation.
+
+Deux comportements de navigation méritent d'être notés :
+- L'emplacement demandé est mémorisé avant la redirection vers `/login`
+  (`state.depuis`), puis restauré après connexion. Quelqu'un qui ouvre un
+  lien direct vers `/etudiant` doit y arriver, pas atterrir sur un accueil
+  générique.
+- Un mauvais rôle ne produit **pas** de message d'erreur mais une
+  redirection vers le tableau de bord correspondant. Un formateur qui ouvre
+  `/etudiant` s'est trompé de lien, il n'a pas besoin d'un échec.
+
+## Parti pris visuel
+
+Palette resserrée : une famille de gris pour la structure, **une seule**
+couleur d'accent, et trois teintes sémantiques réservées aux retours d'état.
+Une interface institutionnelle gagne à être calme, et la contrainte protège
+de la dérive décorative.
+
+L'accent est défini en `oklch` plutôt qu'en hexadécimal. L'intérêt est
+concret : dans cet espace, faire varier la seule clarté produit une gamme
+perceptuellement régulière, là où une échelle construite en HSL donne des
+tons qui paraissent inégalement espacés.
+
+Les ombres sont larges et très peu opaques, en deux couches. Une ombre
+franche dessine un contour dur et donne l'effet « carte découpée » ; une
+ombre diffuse suggère l'élévation sans trancher. Le fond porte un dégradé
+radial presque imperceptible, qui évite l'aplat de blanc pur donnant
+l'impression d'une page inachevée.
+
+**Mobile d'abord pour l'étudiant**, puisque c'est l'appareil réellement
+utilisé en cours : une seule colonne, cibles tactiles généreuses, en-tête
+collant pour que la déconnexion reste accessible sans remonter la page. La
+mise en page s'élargit sur grand écran sans se réorganiser.
+
+Deux points d'accessibilité appliqués systématiquement : les états sont
+signalés par **la couleur et un texte ou une icône**, jamais par la couleur
+seule (WCAG 1.4.1) ; et les messages apparaissant après une action
+asynchrone sont enveloppés dans `aria-live="polite"`, sans quoi une personne
+utilisant un lecteur d'écran n'aurait aucun moyen de savoir qu'une tentative
+a échoué.
+
+## Les identifiants de démonstration ne partent pas en production
+
+Les boutons de pré-remplissage sont conditionnés par `import.meta.env.DEV`.
+Ce n'est pas une simple condition d'affichage : Vite remplace cette valeur à
+la compilation, et l'élimination de code mort retire tout le bloc du bundle
+de production. **Vérifié plutôt que supposé** : après `npm run build`, une
+recherche de `Etudiant123!` dans le bundle ne renvoie rien.
+
+## Un avertissement de lint qui valait la peine d'être corrigé
+
+`oxlint` signalait `react(only-export-components)` sur `AuthContext.jsx`.
+Le rafraîchissement à chaud de React ne fonctionne sur un fichier que si
+celui-ci exporte exclusivement des composants ; y mêler `useAuth` et
+`accueilDuRole` fait perdre le rechargement à chaud pour tout ce qui en
+dépend, **sans aucune erreur visible**. Corrigé en déplaçant contexte, hook
+et utilitaire dans `contexte-auth.js`, `AuthContext.jsx` n'exportant plus
+que le composant fournisseur.
+
+## L'ancienne page de test a disparu
+
+L'écran unique qui réunissait enrôlement, affichage formateur et scan est
+supprimé. Il était explicitement désigné comme un outil de développement
+(Étape 4, « Rôle de l'interface temporaire ») et son marqueur le plus
+visible, le sélecteur d'étudiant, n'a plus lieu d'être : l'identité vient
+désormais de la session.
+
+## Vérifications
+
+`npm run build` et `npm run lint` sans erreur ni avertissement ; les 5 tests
+frontend de l'Étape 6 (fuite caméra) toujours verts ; `npm ci` à froid
+validé ; les 44 tests backend inchangés, aucune régression. Le serveur Vite a
+été démarré réellement et les cinq routes (`/`, `/login`, `/etudiant`,
+`/formateur`, une adresse inconnue) répondent toutes, les modules se
+compilant sans erreur.
+
+Corrigé au passage : le titre de page datait de l'Étape 4 et annonçait
+encore « Enrolement », et `<html lang>` valait `en` sur une interface
+entièrement francophone, ce qui fait prononcer le contenu avec un accent
+anglais par les lecteurs d'écran.
+
+---
+
 ## Prochaine étape suggérée
 
-**Étape 7b** — page de connexion, routage et tableaux de bord distincts
-formateur/étudiant. Puis 7d (séance dynamique) et 7e (géofencing).
+**Étape 7d** (séance dynamique : choix UF/salle, unicité par jour,
+réaffichage du QR) puis **7e** (géofencing, en signalement et non en
+blocage).
 
 **Géofencing (RF-13)** — analyse conservée ci-dessous : c'est le seul
 mécanisme capable de fermer le vecteur résiduel documenté ci-dessus (relais
