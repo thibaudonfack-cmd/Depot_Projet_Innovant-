@@ -1,64 +1,86 @@
 /* src/index.css
  *
  * Point d'entrée unique des styles, importé par src/main.jsx.
- *
- * Tailwind CSS v4 : une seule ligne d'import remplace les trois directives
- * @tailwind base/components/utilities de la v3, et il n'existe pas de
- * tailwind.config.js. La configuration se fait ici, en CSS, via @theme.
- * Voir ANALYSE_CODE.md, section "Standard UI/UX et Tailwind CSS".
+ * Tailwind CSS v4 : configuration en CSS via @theme, sans tailwind.config.js.
  */
 @import "tailwindcss";
 
-/* Jetons de thème.
+/* ---------------------------------------------------------------------------
+ * Palette
  *
- * La palette reste volontairement resserrée : une famille de gris pour la
- * structure, une seule couleur d'accent pour l'identité et les actions, et
- * trois teintes sémantiques (succès, erreur, avertissement) réservées aux
- * retours d'état. Une interface institutionnelle gagne à être calme.
+ * Refonte claire et chaleureuse. Deux leviers :
  *
- * L'accent retenu est un bleu profond légèrement violacé : suffisamment
- * soutenu pour porter les actions principales et un logo, assez sobre pour
- * un contexte scolaire. Il conserve un contraste supérieur à 4,5:1 sur fond
- * blanc dans ses tons 600 et au-delà. */
+ * 1. Des neutres CHAUDS (teinte 70, vers le beige) au lieu des gris bleutés
+ *    de la version précédente. C'est ce qui porte l'essentiel de la
+ *    perception de chaleur : un gris froid sur de grandes surfaces donne un
+ *    rendu clinique, le même gris légèrement ambré paraît accueillant sans
+ *    qu'on sache dire pourquoi.
+ * 2. Un accent bleu franc et lumineux, plus clair que le bleu-violet
+ *    précédent, qui alourdissait les zones d'action.
+ *
+ * Chaque valeur a été choisie en CALCULANT son ratio de contraste, pas à
+ * l'oeil. Les tons 400 et 500 des neutres sont volontairement plus sombres
+ * que la convention Tailwind : ils servent aux textes d'aide et aux bordures
+ * de champ, où la convention habituelle échoue aux seuils WCAG. Le détail
+ * chiffré figure dans ANALYSE_CODE.md, section Étape 7b (refonte visuelle).
+ *
+ * Espace OKLCH : y faire varier la seule clarté produit une gamme
+ * perceptuellement régulière, là où une échelle construite en HSL donne des
+ * tons inégalement espacés.
+ * ------------------------------------------------------------------------ */
 @theme {
   --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas,
     "Liberation Mono", monospace;
 
-  --color-accent-50:  oklch(0.97 0.014 275);
-  --color-accent-100: oklch(0.94 0.030 275);
-  --color-accent-200: oklch(0.89 0.055 275);
-  --color-accent-400: oklch(0.68 0.145 275);
-  --color-accent-500: oklch(0.60 0.170 275);
-  --color-accent-600: oklch(0.52 0.180 275);
-  --color-accent-700: oklch(0.45 0.165 275);
-  --color-accent-900: oklch(0.30 0.110 275);
+  /* Neutres chauds. Le suffixe indique la clarté, comme dans Tailwind. */
+  --color-sable-50:  oklch(0.988 0.004 80);
+  --color-sable-100: oklch(0.972 0.006 80);
+  --color-sable-200: oklch(0.928 0.008 75);
+  --color-sable-300: oklch(0.860 0.010 72);
+  --color-sable-400: oklch(0.660 0.012 70);  /* bordures : 3,12:1 sur blanc */
+  --color-sable-500: oklch(0.550 0.015 70);  /* aides    : 4,86:1 sur blanc */
+  --color-sable-600: oklch(0.480 0.016 68);  /* secondaire : 6,56:1 */
+  --color-sable-700: oklch(0.400 0.016 66);
+  --color-sable-900: oklch(0.260 0.014 64);  /* principal : 15,57:1 */
 
-  /* Ombres douces et étagées. Des ombres larges et très peu opaques
-   * suggèrent l'élévation sans dessiner de contour dur, ce qui donne le
-   * rendu « posé » d'une interface soignée plutôt que l'effet de carte
-   * découpée. */
-  --shadow-douce: 0 1px 2px oklch(0.2 0.03 275 / 0.04),
-                  0 4px 12px oklch(0.2 0.03 275 / 0.06);
-  --shadow-elevee: 0 2px 4px oklch(0.2 0.03 275 / 0.04),
-                   0 12px 32px oklch(0.2 0.03 275 / 0.10);
+  /* Accent. Le 600 porte les actions principales : 4,90:1 avec du blanc. */
+  --color-accent-50:  oklch(0.968 0.016 255);
+  --color-accent-100: oklch(0.930 0.035 255);
+  --color-accent-200: oklch(0.870 0.060 255);
+  --color-accent-500: oklch(0.600 0.150 255);
+  --color-accent-600: oklch(0.550 0.160 255);
+  --color-accent-700: oklch(0.480 0.155 255);
+  --color-accent-900: oklch(0.330 0.100 255);
+
+  /* Ombres larges et très peu opaques, en deux couches. Une ombre franche
+   * dessine un contour dur et donne l'effet « carte découpée » ; une ombre
+   * diffuse suggère l'élévation sans trancher. Teintées de brun plutôt que
+   * de noir pur, pour rester cohérentes avec les neutres chauds. */
+  --shadow-douce: 0 1px 2px oklch(0.35 0.02 65 / 0.05),
+                  0 4px 14px oklch(0.35 0.02 65 / 0.06);
+  --shadow-elevee: 0 2px 4px oklch(0.35 0.02 65 / 0.05),
+                   0 14px 36px oklch(0.35 0.02 65 / 0.10);
 }
 
-/* Un léger dégradé de fond, presque imperceptible, évite l'aplat de blanc
- * pur qui fait « page non finie ». */
+/* Fond de page : un blanc cassé très légèrement chaud, réchauffé en haut par
+ * un halo ambré presque imperceptible. L'aplat de blanc pur donne
+ * l'impression d'une page inachevée ; ce dégradé y remédie sans introduire
+ * de couleur visible. */
 body {
   background:
-    radial-gradient(60rem 60rem at 50% -20rem, var(--color-accent-50), transparent 70%),
-    var(--color-slate-50);
+    radial-gradient(70rem 45rem at 50% -18rem,
+      oklch(0.975 0.020 75), transparent 65%),
+    var(--color-sable-50);
   min-height: 100svh;
+  color: var(--color-sable-900);
 }
 
-/* Animation de la ligne de balayage du scanner de QR code
- * (src/components/QRScanner.jsx). Définie ici car les @keyframes ne peuvent
- * pas s'exprimer en classes utilitaires, même en Tailwind v4 : seule leur
- * invocation l'est. Purement décorative, elle n'est appliquée que via le
- * variant motion-safe:. */
+/* Animation de la ligne de balayage du scanner (src/components/QRScanner.jsx).
+ * Définie ici car les @keyframes ne s'expriment pas en classes utilitaires,
+ * même en Tailwind v4 : seule leur invocation l'est. Purement décorative,
+ * appliquée uniquement via le variant motion-safe:. */
 @keyframes balayage {
   0%   { top: 0.5rem;              opacity: 0; }
   15%  {                           opacity: 1; }
@@ -66,8 +88,8 @@ body {
   100% { top: calc(100% - 0.5rem); opacity: 0; }
 }
 
-/* Entrée douce des cartes et des messages. Suffisamment brève pour ne jamais
- * donner l'impression d'attendre. */
+/* Entrée douce des cartes et des messages, assez brève pour ne jamais donner
+ * l'impression d'attendre. */
 @keyframes apparition {
   from { opacity: 0; transform: translateY(0.5rem); }
   to   { opacity: 1; transform: translateY(0); }

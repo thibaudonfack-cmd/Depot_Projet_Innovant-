@@ -66,12 +66,12 @@ function Connexion() {
     <main className="flex min-h-svh flex-col items-center justify-center px-4 py-12">
       <div className="w-full max-w-sm motion-safe:animate-[apparition_300ms_ease-out]">
         <div className="mb-8 flex flex-col items-center gap-4 text-center">
-          <Marque />
+          <Marque taille="grande" />
           <div>
-            <h1 className="text-xl font-semibold tracking-tight text-slate-900">
+            <h1 className="text-xl font-semibold tracking-tight text-sable-900">
               Connexion
             </h1>
-            <p className="mt-1.5 text-sm text-slate-500">
+            <p className="mt-1.5 text-sm text-sable-500">
               Accédez à votre espace de présence
             </p>
           </div>
@@ -127,7 +127,7 @@ function Connexion() {
             le bundle, ce qui evite d'y exposer des identifiants. */}
         {import.meta.env.DEV && (
           <div className="mt-6">
-            <p className="mb-2 text-center text-xs text-slate-400">
+            <p className="mb-2 text-center text-xs text-sable-500">
               Raccourcis de développement
             </p>
             <div className="flex gap-2">

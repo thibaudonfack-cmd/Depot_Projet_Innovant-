@@ -31,10 +31,10 @@ function PuceEtat({ actif, children }) {
     <span
       className={
         'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ' +
-        (actif ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600')
+        (actif ? 'bg-emerald-50 text-emerald-700' : 'bg-sable-200 text-sable-600')
       }
     >
-      <span aria-hidden="true" className={`size-1.5 rounded-full ${actif ? 'bg-emerald-500' : 'bg-slate-400'}`} />
+      <span aria-hidden="true" className={`size-1.5 rounded-full ${actif ? 'bg-emerald-500' : 'bg-sable-500'}`} />
       {children}
     </span>
   );
@@ -125,8 +125,8 @@ function TableauBordEtudiant() {
         <Carte>
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
-              <h2 className="text-sm font-semibold text-slate-900">Votre appareil</h2>
-              <p className="mt-1 text-sm leading-relaxed text-slate-500">
+              <h2 className="text-sm font-semibold text-sable-900">Votre appareil</h2>
+              <p className="mt-1 text-sm leading-relaxed text-sable-500">
                 Une clé unique est créée sur ce téléphone et ne le quitte jamais.
                 Elle sert à prouver que c&apos;est bien vous qui scannez.
               </p>
@@ -160,8 +160,8 @@ function TableauBordEtudiant() {
 
         {/* Scan */}
         <Carte>
-          <h2 className="text-sm font-semibold text-slate-900">Valider ma présence</h2>
-          <p className="mt-1 text-sm leading-relaxed text-slate-500">
+          <h2 className="text-sm font-semibold text-sable-900">Valider ma présence</h2>
+          <p className="mt-1 text-sm leading-relaxed text-sable-500">
             Scannez le QR code affiché par votre formateur. Il change toutes les
             vingt secondes, pensez à viser celui qui est à l&apos;écran.
           </p>
@@ -182,7 +182,7 @@ function TableauBordEtudiant() {
           </div>
 
           {appareilPret === false && !scannerOuvert && (
-            <p className="mt-3 text-xs text-slate-500">
+            <p className="mt-3 text-xs text-sable-500">
               Associez d&apos;abord cet appareil pour pouvoir scanner.
             </p>
           )}

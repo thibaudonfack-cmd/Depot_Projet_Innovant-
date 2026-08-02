@@ -25,12 +25,12 @@ export function Bouton({
   const variantes = {
     principal:
       'bg-accent-600 text-white shadow-[var(--shadow-douce)] hover:bg-accent-700 ' +
-      'hover:shadow-[var(--shadow-elevee)] active:scale-[0.99] disabled:bg-slate-300 disabled:shadow-none',
+      'hover:shadow-[var(--shadow-elevee)] active:scale-[0.99] disabled:bg-sable-400 disabled:shadow-none',
     secondaire:
-      'border border-slate-200 bg-white text-slate-700 shadow-[var(--shadow-douce)] ' +
-      'hover:border-slate-300 hover:bg-slate-50 active:scale-[0.99] disabled:text-slate-400',
+      'border border-sable-400 bg-white text-sable-700 shadow-[var(--shadow-douce)] ' +
+      'hover:border-sable-500 hover:bg-sable-100 active:scale-[0.99] disabled:text-sable-500',
     discret:
-      'text-slate-500 hover:bg-slate-100 hover:text-slate-900 disabled:text-slate-300',
+      'text-sable-500 hover:bg-sable-200 hover:text-sable-900 disabled:text-sable-400',
   };
 
   return (
@@ -54,11 +54,11 @@ export function Bouton({
 export function Champ({ id, libelle, aide, erreur = false, className = '', ...props }) {
   return (
     <div className="space-y-1.5">
-      <label htmlFor={id} className="block text-sm font-medium text-slate-800">
+      <label htmlFor={id} className="block text-sm font-medium text-sable-700">
         {libelle}
       </label>
       {aide && (
-        <p id={`${id}-aide`} className="text-xs text-slate-500">
+        <p id={`${id}-aide`} className="text-xs text-sable-500">
           {aide}
         </p>
       )}
@@ -67,12 +67,12 @@ export function Champ({ id, libelle, aide, erreur = false, className = '', ...pr
         aria-describedby={aide ? `${id}-aide` : undefined}
         aria-invalid={erreur || undefined}
         className={
-          'w-full rounded-xl border bg-white px-3.5 py-3 text-sm text-slate-900 shadow-sm ' +
-          'transition-colors duration-200 placeholder:text-slate-400 ' +
+          'w-full rounded-xl border bg-white px-3.5 py-3 text-sm text-sable-900 shadow-sm ' +
+          'transition-colors duration-200 placeholder:text-sable-500 ' +
           'focus-visible:outline-none focus-visible:ring-4 ' +
           (erreur
             ? 'border-red-300 focus-visible:border-red-500 focus-visible:ring-red-500/10 '
-            : 'border-slate-200 focus-visible:border-accent-500 focus-visible:ring-accent-500/10 ') +
+            : 'border-sable-400 focus-visible:border-accent-600 focus-visible:ring-accent-500/15 ') +
           className
         }
         {...props}
@@ -86,7 +86,7 @@ export function Carte({ className = '', children }) {
   return (
     <section
       className={
-        'rounded-2xl border border-slate-200/80 bg-white p-6 shadow-[var(--shadow-douce)] ' + className
+        'rounded-2xl border border-sable-300 bg-white p-6 shadow-[var(--shadow-douce)] ' + className
       }
     >
       {children}
@@ -103,7 +103,7 @@ export function Message({ ton = 'info', titre, children }) {
   const tons = {
     succes: { boite: 'border-emerald-200 bg-emerald-50 text-emerald-900', icone: 'M20 6 9 17l-5-5' },
     erreur: { boite: 'border-red-200 bg-red-50 text-red-900', icone: 'M12 8v5M12 16.5v.01' },
-    info: { boite: 'border-slate-200 bg-slate-50 text-slate-700', icone: 'M12 16v-5M12 8.5v.01' },
+    info: { boite: 'border-sable-300 bg-sable-100 text-sable-700', icone: 'M12 16v-5M12 8.5v.01' },
   };
   const { boite, icone } = tons[ton];
 
@@ -126,20 +126,29 @@ export function Message({ ton = 'info', titre, children }) {
   );
 }
 
-/** Marque de l'application, reprise sur la page de connexion et les en-tetes. */
-export function Marque({ compacte = false }) {
+/**
+ * Marque de l'application.
+ * @param {'compacte'|'normale'|'grande'} taille
+ */
+export function Marque({ taille = 'normale' }) {
+  const dimensions = {
+    compacte: { pastille: 'size-10', icone: 'size-6', texte: 'text-base' },
+    normale: { pastille: 'size-11', icone: 'size-7', texte: 'text-lg' },
+    grande: { pastille: 'size-14', icone: 'size-8', texte: 'text-2xl' },
+  }[taille];
+
   return (
-    <div className="flex items-center gap-2.5">
-      <span className="flex size-9 items-center justify-center rounded-xl bg-accent-600 shadow-[var(--shadow-douce)]">
-        <svg viewBox="0 0 24 24" aria-hidden="true" className="size-5 text-white" fill="currentColor">
+    <div className="flex items-center gap-3">
+      <span
+        className={`flex ${dimensions.pastille} shrink-0 items-center justify-center rounded-2xl bg-accent-600 shadow-[var(--shadow-douce)]`}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" className={`${dimensions.icone} text-white`} fill="currentColor">
           <path d="M4 4h6v6H4V4zm2 2v2h2V6H6zM14 4h6v6h-6V4zm2 2v2h2V6h-2zM4 14h6v6H4v-6zm2 2v2h2v-2H6zM14 14h2v2h-2v-2zM18 14h2v2h-2v-2zM16 16h2v2h-2v-2zM14 18h2v2h-2v-2zM18 18h2v2h-2v-2z" />
         </svg>
       </span>
-      {!compacte && (
-        <span className="text-[0.95rem] font-semibold tracking-tight text-slate-900">
-          Présence
-        </span>
-      )}
+      <span className={`${dimensions.texte} font-semibold tracking-tight text-sable-900`}>
+        Prise de présence
+      </span>
     </div>
   );
 }

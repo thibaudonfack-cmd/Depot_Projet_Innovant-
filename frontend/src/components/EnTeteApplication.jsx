@@ -1,17 +1,17 @@
 // src/components/EnTeteApplication.jsx
-// En-tete commun aux deux tableaux de bord : marque, identite de la personne
-// connectee, deconnexion.
+// En-tete commun aux tableaux de bord : marque cliquable, identite de la
+// personne connectee, deconnexion.
 //
-// Colle en haut (sticky) avec un fond translucide et un flou : sur mobile,
-// le bouton de deconnexion reste accessible sans remonter toute la page, et
-// le contenu qui defile dessous reste lisible.
+// Colle en haut avec un fond translucide et un flou : sur mobile, la
+// deconnexion reste accessible sans remonter toute la page, et le contenu
+// qui defile dessous reste lisible.
 
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/contexte-auth';
-import { Bouton, Marque } from './ui';
+import { Marque } from './ui';
 
-/** Initiales, pour l'avatar. Deux lettres au maximum. */
+/** Initiales pour l'avatar, deux lettres au maximum. */
 function initiales(nom) {
   return (nom || '')
     .split(' ')
@@ -32,43 +32,86 @@ function EnTeteApplication({ sousTitre }) {
     navigate('/login', { replace: true });
   }
 
-  return (
-    <header className="sticky top-0 z-10 border-b border-slate-200/70 bg-white/85 backdrop-blur-md">
-      <div className="mx-auto flex h-16 w-full max-w-3xl items-center gap-3 px-4 sm:px-6">
-        <Marque compacte />
+  /**
+   * Retour arriere au clic sur la marque.
+   *
+   * history.length > 1 distingue deux situations : l'onglet a un historique
+   * (on peut revenir en arriere) ou il a ete ouvert directement sur cette
+   * page (revenir sortirait du site, ou ne ferait rien). Dans ce second cas,
+   * on renvoie vers la racine, qui aiguille ensuite selon la session.
+   * Sans ce controle, un clic depuis un onglet neuf donnerait l'impression
+   * d'un bouton mort.
+   */
+  function handleRetour() {
+    if (window.history.length > 1) navigate(-1);
+    else navigate('/');
+  }
 
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-slate-900">
-            {utilisateur?.nom}
-          </p>
-          <p className="truncate text-xs text-slate-500">{sousTitre}</p>
+  return (
+    <header className="sticky top-0 z-10 border-b border-sable-300 bg-white/85 backdrop-blur-md">
+      <div className="mx-auto flex h-20 w-full max-w-3xl items-center gap-3 px-4 sm:px-6">
+        {/* Un vrai <button> et non une <div> cliquable : le clavier et les
+            technologies d'assistance le reconnaissent comme actionnable, et
+            title/aria-label annoncent ce qu'il fait. Le libelle visible
+            ("Prise de présence") ne suffirait pas a comprendre l'action. */}
+        <button
+          type="button"
+          onClick={handleRetour}
+          title="Revenir à la page précédente"
+          aria-label="Revenir à la page précédente"
+          className="-m-2 shrink-0 rounded-2xl p-2 transition-colors duration-200
+                     hover:bg-sable-100 focus-visible:outline-none focus-visible:ring-2
+                     focus-visible:ring-accent-600 focus-visible:ring-offset-2"
+        >
+          <Marque taille="compacte" />
+        </button>
+
+        <div className="min-w-0 flex-1 text-right sm:text-left">
+          <p className="truncate text-sm font-semibold text-sable-900">{utilisateur?.nom}</p>
+          <p className="truncate text-xs text-sable-500">{sousTitre}</p>
         </div>
 
         <span
           aria-hidden="true"
           className="hidden size-9 shrink-0 items-center justify-center rounded-full bg-accent-50
-                     text-xs font-semibold text-accent-700 sm:flex"
+                     text-xs font-semibold text-accent-900 sm:flex"
         >
           {initiales(utilisateur?.nom)}
         </span>
 
-        <Bouton
-          variante="discret"
+        {/* Deconnexion volontairement discrete : c'est une action rare, elle
+            ne doit pas concurrencer visuellement les actions principales de
+            la page. Style fantome, sans bordure ni fond au repos. */}
+        <button
+          type="button"
           onClick={handleDeconnexion}
-          chargement={deconnexionEnCours}
-          className="w-auto shrink-0 px-3 py-2"
+          disabled={deconnexionEnCours}
+          title="Se déconnecter"
+          className="inline-flex shrink-0 items-center gap-2 rounded-xl px-2.5 py-2 text-sm
+                     text-sable-500 transition-colors duration-200
+                     hover:bg-sable-100 hover:text-sable-900
+                     focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-600
+                     focus-visible:ring-offset-2 disabled:opacity-60"
         >
+          {deconnexionEnCours ? (
+            <span
+              aria-hidden="true"
+              className="size-4 rounded-full border-2 border-sable-300 border-t-sable-600 motion-safe:animate-spin"
+            />
+          ) : (
+            <svg
+              viewBox="0 0 24 24" aria-hidden="true" className="size-[1.15rem]"
+              fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+            >
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
+            </svg>
+          )}
+          {/* Libelle masque sous 640 px pour ne pas ecraser le nom sur
+              telephone. sr-only conserve l'information pour les lecteurs
+              d'ecran quelle que soit la largeur. */}
           <span className="hidden sm:inline">Se déconnecter</span>
-          {/* Sur mobile, seule l'icone est affichee pour ne pas ecraser le
-              nom de la personne. aria-label porte alors le sens. */}
-          <svg
-            viewBox="0 0 24 24" aria-hidden="true" className="size-4 sm:hidden"
-            fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-          >
-            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
-          </svg>
           <span className="sr-only sm:hidden">Se déconnecter</span>
-        </Bouton>
+        </button>
       </div>
     </header>
   );

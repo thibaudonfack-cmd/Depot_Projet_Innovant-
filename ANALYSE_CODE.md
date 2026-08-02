@@ -2138,11 +2138,130 @@ anglais par les lecteurs d'écran.
 
 ---
 
+# Étape 7b (bis) — Refonte visuelle et audit d'accessibilité
+
+## L'audit d'abord, la refonte ensuite
+
+Avant de toucher à la palette, les contrastes existants ont été **calculés**,
+pas estimés à l'oeil. Méthode : extraction des valeurs réellement émises par
+Tailwind dans le CSS compilé, conversion OKLCH vers sRGB, puis luminance
+relative et ratios selon WCAG 2.1.
+
+Deux échecs réels, invisibles en relecture :
+
+| Usage | Couleur | Ratio | Seuil | Verdict |
+|---|---|---|---|---|
+| Textes d'aide, placeholders | `slate-400` sur blanc | **2,63:1** | 4,5:1 | échec |
+| Bordure des champs de saisie | `slate-200` sur blanc | **1,23:1** | 3:1 | échec |
+
+Le second mérite une explication, car il est souvent ignoré : le critère
+WCAG **1.4.11 (Non-text Contrast)** exige 3:1 pour « l'information visuelle
+nécessaire à identifier les composants d'interface ». Le contour d'un champ
+de saisie est précisément cette information : c'est lui qui indique où l'on
+peut écrire. Une bordure à 1,23:1 disparaît pour une personne malvoyante ou
+sur un écran mal calibré, et le formulaire devient une suite de zones
+invisibles. Les bordures de **cartes**, elles, restent décoratives : la carte
+n'est pas un contrôle, son contour ne porte aucune information nécessaire.
+Les deux cas sont traités différemment, à dessein.
+
+## La palette retenue
+
+Deux leviers pour l'aspect clair et chaleureux demandé :
+
+**Des neutres chauds** (teinte 70, vers le beige) au lieu des gris bleutés
+précédents. C'est ce qui porte l'essentiel de la perception de chaleur : un
+gris froid sur de grandes surfaces donne un rendu clinique, le même gris
+légèrement ambré paraît accueillant sans qu'on puisse dire pourquoi.
+
+**Un accent bleu franc et lumineux** (`#2171cc`) à la place du bleu-violet
+sombre, qui alourdissait les zones d'action.
+
+Les tons 400 et 500 de la gamme neutre sont volontairement **plus sombres**
+que la convention Tailwind, précisément parce qu'ils servent aux textes
+d'aide et aux bordures de champ, là où la convention échoue.
+
+Audit complet de la palette proposée, toutes paires vérifiées par calcul :
+
+| Paire | Ratio | Seuil | Verdict |
+|---|---|---|---|
+| Texte principal sur blanc | 15,57:1 | 4,5 | AAA |
+| Texte principal sur fond de page | 15,04:1 | 4,5 | AAA |
+| Texte secondaire sur blanc | 6,56:1 | 4,5 | AA |
+| Texte d'aide, placeholders | 4,86:1 | 4,5 | AA |
+| Texte blanc sur bouton principal | 4,90:1 | 4,5 | AA |
+| Accent sur blanc (liens) | 6,63:1 | 4,5 | AA |
+| Bordure de champ (1.4.11) | 3,12:1 | 3,0 | AA |
+| Anneau de focus (1.4.11) | 4,90:1 | 3,0 | AA |
+
+Trois usages de tons clairs subsistent volontairement, chacun couvert par une
+exemption explicite de la norme, et vérifiés un par un :
+- État désactivé d'un bouton : WCAG 1.4.3 exempte les composants inactifs.
+- Deux textes du scanner : ils s'affichent sur fond sombre, où ils mesurent
+  5,00:1 et 10,16:1.
+- Une icône de gabarit marquée `aria-hidden` : graphique purement décoratif,
+  exempté par 1.4.11.
+
+## Autres ajustements
+
+**Nom de l'application** : « Prise de présence » partout, dans la marque et
+dans le titre du document.
+
+**En-tête** : marque agrandie (pastille de 40 px, texte en `text-base` contre
+`0.95rem` auparavant) et rendue cliquable pour revenir à la page précédente.
+Le retour teste `window.history.length > 1` : dans un onglet ouvert
+directement sur la page, revenir en arrière sortirait du site ou ne ferait
+rien, et le bouton paraîtrait mort. On renvoie alors vers la racine, qui
+aiguille selon la session. C'est un vrai `<button>` et non une `<div>`
+cliquable, avec `aria-label` explicite : le libellé visible « Prise de
+présence » ne permettrait pas de deviner l'action.
+
+**Déconnexion** : style fantôme, sans bordure ni fond au repos. C'est une
+action rare qui ne doit pas concurrencer visuellement les actions principales.
+Sous 640 px, seule l'icône reste visible pour ne pas écraser le nom, le
+libellé restant accessible aux lecteurs d'écran via `sr-only`.
+
+## Projection en plein écran
+
+`AffichageQR.jsx` porte un bouton de plein écran. Ce n'est pas un confort :
+un QR affiché dans une carte de 200 px est illisible depuis le fond d'une
+salle, et le formateur doit pouvoir le projeter.
+
+Trois points d'implémentation qui ne s'improvisent pas :
+
+- **Le préfixe `webkit` reste nécessaire.** Safari n'implémente pas l'API
+  sans préfixe ; sans `webkitRequestFullscreen`, le bouton paraîtrait sans
+  effet sur iPad et Safari macOS, machines fréquentes en salle.
+- **L'état est lu depuis le document, jamais déduit de nos propres clics.**
+  L'utilisateur peut sortir du plein écran par Échap ou par un geste système,
+  sans passer par le bouton. Un booléen maintenu à la main se
+  désynchroniserait dès la première sortie par Échap, et le bouton
+  proposerait d'entrer en plein écran alors qu'on y est déjà. D'où l'écoute
+  de `fullscreenchange` et de sa variante préfixée.
+- **`requestFullscreen` peut rejeter** si l'appel ne découle pas d'un geste
+  utilisateur ou si la politique du navigateur l'interdit. Le cas est
+  intercepté et signalé, plutôt que de laisser un bouton qui ne répond pas.
+
+Le composant est rendu dès maintenant dans l'espace formateur avec une valeur
+d'exemple **explicitement signalée comme telle**, afin que la projection soit
+vérifiable avant l'Étape 7d. Ce n'est pas un jeton de séance : il n'est signé
+par personne et ne validerait aucune présence.
+
+## Vérifications
+
+Palette recalculée après application, aucune régression : `npm run build` et
+`npm run lint` sans avertissement, les 5 tests frontend verts, `npm ci` à
+froid validé. Un balayage de toutes les classes de texte utilisant un neutre
+clair a été refait sur le code final, et chaque occurrence restante est
+justifiée par une exemption normative.
+
+---
+
 ## Prochaine étape suggérée
 
 **Étape 7d** (séance dynamique : choix UF/salle, unicité par jour,
 réaffichage du QR) puis **7e** (géofencing, en signalement et non en
-blocage).
+blocage). Voir également l'étude d'architecture du suivi du temps, à
+intégrer au planning avant 7e.
 
 **Géofencing (RF-13)** — analyse conservée ci-dessous : c'est le seul
 mécanisme capable de fermer le vecteur résiduel documenté ci-dessus (relais

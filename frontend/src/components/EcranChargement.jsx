@@ -11,9 +11,9 @@ function EcranChargement() {
       <div className="flex flex-col items-center gap-4">
         <span
           aria-hidden="true"
-          className="size-7 rounded-full border-2 border-slate-200 border-t-accent-600 motion-safe:animate-spin"
+          className="size-7 rounded-full border-2 border-sable-300 border-t-accent-600 motion-safe:animate-spin"
         />
-        <p className="text-sm text-slate-500">Chargement</p>
+        <p className="text-sm text-sable-500">Chargement</p>
       </div>
     </div>
   );

@@ -1750,6 +1750,97 @@ de démonstration absents du bundle.
 
 ---
 
+# Étape 7b (bis) — Refonte visuelle, accessibilité et plein écran
+
+```bash
+git pull origin dev
+docker compose up -d --build
+```
+
+## 1. Aspect général
+
+Ouvrir `https://localhost/`. Attendu : fond blanc cassé légèrement chaud,
+cartes blanches, aucune zone sombre en dehors du scanner. La marque affiche
+« Prise de présence » et non « Présence », et le titre de l'onglet également.
+
+## 2. Contraste, vérification automatisée
+
+Dans les outils de développement, onglet **Lighthouse**, lancer un audit
+**Accessibilité** sur `/login` puis sur `/etudiant` une fois connecté.
+Attendu : aucune violation de la catégorie « contrast ».
+
+Vérification ponctuelle avec le sélecteur de couleur intégré : inspecter un
+texte d'aide (par exemple « Jeu de données de démonstration »), ouvrir le
+nuancier de la propriété `color` dans l'onglet Styles. Chrome affiche le
+ratio de contraste et deux coches AA/AAA. Attendu : au moins AA sur tous les
+textes.
+
+**Point souvent oublié à contrôler** : cliquer dans le champ e-mail, puis
+regarder sa bordure au repos (sans focus). Elle doit rester nettement
+visible sur le fond blanc, y compris en réduisant la luminosité de l'écran.
+
+## 3. En-tête et navigation
+
+Connecté sur `/etudiant` : la marque en haut à gauche est plus grande
+qu'auparavant. Cliquer dessus. Attendu : retour à la page précédente.
+
+Ouvrir `https://localhost/etudiant` dans un **onglet neuf** (donc sans
+historique), puis cliquer sur la marque. Attendu : redirection vers la racine,
+et non un bouton sans effet.
+
+Naviguer au clavier avec la touche Tab : la marque et le bouton de
+déconnexion doivent recevoir un anneau de focus visible.
+
+## 4. Déconnexion discrète
+
+Attendu sur ordinateur : une icône de sortie suivie du libellé
+« Se déconnecter », sans bordure ni fond au repos, un fond gris apparaissant
+au survol. Sur mobile (375 px) : seule l'icône reste, le nom de l'utilisateur
+n'étant plus écrasé.
+
+## 5. Projection du QR en plein écran
+
+Se connecter en formateur. La carte « Ouvrir une séance » affiche un QR
+d'aperçu et un bouton **Projeter en plein écran**.
+
+Cliquer dessus. Attendu : le QR occupe tout l'écran sur fond blanc, avec le
+titre « Aperçu de projection » au-dessus et le rappel « Appuyez sur Échap
+pour revenir ».
+
+**Deux contrôles qui comptent** :
+- Sortir avec la touche **Échap** (et non par le bouton), puis regarder le
+  bouton : son libellé doit être revenu à « Projeter en plein écran ». S'il
+  affiche encore « Quitter », l'état interne s'est désynchronisé de celui du
+  navigateur.
+- Reculer de quelques mètres de l'écran et vérifier que le QR reste net : il
+  est rendu en SVG, il ne doit pas pixelliser.
+
+Sur Safari ou iPad, le bouton doit fonctionner de la même façon grâce à
+l'API préfixée. Si un navigateur refuse le plein écran, un message doit
+apparaître et proposer la touche F11, plutôt que de laisser un bouton inerte.
+
+## 6. Non-régression
+
+```bash
+docker compose exec frontend npm run lint
+docker compose exec frontend npm test
+docker compose exec backend npm test
+```
+Attendu : 0 avertissement, `5 passed` côté frontend, `44 passed` côté backend.
+
+## Critère de succès global — Étape 7b (bis)
+
+Validée si et seulement si : l'interface est claire et sans zone sombre hors
+scanner (section 1) ; Lighthouse ne relève aucune violation de contraste et
+les bordures de champ restent visibles au repos (section 2) ; la marque
+agrandie ramène à la page précédente, et à la racine depuis un onglet neuf
+(section 3) ; la déconnexion est discrète et se réduit à une icône sur mobile
+(section 4) ; le plein écran fonctionne, et sortir par Échap remet le libellé
+du bouton en cohérence (section 5) ; les suites de tests restent vertes
+(section 6).
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

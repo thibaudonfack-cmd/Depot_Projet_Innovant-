@@ -217,7 +217,7 @@ function QRScanner({ onDetection, onAnnuler }) {
 
   return (
     <div className="space-y-3">
-      <div className="relative aspect-square w-full overflow-hidden rounded-xl bg-slate-900">
+      <div className="relative aspect-square w-full overflow-hidden rounded-xl bg-sable-900">
         {/* La video reste montee en permanence : la referencer via ref exige
             qu'elle existe dans le DOM avant meme que le flux n'arrive.
             playsInline : sans cet attribut, Safari iOS ouvre la video en
@@ -244,9 +244,9 @@ function QRScanner({ onDetection, onAnnuler }) {
         <button
           type="button"
           onClick={onAnnuler}
-          className="w-full rounded-md border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium
-                     text-slate-900 transition-colors hover:bg-slate-50 focus-visible:outline-none
-                     focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2"
+          className="w-full rounded-md border border-sable-400 bg-white px-4 py-2.5 text-sm font-medium
+                     text-sable-900 transition-colors hover:bg-sable-100 focus-visible:outline-none
+                     focus-visible:ring-2 focus-visible:ring-sable-900 focus-visible:ring-offset-2"
         >
           Fermer le scanner
         </button>
@@ -258,17 +258,17 @@ function QRScanner({ onDetection, onAnnuler }) {
 /** Etat de chargement : la demande de permission peut prendre plusieurs secondes. */
 function VueDemarrage() {
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-slate-900">
+    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-sable-900">
       {/* motion-safe: l'animation ne joue pas si l'utilisateur a demande la
           reduction des animations dans son systeme (accessibilite : les
           mouvements repetitifs peuvent declencher des troubles vestibulaires). */}
       <span
         aria-hidden="true"
-        className="size-8 rounded-full border-2 border-slate-600 border-t-white motion-safe:animate-spin"
+        className="size-8 rounded-full border-2 border-sable-600 border-t-white motion-safe:animate-spin"
       />
-      <p className="px-6 text-center text-sm text-slate-300">
+      <p className="px-6 text-center text-sm text-sable-400">
         Accès à la caméra…
-        <span className="mt-1 block text-xs text-slate-400">
+        <span className="mt-1 block text-xs text-sable-500">
           Autorisez l'accès dans la fenêtre affichée par votre navigateur.
         </span>
       </p>
@@ -334,7 +334,7 @@ function VueSucces() {
 /** Etat erreur : message actionnable, jamais un code technique brut. */
 function VueErreur({ message }) {
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-slate-900 px-6">
+    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-sable-900 px-6">
       <svg
         viewBox="0 0 24 24"
         aria-hidden="true"
@@ -348,7 +348,7 @@ function VueErreur({ message }) {
         <circle cx="12" cy="12" r="9" />
         <path d="M12 8v5M12 16.5v.01" />
       </svg>
-      <p className="text-center text-sm leading-relaxed text-slate-200">{message}</p>
+      <p className="text-center text-sm leading-relaxed text-sable-300">{message}</p>
     </div>
   );
 }
