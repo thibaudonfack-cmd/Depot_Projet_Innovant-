@@ -2256,12 +2256,133 @@ justifiée par une exemption normative.
 
 ---
 
+# Étape 7d — Génération de séance, et correction de deux anomalies
+
+## Anomalie 1 : la redirection après connexion
+
+Symptôme rapporté : après connexion, le tableau de bord n'apparaissait
+qu'après un rafraîchissement manuel.
+
+La reproduction en environnement contrôlé (vitest + jsdom, avec latence
+réseau simulée) n'a **pas** fait échouer le flux. Plutôt que de conclure à un
+faux problème, l'examen du code a mis en évidence deux défauts de conception
+réels, dont la combinaison explique le symptôme :
+
+**Deux sources de navigation concurrentes.** `handleSoumission` appelait
+`navigate()` après la connexion, tandis qu'un `useEffect` naviguait lui aussi
+dès que `utilisateur` devenait défini. Deux chemins pour un même événement,
+avec des destinations pouvant diverger : si la page mémorisée avant
+redirection était `/formateur` et que l'utilisateur se connectait comme
+étudiant, le premier chemin l'envoyait vers `/formateur`, d'où
+`RouteProtegee` le renvoyait vers `/etudiant`. Deux navigations visibles là
+où une suffit.
+
+**`envoiEnCours` n'était jamais remis à `false` en cas de succès.** Le code
+s'en remettait au démontage du composant. Conséquence directe : dès que la
+navigation tardait ou ne prenait pas effet, le bouton restait figé sur
+« Connexion en cours », **sans aucun message d'erreur**. L'interface paraissait
+bloquée, et seul un rafraîchissement débloquait la situation, puisque le
+rechargement retrouvait la session valide par `GET /api/auth/moi`. C'est
+exactement le symptôme décrit.
+
+Correction : **une seule source de redirection**, l'effet, déclenché par le
+seul état `utilisateur`. La soumission se contente de mettre l'état à jour.
+`envoiEnCours` est remis à `false` dans un `finally`, donc dans tous les cas.
+Et la destination mémorisée n'est honorée que si le rôle y donne accès.
+
+Quatre tests de non-régression couvrent désormais ce chemin
+(`Connexion.test.jsx`), dont un vérifiant explicitement que le libellé
+« Connexion en cours » ne subsiste pas après un échec. Les appels réseau y
+sont **volontairement ralentis** : un mock instantané masque complètement ce
+type de course, comme la première tentative de reproduction l'a montré.
+
+## Anomalie 2 : le bloc d'identité décalé
+
+Régression introduite par la refonte visuelle précédente : l'en-tête portait
+`text-right sm:text-left`. Sur mobile, le nom et le sous-titre étaient donc
+alignés à droite, collés contre le bouton de déconnexion, ce qui donnait
+l'impression d'un bloc flottant loin de la marque. Corrigé par un alignement
+à gauche à toutes les tailles ; `flex-1` continue de repousser les actions
+vers la droite, ce qui était le seul effet réellement recherché.
+
+Les conteneurs eux-mêmes étaient corrects (`mx-auto w-full max-w-3xl` sur
+l'en-tête comme sur le contenu) : le défaut portait sur l'alignement du texte
+à l'intérieur, pas sur le centrage du bloc.
+
+## Séance : deux notions de temps à ne pas confondre
+
+`seances` gagne `heure_debut_prevue` et `heure_fin_prevue`, à distinguer
+soigneusement de `date_ouverture`, qui existait déjà. Cette dernière est
+l'instant **réel** où le formateur a cliqué ; les nouvelles colonnes sont
+l'horaire **prévu** du cours. Les deux diffèrent presque toujours, un cours
+de 9h00 étant ouvert à 8h57 ou 9h04, et servent à des choses différentes :
+l'une trace ce qui s'est passé, l'autre définit le cadre attendu. Les
+confondre rendrait impossible de dire, plus tard, si une séance a commencé
+en retard.
+
+**Conversion explicite en UTC avant stockage.** Le navigateur envoie une
+chaîne ISO 8601 avec fuseau ; MySQL attend `YYYY-MM-DD HH:MM:SS` et, en
+colonne `DATETIME`, ne conserve aucun fuseau. Passer la chaîne ISO telle
+quelle à mysql2 fonctionnerait en apparence, mais laisserait le fuseau de la
+connexion décider du résultat, produisant des écarts d'une heure selon
+l'environnement. Rédhibitoire dès lors que ces heures serviront à justifier
+des quotas. Un test vérifie en base, via `DATE_FORMAT`, que `09:00Z` envoyé
+est bien `09:00:00` stocké.
+
+Colonnes **nullables** : le prototype doit continuer d'accepter les séances
+créées avant cette étape, et le suivi du temps proprement dit n'est pas
+encore implémenté.
+
+**Cohérence des bornes vérifiée avant toute écriture**, côté serveur comme
+côté client. Une séance dont la fin précède le début produirait plus tard une
+durée négative dans les cumuls ; mieux vaut la refuser à la source que
+d'avoir à la rattraper par une correction manuelle. Le contrôle côté client
+n'est qu'un confort qui évite un aller-retour réseau, le serveur refait le
+sien.
+
+**La réponse est relue en base** plutôt que reconstruite à la main : les
+valeurs par défaut (`statut`, `date_ouverture`) sont posées par le schéma, et
+les recopier dans le contrôleur les dupliquerait à deux endroits susceptibles
+de diverger.
+
+## Sécurité : ouvrir une séance est une prérogative du formateur
+
+`POST /api/seances` est désormais protégée par `exigerAuthentification` puis
+`exigerRole('formateur')`. Ce n'est pas une formalité : un étudiant capable
+d'ouvrir une séance génèrerait ses propres jetons et validerait sa présence
+sans cours. Un test dédié vérifie le 403.
+
+## Interface
+
+Le formulaire et l'affichage du QR occupent **la même carte**, en alternance :
+une fois la séance créée, le formulaire disparaît au profit du récapitulatif
+et du QR projetable. La carte « Votre compte » s'efface également, pour que
+l'écran de projection reste sobre. Un bouton permet de revenir au formulaire.
+
+Les listes déroulantes proposent volontairement des entrées **absentes du
+jeu de démonstration** en plus de celles qui existent. Le serveur les refuse
+par violation de clé étrangère, ce qui permet de vérifier que l'erreur
+remonte proprement jusqu'à l'utilisateur au lieu de produire un échec muet.
+
+Détail de fuseau côté client : la date du jour est calculée à partir des
+composantes locales et non de `toISOString()`, qui convertit en UTC et
+renverrait la veille en soirée pour un fuseau en avance sur Greenwich.
+
+## Vérifications
+
+**52 tests backend verts** sur 6 suites, dont 8 nouveaux pour la création de
+séance. **9 tests frontend** (5 pour la caméra, 4 pour la redirection).
+`npm run build`, `npm run lint` et `npm ci` à froid sans erreur. Contraste du
+nouveau badge « En cours » vérifié par calcul : 7,14:1, niveau AAA.
+
+---
+
 ## Prochaine étape suggérée
 
-**Étape 7d** (séance dynamique : choix UF/salle, unicité par jour,
-réaffichage du QR) puis **7e** (géofencing, en signalement et non en
-blocage). Voir également l'étude d'architecture du suivi du temps, à
-intégrer au planning avant 7e.
+**Étape 7e** (géofencing, en signalement et non en blocage), puis
+l'implémentation du suivi du temps selon l'architecture étudiée, avec
+`journal_modifications` placé dans `db_attestations` pour survivre à la purge
+de `db_logs` et couvrir les cinq ans de conservation légale.
 
 **Géofencing (RF-13)** — analyse conservée ci-dessous : c'est le seul
 mécanisme capable de fermer le vecteur résiduel documenté ci-dessus (relais

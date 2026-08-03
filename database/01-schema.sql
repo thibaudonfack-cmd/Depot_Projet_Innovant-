@@ -187,12 +187,34 @@ CREATE TABLE inscriptions (
 -- -----------------------------------------------------------------------------
 -- seances
 -- -----------------------------------------------------------------------------
+--
+-- Etape 7d : heure_debut_prevue / heure_fin_prevue.
+--
+-- A distinguer soigneusement de date_ouverture, qui existe deja : cette
+-- derniere est l'instant REEL ou le formateur a clique, les nouvelles
+-- colonnes sont l'horaire PREVU du cours. Les deux different presque
+-- toujours (un cours de 9h00 est ouvert a 8h57 ou 9h04) et servent a des
+-- choses differentes : date_ouverture trace ce qui s'est passe, les heures
+-- prevues definissent le cadre attendu. Les confondre rendrait impossible
+-- de dire, plus tard, si une seance a commence en retard.
+--
+-- Stockees en DATETIME, donc SANS fuseau : la convention du projet est de
+-- tout conserver en UTC et de convertir a l'affichage. Un DATETIME local
+-- ferait diverger les cumuls d'heures de part et d'autre du changement
+-- d'heure, ce qui est redhibitoire des lors que ces heures servent a
+-- justifier des quotas (cf. etude d'architecture du suivi du temps).
+--
+-- Nullables : le prototype doit continuer d'accepter les seances creees
+-- avant cette etape, et le suivi du temps proprement dit n'est pas encore
+-- implemente.
 CREATE TABLE seances (
-  id              CHAR(36)  NOT NULL DEFAULT (UUID()) PRIMARY KEY,
-  uf_id           CHAR(36)  NOT NULL,
-  salle_id        CHAR(36)  NOT NULL,
-  date_ouverture  DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  date_cloture    DATETIME  NULL,
+  id                 CHAR(36)  NOT NULL DEFAULT (UUID()) PRIMARY KEY,
+  uf_id              CHAR(36)  NOT NULL,
+  salle_id           CHAR(36)  NOT NULL,
+  date_ouverture     DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  heure_debut_prevue DATETIME  NULL,
+  heure_fin_prevue   DATETIME  NULL,
+  date_cloture       DATETIME  NULL,
   statut          ENUM('ouverte', 'cloturee') NOT NULL DEFAULT 'ouverte',
   CONSTRAINT fk_seance_uf FOREIGN KEY (uf_id) REFERENCES uf(id),
   CONSTRAINT fk_seance_salle FOREIGN KEY (salle_id) REFERENCES salles(id),

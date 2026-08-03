@@ -66,7 +66,12 @@ function EnTeteApplication({ sousTitre }) {
           <Marque taille="compacte" />
         </button>
 
-        <div className="min-w-0 flex-1 text-right sm:text-left">
+        {/* flex-1 pour occuper l'espace disponible et repousser les actions a
+            droite, mais alignement a GAUCHE a toutes les tailles. La version
+            precedente utilisait text-right sur mobile, ce qui collait le nom
+            contre le bouton de deconnexion et donnait l'impression d'un bloc
+            decale. Le texte doit suivre le bord de la marque, pas flotter. */}
+        <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold text-sable-900">{utilisateur?.nom}</p>
           <p className="truncate text-xs text-sable-500">{sousTitre}</p>
         </div>

@@ -1841,6 +1841,107 @@ du bouton en cohérence (section 5) ; les suites de tests restent vertes
 
 ---
 
+# Étape 7d — Création de séance et correction des anomalies 7b
+
+**Migration nécessaire** : `01-schema.sql` change (heures prévues sur
+`seances`).
+
+```bash
+git pull origin dev
+docker compose down -v
+docker compose up -d --build
+```
+
+## 1. Redirection après connexion, sans rafraîchissement
+
+Ouvrir `https://localhost/`, cliquer **Pré-remplir étudiant**, puis
+**Se connecter**. Attendu : le tableau de bord étudiant apparaît
+**immédiatement**, sans F5. Répéter avec **Pré-remplir formateur**.
+
+Vérifier aussi le cas d'échec : saisir un mot de passe erroné. Attendu : le
+message d'erreur s'affiche et le bouton **redevient cliquable**. S'il reste
+sur « Connexion en cours », l'anomalie est réapparue.
+
+## 2. Alignement de l'en-tête
+
+Sur `/etudiant`, réduire la fenêtre à 375 px. Attendu : le nom et
+« Espace étudiant » sont alignés à **gauche**, juste après la marque, et non
+poussés contre le bouton de déconnexion.
+
+## 3. Création d'une séance
+
+Se connecter en formateur. Attendu : un formulaire avec unité de formation,
+salle, date (pré-remplie au jour courant), début et fin prévus.
+
+**Contrôle de cohérence immédiat** : mettre une fin antérieure au début
+(par exemple 12:00 puis 09:00). Attendu : message d'erreur instantané, champ
+de fin en bordure rouge, bouton désactivé, **sans appel réseau**.
+
+Corriger, puis **Créer la séance**. Attendu : le formulaire et la carte
+« Votre compte » disparaissent, remplacés par le récapitulatif (UF, salle,
+créneau), un badge vert « En cours » et le QR code.
+
+**Vérification en base** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, date_ouverture, heure_debut_prevue, heure_fin_prevue, statut
+      FROM db_logs.seances ORDER BY date_ouverture DESC LIMIT 1\G"
+```
+Attendu : `heure_debut_prevue` correspond à l'heure saisie **convertie en
+UTC**. Si vous avez saisi 09:00 en heure belge d'été, la base doit contenir
+`07:00:00`. Une valeur identique à la saisie signalerait que la conversion
+n'a pas lieu, ce qui fausserait les futurs cumuls d'heures.
+
+`date_ouverture` doit être proche de l'instant du clic, et donc **différente**
+de `heure_debut_prevue`. Les deux colonnes ne mesurent pas la même chose.
+
+## 4. Erreur remontée proprement
+
+Choisir « Bureautique - Initiation » (absente du jeu de démonstration) et
+créer la séance. Attendu : message d'erreur lisible
+« uf_id ou salle_id inconnu », le formulaire restant utilisable.
+
+## 5. Projection
+
+Sur la séance ouverte, cliquer **Projeter en plein écran**. Attendu : le QR
+occupe l'écran avec le titre « Scannez pour valider votre présence ». Sortir
+par Échap et vérifier que le libellé du bouton redevient « Projeter en plein
+écran ».
+
+## 6. Un étudiant ne peut pas ouvrir de séance
+
+```bash
+curl -k -c etu.txt -s -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"amara.diallo@example.org","mot_de_passe":"Etudiant123!"}' > /dev/null
+
+curl -k -b etu.txt -s -X POST https://localhost/api/seances \
+  -H "Content-Type: application/json" \
+  -d '{"uf_id":"11111111-1111-1111-1111-111111111111","salle_id":"22222222-2222-2222-2222-222222222222"}'
+```
+Attendu : `403` avec `"code":"ROLE_INSUFFISANT"`.
+
+## 7. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+Attendu : `52 passed` côté backend (6 suites) et `9 passed` côté frontend.
+
+## Critère de succès global — Étape 7d
+
+Validée si et seulement si : la connexion mène au tableau de bord sans
+rafraîchissement et le bouton se débloque après une erreur (section 1) ;
+l'en-tête est aligné à gauche en 375 px (section 2) ; la création de séance
+bascule vers le QR et les heures sont stockées **en UTC**, distinctes de
+`date_ouverture` (section 3) ; une UF inconnue produit un message lisible
+(section 4) ; le plein écran fonctionne et l'état du bouton reste cohérent
+après Échap (section 5) ; un étudiant reçoit 403 (section 6) ; et les deux
+suites de tests passent (section 7).
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

@@ -1,29 +1,60 @@
 // src/controllers/seanceController.js
-// RF-01 : ouverture d'une seance de pointage rattachee a une UF, une salle et
-// un creneau horaire.
+// RF-01 : ouverture d'une seance de pointage rattachee a une UF, une salle
+// et un creneau horaire.
+//
+// Etape 7d : la route est desormais PROTEGEE et reservee au role formateur
+// (cf. src/routes/seanceRoutes.js), et accepte les heures prevues du cours.
 
 const crypto = require('crypto');
 const pool = require('../config/db');
 
 /**
- * POST /api/seances
- * Corps attendu : { uf_id: string, salle_id: string }
+ * Normalise une heure recue du client vers le format DATETIME de MySQL.
  *
- * L'identifiant de la seance est genere COTE APPLICATION (crypto.randomUUID()), pas
- * laisse au DEFAULT (UUID()) du schema SQL (01-schema.sql). Raison technique
- * precise : ce DEFAULT s'applique quand la colonne id est omise de l'INSERT,
- * mais mysql2 (comme tout driver MySQL) n'expose l'identifiant genere par le
- * serveur QUE via result.insertId -- un champ reserve aux colonnes
- * AUTO_INCREMENT, toujours vide pour une cle generee par une expression par
- * defaut comme UUID(). Sans generation cote application, il serait impossible
- * de retourner l'id de la seance creee dans la reponse HTTP sans une requete
- * de lecture supplementaire, elle-meme fragile en cas d'insertions
- * concurrentes. Generer le nonce du jeton (tokenService) et l'id de la
- * seance de la meme maniere (crypto.randomUUID()) est aussi plus coherent que
- * de melanger deux strategies de generation d'UUID dans le meme projet.
+ * Le navigateur envoie une chaine ISO 8601 avec fuseau (par exemple
+ * "2026-08-03T09:00:00.000Z"). MySQL attend "YYYY-MM-DD HH:MM:SS" et, en
+ * colonne DATETIME, ne conserve AUCUN fuseau. On convertit donc
+ * explicitement en UTC avant stockage, conformement a la convention du
+ * projet : tout est conserve en UTC, la conversion vers l'heure locale se
+ * fait a l'affichage. Passer la chaine ISO telle quelle a mysql2
+ * fonctionnerait en apparence mais laisserait le fuseau de la connexion
+ * decider du resultat, ce qui produirait des ecarts d'une heure selon
+ * l'environnement -- redhibitoire des lors que ces heures serviront a
+ * justifier des quotas.
+ *
+ * @returns {string|null} la valeur prete pour MySQL, ou null si absente
+ * @throws {Error} si la valeur est fournie mais inexploitable
+ */
+function versDatetimeUtc(valeur, nomChamp) {
+  if (valeur === undefined || valeur === null || valeur === '') return null;
+
+  const date = new Date(valeur);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`${nomChamp} n'est pas une date valide.`);
+  }
+  return date.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+/**
+ * POST /api/seances
+ * Corps attendu : { uf_id, salle_id, heure_debut_prevue?, heure_fin_prevue? }
+ * Route PROTEGEE : session authentifiee de role 'formateur'.
+ *
+ * L'identifiant de la seance est genere COTE APPLICATION (crypto.randomUUID),
+ * pas laisse au DEFAULT (UUID()) du schema : mysql2 n'expose l'identifiant
+ * genere par le serveur que via result.insertId, champ reserve aux colonnes
+ * AUTO_INCREMENT et toujours vide pour une cle produite par une expression
+ * par defaut. Sans generation applicative, il faudrait une requete de
+ * lecture supplementaire pour retourner l'id, elle-meme fragile en cas
+ * d'insertions concurrentes.
  */
 async function creerSeance(req, res) {
-  const { uf_id: ufId, salle_id: salleId } = req.body || {};
+  const {
+    uf_id: ufId,
+    salle_id: salleId,
+    heure_debut_prevue: heureDebutBrute,
+    heure_fin_prevue: heureFinBrute,
+  } = req.body || {};
 
   if (!ufId || !salleId) {
     return res.status(400).json({
@@ -32,37 +63,59 @@ async function creerSeance(req, res) {
     });
   }
 
+  let heureDebut;
+  let heureFin;
+  try {
+    heureDebut = versDatetimeUtc(heureDebutBrute, 'heure_debut_prevue');
+    heureFin = versDatetimeUtc(heureFinBrute, 'heure_fin_prevue');
+  } catch (erreur) {
+    return res.status(400).json({ status: 'error', message: erreur.message });
+  }
+
+  // Coherence des bornes, verifiee AVANT toute ecriture. Une seance dont la
+  // fin precede le debut produirait plus tard une duree negative dans les
+  // cumuls d'heures : mieux vaut la refuser a la source que d'avoir a la
+  // rattraper par une correction manuelle.
+  if (heureDebut && heureFin && heureFin <= heureDebut) {
+    return res.status(400).json({
+      status: 'error',
+      message: "L'heure de fin doit etre posterieure a l'heure de debut.",
+    });
+  }
+
   const seanceId = crypto.randomUUID();
 
   try {
     await pool.query(
-      'INSERT INTO seances (id, uf_id, salle_id) VALUES (?, ?, ?)',
-      [seanceId, ufId, salleId]
+      `INSERT INTO seances (id, uf_id, salle_id, heure_debut_prevue, heure_fin_prevue)
+       VALUES (?, ?, ?, ?, ?)`,
+      [seanceId, ufId, salleId, heureDebut, heureFin]
     );
 
-    // statut ('ouverte') et date_ouverture (CURRENT_TIMESTAMP) sont remplis
-    // par les DEFAULT du schema (01-schema.sql) -- pas besoin de les fournir.
-    return res.status(201).json({
-      status: 'ok',
-      seance_id: seanceId,
-      uf_id: ufId,
-      salle_id: salleId,
-      statut: 'ouverte',
-    });
+    // Relecture plutot que reconstruction a la main de l'objet renvoye : les
+    // valeurs par defaut (statut, date_ouverture) sont posees par le schema,
+    // et les recopier ici les dupliquerait a deux endroits qui pourraient
+    // diverger. Le client recoit ainsi exactement ce qui est en base.
+    const [lignes] = await pool.query(
+      `SELECT id, uf_id, salle_id, statut, date_ouverture,
+              heure_debut_prevue, heure_fin_prevue
+       FROM seances WHERE id = ?`,
+      [seanceId]
+    );
+
+    return res.status(201).json({ status: 'ok', seance: lignes[0] });
   } catch (error) {
-    // ER_NO_REFERENCED_ROW_2 : uf_id ou salle_id ne correspond a aucune ligne
-    // existante (violation de contrainte FOREIGN KEY). C'est une erreur de
-    // *saisie* previsible (mauvais identifiant fourni par le client), pas une
-    // panne serveur : elle merite un 400, pas un 500 generique qui masquerait
-    // la cause reelle.
-    if (error.code === 'ER_NO_REFERENCED_ROW_2') {
+    // ER_NO_REFERENCED_ROW_2 hors transaction, ER_NO_REFERENCED_ROW dans une
+    // transaction : MySQL rapporte la meme violation de cle etrangere sous
+    // deux codes selon le contexte (constate a l'Etape 4).
+    if (error.code === 'ER_NO_REFERENCED_ROW_2' || error.code === 'ER_NO_REFERENCED_ROW') {
       return res.status(400).json({
         status: 'error',
         message: 'uf_id ou salle_id inconnu (aucune ligne correspondante en base).',
       });
     }
 
-    console.error('Erreur POST /api/seances :', error.message);
+    console.error('[seanceController] Erreur POST /api/seances :', error.message);
     return res.status(500).json({
       status: 'error',
       message: 'Erreur serveur lors de la creation de la seance.',

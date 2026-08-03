@@ -25,15 +25,36 @@ function Connexion() {
   const [erreur, setErreur] = useState('');
   const [envoiEnCours, setEnvoiEnCours] = useState(false);
 
-  // Quelqu'un qui arrive sur /login alors qu'il est deja connecte est
-  // renvoye vers son tableau de bord plutot que de voir un formulaire
-  // inutile. Dans un useEffect et non pendant le rendu : modifier la
-  // navigation en cours de rendu declenche un avertissement de React.
+  // SOURCE UNIQUE DE REDIRECTION.
+  //
+  // Cet effet gere TOUS les cas : arrivee sur /login alors qu'on est deja
+  // connecte, et redirection juste apres une connexion reussie. La version
+  // precedente naviguait a DEUX endroits, ici et a la fin de la soumission,
+  // ce qui produisait deux navigations concurrentes pour un meme evenement.
+  //
+  // Le defaut etait aggrave par le fait que envoiEnCours n'etait jamais
+  // remis a false en cas de succes : on comptait sur le demontage du
+  // composant. Si la navigation ne prenait pas effet, le bouton restait fige
+  // sur "Connexion en cours" SANS message d'erreur, et seul un
+  // rafraichissement manuel debloquait la situation.
+  //
+  // Faire dependre la navigation du seul etat `utilisateur` supprime la
+  // course : il n'y a plus qu'un chemin possible, et il se declenche
+  // exactement quand l'etat est pret.
   useEffect(() => {
-    if (sessionVerifiee && utilisateur) {
-      navigate(accueilDuRole(utilisateur.role), { replace: true });
-    }
-  }, [sessionVerifiee, utilisateur, navigate]);
+    if (!sessionVerifiee || !utilisateur) return;
+
+    // La destination memorisee avant la redirection vers /login n'est
+    // honoree que si le role y donne acces. Sans ce controle, un etudiant
+    // ayant tente d'ouvrir /formateur serait envoye vers /formateur apres
+    // connexion, puis renvoye par RouteProtegee vers /etudiant : deux
+    // navigations visibles la ou une suffit.
+    const parDefaut = accueilDuRole(utilisateur.role);
+    const demandee = emplacement.state?.depuis;
+    const destination = demandee && demandee === parDefaut ? demandee : parDefaut;
+
+    navigate(destination, { replace: true });
+  }, [sessionVerifiee, utilisateur, emplacement.state, navigate]);
 
   if (!sessionVerifiee) return <EcranChargement />;
 
@@ -43,14 +64,17 @@ function Connexion() {
     setEnvoiEnCours(true);
 
     try {
-      const connecteur = await connecter(email.trim(), motDePasse);
-      // Retour a la page demandee avant la redirection vers /login, s'il y
-      // en avait une ; sinon, tableau de bord correspondant au role.
-      const destination = emplacement.state?.depuis ?? accueilDuRole(connecteur.role);
-      navigate(destination, { replace: true });
+      // La redirection n'est PAS declenchee ici : mettre a jour l'etat suffit,
+      // l'effet ci-dessus s'en charge des que `utilisateur` est disponible.
+      await connecter(email.trim(), motDePasse);
     } catch (echec) {
       setErreur(echec.message || 'La connexion a échoué. Réessayez.');
       setMotDePasse('');
+    } finally {
+      // Remis a false dans TOUS les cas, y compris en cas de succes. En cas
+      // de succes le composant est normalement demonte aussitot, mais s'en
+      // remettre a cela laissait le bouton bloque des que la navigation
+      // tardait ou echouait, sans aucun retour visible pour l'utilisateur.
       setEnvoiEnCours(false);
     }
   }

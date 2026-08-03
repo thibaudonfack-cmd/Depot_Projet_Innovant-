@@ -81,6 +81,44 @@ export function Champ({ id, libelle, aide, erreur = false, className = '', ...pr
   );
 }
 
+/**
+ * Liste deroulante. Meme habillage que Champ, avec une fleche dessinee en
+ * CSS : l'apparence native varie fortement d'un systeme a l'autre, au point
+ * de casser la coherence visuelle d'un formulaire.
+ */
+export function Selection({ id, libelle, aide, children, className = '', ...props }) {
+  return (
+    <div className="space-y-1.5">
+      <label htmlFor={id} className="block text-sm font-medium text-sable-900">
+        {libelle}
+      </label>
+      {aide && <p id={`${id}-aide`} className="text-xs text-sable-500">{aide}</p>}
+      <div className="relative">
+        <select
+          id={id}
+          aria-describedby={aide ? `${id}-aide` : undefined}
+          className={
+            'w-full appearance-none rounded-xl border border-sable-400 bg-white py-3 pr-10 pl-3.5 ' +
+            'text-sm text-sable-900 shadow-sm transition-colors duration-200 ' +
+            'focus-visible:border-accent-600 focus-visible:outline-none focus-visible:ring-4 ' +
+            'focus-visible:ring-accent-500/15 ' + className
+          }
+          {...props}
+        >
+          {children}
+        </select>
+        <svg
+          viewBox="0 0 24 24" aria-hidden="true"
+          className="pointer-events-none absolute top-1/2 right-3.5 size-4 -translate-y-1/2 text-sable-500"
+          fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+        >
+          <path d="m6 9 6 6 6-6" />
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 /** Carte de contenu. */
 export function Carte({ className = '', children }) {
   return (
