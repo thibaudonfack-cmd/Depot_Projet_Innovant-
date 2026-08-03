@@ -165,6 +165,56 @@ export function Message({ ton = 'info', titre, children }) {
 }
 
 /**
+ * Badge d'etat. La couleur ne porte JAMAIS l'information seule : le libelle
+ * la double systematiquement (WCAG 1.4.1).
+ */
+export function Badge({ ton = 'neutre', children }) {
+  const tons = {
+    actif: 'bg-emerald-50 text-emerald-800',
+    neutre: 'bg-sable-200 text-sable-700',
+    attention: 'bg-amber-50 text-amber-900',
+    info: 'bg-accent-50 text-accent-900',
+  };
+  const pastilles = {
+    actif: 'bg-emerald-600', neutre: 'bg-sable-500',
+    attention: 'bg-amber-600', info: 'bg-accent-600',
+  };
+  return (
+    <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${tons[ton]}`}>
+      <span aria-hidden="true" className={`size-1.5 rounded-full ${pastilles[ton]}`} />
+      {children}
+    </span>
+  );
+}
+
+/**
+ * Etat vide. Traite comme un vrai ecran plutot qu'expedie en une ligne grise :
+ * une liste vide est le premier ecran que voit un utilisateur, et laisser un
+ * blanc laisse croire a un chargement qui n'aboutit pas.
+ */
+export function EtatVide({ titre, children }) {
+  return (
+    <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-sable-400 bg-sable-100 px-6 py-10 text-center">
+      <p className="text-sm font-medium text-sable-900">{titre}</p>
+      {children && <p className="max-w-sm text-sm text-sable-600">{children}</p>}
+    </div>
+  );
+}
+
+/** Indicateur de chargement en ligne, pour une zone de contenu. */
+export function ChargementEnLigne({ libelle = 'Chargement' }) {
+  return (
+    <p className="flex items-center justify-center gap-2 py-8 text-sm text-sable-600">
+      <span
+        aria-hidden="true"
+        className="size-4 rounded-full border-2 border-sable-300 border-t-accent-600 motion-safe:animate-spin"
+      />
+      {libelle}
+    </p>
+  );
+}
+
+/**
  * Marque de l'application.
  * @param {'compacte'|'normale'|'grande'} taille
  */

@@ -9,7 +9,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import EnTeteApplication from '../components/EnTeteApplication';
 import QRScanner from '../components/QRScanner';
-import { Bouton, Carte, Message } from '../components/ui';
+import {
+  Badge, Bouton, Carte, ChargementEnLigne, EtatVide, Message,
+} from '../components/ui';
+import { dateCourte, duree, heure } from '../components/format';
 import { appelerApi } from '../services/api';
 import {
   generateAndStoreKeyPair,
@@ -37,6 +40,116 @@ function PuceEtat({ actif, children }) {
       <span aria-hidden="true" className={`size-1.5 rounded-full ${actif ? 'bg-emerald-500' : 'bg-sable-500'}`} />
       {children}
     </span>
+  );
+}
+
+/**
+ * Fenetre de signalement d'erreur.
+ *
+ * L'ouverture du bouton depend d'un drapeau calcule PAR LE SERVEUR
+ * (rectification_ouverte), jamais d'une comparaison de dates cote client :
+ * il suffirait de changer l'heure de sa machine pour rouvrir une fenetre
+ * fermee depuis des semaines.
+ */
+function LigneHistorique({ presence }) {
+  const [formulaireOuvert, setFormulaireOuvert] = useState(false);
+
+  const dejaDemande = Boolean(presence.demande_statut);
+  const libelleDemande = {
+    en_attente: 'Signalement en attente',
+    acceptee: 'Signalement accepté',
+    refusee: 'Signalement refusé',
+  }[presence.demande_statut];
+
+  return (
+    <li className="py-4 first:pt-0">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-sable-900">{presence.uf_intitule}</p>
+          <p className="mt-0.5 text-xs text-sable-600">
+            {dateCourte(presence.heure_arrivee)} · {presence.salle_nom} ·{' '}
+            {heure(presence.heure_arrivee)} à {heure(presence.heure_depart)}
+          </p>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-2">
+          <Badge ton={presence.heure_depart ? 'neutre' : 'actif'}>
+            {duree(presence.duree_minutes)}
+          </Badge>
+
+          {dejaDemande && <Badge ton={presence.demande_statut === 'refusee' ? 'attention' : 'info'}>{libelleDemande}</Badge>}
+
+          {!dejaDemande && presence.rectification_ouverte && (
+            <Bouton variante="secondaire" onClick={() => setFormulaireOuvert((v) => !v)}
+                    aria-expanded={formulaireOuvert} className="w-auto px-3 py-2 text-xs">
+              Signaler une erreur
+            </Bouton>
+          )}
+        </div>
+      </div>
+
+      {/* La fenetre fermee est signalee explicitement plutot que par la simple
+          absence du bouton : sans explication, un etudiant croirait a un
+          defaut de l'application. */}
+      {!dejaDemande && !presence.rectification_ouverte && (
+        <p className="mt-2 text-xs text-sable-600">
+          Le délai de signalement de 24 heures est écoulé pour cette séance.
+        </p>
+      )}
+
+      {formulaireOuvert && (
+        <div className="mt-4 rounded-xl border border-sable-300 bg-sable-100 p-4">
+          <Message ton="info" titre="Bientôt disponible">
+            Le formulaire de signalement sera activé avec le suivi du temps.
+            Votre demande sera transmise au formateur, qui pourra l&apos;accepter
+            ou la refuser, et chaque décision laissera une trace horodatée.
+          </Message>
+        </div>
+      )}
+    </li>
+  );
+}
+
+/** Historique des seances suivies par l'etudiant connecte. */
+function HistoriquePresences({ rafraichir }) {
+  const [presences, setPresences] = useState(null);
+  const [erreur, setErreur] = useState('');
+
+  useEffect(() => {
+    let annule = false;
+    appelerApi('/api/mes-presences')
+      .then((r) => { if (!annule) setPresences(r.presences); })
+      .catch((e) => { if (!annule) setErreur(e.message); });
+    return () => { annule = true; };
+    // rafraichir change apres un scan reussi, ce qui relance le chargement :
+    // la presence qui vient d'etre validee doit apparaitre sans que
+    // l'etudiant ait a recharger la page.
+  }, [rafraichir]);
+
+  return (
+    <Carte>
+      <h2 className="text-sm font-semibold text-sable-900">Mes présences</h2>
+      <p className="mt-1 text-sm leading-relaxed text-sable-600">
+        Historique des séances auxquelles vous avez assisté.
+      </p>
+
+      {erreur && <div className="mt-4"><Message ton="erreur">{erreur}</Message></div>}
+      {!presences && !erreur && <ChargementEnLigne libelle="Chargement de votre historique" />}
+
+      {presences && presences.length === 0 && (
+        <div className="mt-5">
+          <EtatVide titre="Aucune présence enregistrée">
+            Vos séances apparaîtront ici dès votre premier scan.
+          </EtatVide>
+        </div>
+      )}
+
+      {presences && presences.length > 0 && (
+        <ul className="mt-5 divide-y divide-sable-200">
+          {presences.map((p) => <LigneHistorique key={p.id} presence={p} />)}
+        </ul>
+      )}
+    </Carte>
   );
 }
 
@@ -197,6 +310,8 @@ function TableauBordEtudiant() {
             )}
           </div>
         </Carte>
+
+        <HistoriquePresences rafraichir={resultatScan?.ton === 'succes'} />
       </main>
     </div>
   );

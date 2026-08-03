@@ -37,6 +37,14 @@ function installerReseau(profil) {
       utilisateurConnecte = profil;
       return rep(200, { status: 'ok', utilisateur: profil });
     }
+    // Routes appelees au montage des tableaux de bord. Leur forme doit etre
+    // respectee : renvoyer un objet vide ferait echouer les .map() des vues,
+    // et le test signalerait une regression de connexion la ou le probleme
+    // serait ailleurs.
+    if (url === '/api/uf') return rep(200, { status: 'ok', uf: [] });
+    if (url === '/api/salles') return rep(200, { status: 'ok', salles: [] });
+    if (url === '/api/seances') return rep(200, { status: 'ok', seances: [] });
+    if (url === '/api/mes-presences') return rep(200, { status: 'ok', presences: [] });
     return rep(200, { status: 'ok' });
   });
 }
