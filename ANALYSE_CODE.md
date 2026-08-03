@@ -2688,6 +2688,230 @@ la discipline du code.
 
 ---
 
+# Trois arguments pour la soutenance
+
+*Ces trois sections répondent à des questions que le jury posera
+vraisemblablement. Elles sont rédigées pour être lues telles quelles.*
+
+## 1. Pourquoi bloquer un appareil, alors que l'étudiant peut en enrôler un autre ?
+
+L'objection est légitime et vient toujours : *« si un étudiant peut associer
+un nouveau téléphone quand il veut, à quoi sert le verrouillage ? »*
+
+**L'objectif n'a jamais été d'empêcher le changement d'appareil.** Perdre son
+téléphone, le casser, en changer sont des situations parfaitement légitimes,
+et un système qui les bloquerait serait inutilisable. Ce que le mécanisme
+empêche, c'est la **multiplication d'appareils actifs simultanés** — et c'est
+une propriété très différente.
+
+Déroulons le scénario de fraude le plus probable. L'étudiant A confie ses
+identifiants à son ami B pour qu'il valide sa présence à sa place :
+
+1. B se connecte avec le compte de A, mais son téléphone n'a aucune clé. Il
+   doit donc enrôler son propre appareil.
+2. Cet enrôlement **révoque immédiatement** celui de A — la contrainte
+   `uq_appareil_actif` garantit au niveau du schéma qu'il ne peut jamais
+   exister deux appareils actifs pour un même étudiant.
+3. A se retrouve bloqué pour **tous ses autres cours**. Il ne s'en aperçoit
+   pas forcément tout de suite, et le découvrira au pire moment.
+4. Pour redevenir opérationnel, A doit se réenrôler, ce qui révoque
+   l'appareil de B. La fraude ne peut donc pas être **répétée** sans que
+   les deux complices se dérangent mutuellement à chaque fois.
+
+C'est ce qu'on appelle une **sécurité par la friction**. Elle ne rend pas la
+fraude impossible — aucun mécanisme logiciel ne le peut face à deux personnes
+qui coopèrent volontairement — mais elle la rend :
+
+- **coûteuse** : un aller-retour d'enrôlements à chaque séance, avec le
+  risque permanent pour A de se retrouver bloqué sans l'avoir prévu ;
+- **non industrialisable** : elle ne passe pas à l'échelle, un étudiant ne
+  peut pas « couvrir » plusieurs camarades, ni un camarade en couvrir
+  plusieurs ;
+- **traçable** : chaque enrôlement laisse en base une ligne horodatée avec sa
+  description d'appareil. Une succession d'enrôlements alternés sur un même
+  compte est un motif statistiquement anormal, détectable a posteriori, et
+  surtout **opposable** lors d'un entretien disciplinaire.
+
+Ce dernier point est le plus important pour un établissement : le mécanisme
+déplace la fraude du terrain technique, où elle est invisible et impunie,
+vers le terrain administratif, où elle laisse des preuves. Un système
+déclaratif classique — une feuille qui circule — ne produit rien de tel.
+
+## 2. Le cycle de vie des jetons lors d'un réaffichage du QR
+
+Question naturelle quand on voit le bouton « Réafficher le QR » destiné aux
+retardataires : *« le serveur continue-t-il de générer des jetons dans le
+vide pendant que le QR est fermé ? »*
+
+**Non.** Le flux s'arrête complètement.
+
+Le mécanisme repose sur la connexion WebSocket. Quand le formateur masque le
+QR, le composant est démonté et sa fonction de nettoyage appelle `ws.close()`.
+Côté serveur, `qrBroadcaster.js` écoute l'événement `close` et exécute
+`clearInterval` : **la boucle de génération cesse**. Plus aucun jeton n'est
+signé, plus aucun `jti` n'est produit. Aucune consommation CPU, aucune
+sollicitation de la clé privée RS256.
+
+C'est précisément ce que garantit le test de non-régression validé par
+mutation : en retirant `ws.close()`, le test échoue. Sans ce nettoyage, chaque
+ouverture d'écran laisserait derrière elle une boucle orpheline que le serveur
+alimenterait indéfiniment.
+
+**À la réouverture**, une nouvelle connexion est établie et le serveur
+démarre une **nouvelle** boucle. Les jetons produits sont différents — nouveau
+`jti` à chaque fois, aucune réutilisation possible — mais ils sont liés au
+**même `seance_id`**, celui créé au moment de l'ouverture de la séance. La
+séance n'est pas recréée : c'est une ligne unique en base, dont l'identité ne
+dépend pas du fait que le QR soit affiché ou non.
+
+Conséquence directe pour les retardataires : un étudiant qui scanne à 9h45 un
+QR réaffiché est inséré dans la **même** table `presences`, avec le **même**
+`seance_id` que ceux arrivés à 9h00. Seule son `heure_arrivee` diffère,
+capturée par le `NOW()` de MySQL au moment de son scan. La contrainte
+`UNIQUE(seance_id, etudiant_id)` continue d'empêcher qu'il figure deux fois.
+
+Autrement dit : **la séance est une entité de la base, le flux de jetons n'est
+qu'un canal d'affichage.** Fermer le canal n'affecte pas l'entité. C'est cette
+séparation qui permet de rouvrir le QR autant de fois que nécessaire au cours
+d'une même séance, sans jamais dupliquer quoi que ce soit.
+
+## 3. Comment le journal d'audit est techniquement sanctuarisé
+
+L'argument de conformité repose sur une propriété qui doit être formulée
+précisément : **l'inaltérabilité du journal n'est pas garantie par notre
+code, elle est garantie par le moteur de base de données.**
+
+L'utilisateur MySQL employé par l'API Node.js (`app_logs`) reçoit exactement
+deux privilèges sur `db_attestations.journal_modifications` : `INSERT` et
+`SELECT`. `UPDATE` et `DELETE` ne lui sont **jamais** accordés
+(`03-privileges.sh`).
+
+La différence avec une protection applicative est décisive. Si la règle était
+« notre code ne fait jamais d'`UPDATE` sur cette table », elle tiendrait tant
+que personne ne se trompe. Ici, la règle est appliquée **en dehors** de
+l'application, par un composant que l'application ne contrôle pas.
+
+Les conséquences se formulent simplement :
+
+- Une **faille d'injection SQL**, même critique, ne permettrait pas d'effacer
+  une ligne du journal. L'attaquant hériterait des privilèges de la
+  connexion, qui n'incluent ni `UPDATE` ni `DELETE` sur cette table. Il
+  pourrait lire, il pourrait insérer — il ne pourrait pas faire disparaître
+  une trace existante.
+- Un **développeur malveillant ou négligent** ne le pourrait pas davantage.
+  Écrire la requête ne suffit pas ; elle serait rejetée à l'exécution.
+- Une **erreur de code** ne peut pas corrompre le journal par accident.
+
+C'est cette propriété qui fonde la valeur probatoire sur cinq ans. Un journal
+que l'application peut réécrire ne prouve rien : devant une inspection, la
+question ne serait pas « que dit le journal ? » mais « qui aurait pu le
+modifier ? ».
+
+S'y ajoutent trois choix qui renforcent l'ensemble :
+
+- Le journal réside dans **`db_attestations` et non `db_logs`**, précisément
+  parce que `db_logs` est purgé en fin d'UF (RF-20). Placé du mauvais côté,
+  il disparaîtrait avec la purge, emportant la justification des quotas.
+- L'écriture du journal et la modification qu'il décrit se font **dans une
+  même transaction**. `journalService.consigner()` prend une *connexion* en
+  paramètre et jamais le pool : la signature de la fonction rend cette
+  contrainte impossible à contourner par inadvertance. Sans cela, une panne
+  entre les deux produirait une donnée modifiée sans trace.
+- Les valeurs sont consignées **en texte**, sans clé étrangère. La trace
+  reste lisible même après la purge de `db_logs`, quand la ligne d'origine
+  n'existe plus.
+
+**Démonstration à faire devant le jury** (protocole complet dans
+`TESTING.md`) : tenter un `UPDATE` puis un `DELETE` sur la table depuis le
+compte applicatif. Les deux sont refusés par MySQL. C'est une preuve
+observable en direct, pas une affirmation.
+
+---
+
+# Réactivité de l'interface
+
+## Rafraîchissement silencieux plutôt que rechargement
+
+Trois écrans avaient besoin de se mettre à jour sans intervention :
+l'historique de l'étudiant après un scan ou un signalement, et la liste des
+présences du formateur pendant qu'un cours se déroule.
+
+`useRessource` a été écrit à la main plutôt qu'en ajoutant SWR ou React
+Query. Le besoin tient en une soixantaine de lignes, alors que ces
+bibliothèques apporteraient un cache global, une invalidation par clés et une
+gestion de mutations dont ce projet n'a aucun usage. Une dépendance de plus
+est aussi une surface de plus à maintenir et à justifier.
+
+Trois comportements en font la valeur, et aucun n'est cosmétique :
+
+**Le drapeau de chargement ne passe à vrai qu'au tout premier appel.** Les
+rafraîchissements suivants remplacent les données sans afficher d'indicateur.
+Un indicateur qui réapparaîtrait toutes les cinq secondes serait *pire* que
+pas de rafraîchissement du tout : la liste clignoterait, et le contenu
+disparaîtrait sous le curseur au moment où le formateur s'apprête à cliquer.
+
+**La boucle se suspend quand l'onglet est masqué.** Interroger le serveur
+toutes les cinq secondes pendant qu'un formateur consulte un autre onglet
+consomme du réseau, de la batterie et du temps serveur pour rien. Un
+rafraîchissement immédiat est déclenché au retour, sans quoi l'écran resterait
+périmé plusieurs secondes précisément au moment où on le regarde.
+
+**Une erreur de fond n'efface pas les données affichées.** Une coupure réseau
+passagère ne doit pas vider l'écran d'un formateur en plein cours ; l'ancienne
+liste reste visible jusqu'au prochain succès.
+
+S'y ajoute une suspension explicite : l'actualisation s'arrête pendant qu'une
+modale est ouverte. Voir la liste se réordonner sous une boîte de dialogue en
+cours de saisie est désagréable, et le formulaire pourrait porter sur une
+ligne qui vient de changer.
+
+Côté étudiant, l'envoi d'un signalement applique en plus une **mise à jour
+optimiste** : la présence est marquée localement dès la confirmation, sans
+attendre le rechargement. Le serveur reste la source de vérité — le
+rechargement suit immédiatement — mais l'attendre laisserait le bouton
+« Signaler une erreur » affiché pendant l'aller-retour, avec le risque d'un
+second clic qui recevrait un 409.
+
+Un indicateur discret « Actualisation automatique » figure dans l'en-tête de
+la vue séance. Sans cette mention, un formateur rafraîchirait la page par
+réflexe, sans savoir que c'est inutile.
+
+**Validé par mutation** : en retirant l'arrêt de l'intervalle au démontage, le
+test correspondant échoue ; restauré, les 20 tests frontend repassent.
+
+## Un défaut d'hygiène de test, corrigé
+
+Le test de suspension par visibilité échouait avec un appel de trop. La cause
+n'était pas dans le code testé mais dans le fichier de test : les composants
+montés par les tests précédents n'étaient jamais démontés, et leurs écouteurs
+`visibilitychange` répondaient encore, déclenchant des appels supplémentaires.
+Corrigé par un démontage systématique après chaque test. Un test qui ne
+nettoie pas derrière lui pollue les suivants, et le symptôme apparaît loin de
+sa cause.
+
+## Modales
+
+Les transitions d'ouverture et de fermeture sont écrites en CSS et non en
+classes utilitaires, parce qu'elles exigent trois mécanismes qui ne
+s'expriment pas ainsi : `@starting-style` (sans lui, le navigateur n'a pas
+d'état initial à interpoler et l'ouverture est instantanée),
+`transition-behavior: allow-discrete` sur `display` et `overlay` (sans lui, le
+dialogue disparaît au premier frame et seule l'ouverture est animée), et le
+pseudo-élément `::backdrop`.
+
+L'ensemble est natif : aucune bibliothèque d'animation, aucun état React à
+synchroniser, et la fermeture par Échap est animée comme les autres.
+
+Une contrainte en découle : **le dialogue doit rester monté même fermé**. Un
+composant démonté par une condition React disparaît immédiatement, et
+l'animation de sortie n'a pas lieu. Les modales sont donc montées en
+permanence, seul leur contenu étant conditionnel.
+
+Un bouton de fermeture explicite complète la touche Échap : sur mobile elle
+n'existe pas, et cliquer en dehors ne ferme pas un `<dialog>` nativement.
+
+---
+
 ## Prochaine étape suggérée
 
 **Étape 7e** (géofencing, en signalement et non en blocage), puis

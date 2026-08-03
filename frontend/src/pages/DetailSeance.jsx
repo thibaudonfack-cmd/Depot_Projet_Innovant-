@@ -8,13 +8,14 @@
 // n'est pas defendable devant une inspection : l'interface ne doit donc meme
 // pas permettre de la tenter.
 
-import { useCallback, useEffect, useState } from 'react';
-import Modale from '../components/Modale';
+import { useCallback, useState } from 'react';
+import Modale, { PiedModale, ZoneTexte } from '../components/Modale';
 import {
   Badge, Bouton, Carte, Champ, ChargementEnLigne, EtatVide, Message,
 } from '../components/ui';
 import { duree, heure } from '../components/format';
 import { appelerApi } from '../services/api';
+import { useRessource } from '../services/useRessource';
 
 function versChampLocal(instant) {
   if (!instant) return '';
@@ -26,24 +27,12 @@ function versChampLocal(instant) {
 /** Champ de motif, partage par les deux actions tracees. */
 function ChampMotif({ valeur, onChange, id = 'motif-action' }) {
   return (
-    <div className="space-y-1.5">
-      <label htmlFor={id} className="block text-sm font-medium text-sable-900">
-        Motif <span className="font-normal text-sable-600">(obligatoire)</span>
-      </label>
-      <p id={`${id}-aide`} className="text-xs text-sable-500">
-        Consigné dans le journal d&apos;audit et conservé cinq ans. Il justifiera
-        la modification en cas d&apos;inspection.
-      </p>
-      <textarea
-        id={id} rows={2} required aria-describedby={`${id}-aide`}
-        value={valeur} onChange={(e) => onChange(e.target.value)}
-        placeholder="Exemple : départ anticipé signalé oralement, rendez-vous médical."
-        className="w-full resize-y rounded-xl border border-sable-400 bg-white px-3.5 py-3 text-sm
-                   text-sable-900 shadow-sm transition-colors placeholder:text-sable-500
-                   focus-visible:border-accent-600 focus-visible:outline-none
-                   focus-visible:ring-4 focus-visible:ring-accent-500/15"
-      />
-    </div>
+    <ZoneTexte
+      id={id} libelle="Motif" obligatoire required
+      aide="Consigné dans le journal d'audit et conservé cinq ans. Il justifiera la modification en cas d'inspection."
+      value={valeur} onChange={(e) => onChange(e.target.value)}
+      placeholder="Exemple : départ anticipé signalé oralement, rendez-vous médical."
+    />
   );
 }
 
@@ -76,32 +65,27 @@ function ModaleModificationHoraire({ presence, onFermer, onEnregistre }) {
   }
 
   return (
-    <Modale
-      ouverte={Boolean(presence)}
-      titre="Modifier l'horaire"
-      description={presence ? `${presence.etudiant_nom} · arrivée à ${heure(presence.heure_arrivee)}` : ''}
-      onFermer={onFermer}
-    >
-      <form onSubmit={enregistrer} className="space-y-5" noValidate>
-        <Champ id="nouveau-depart" libelle="Heure de départ" type="datetime-local"
-               value={depart} onChange={(e) => setDepart(e.target.value)} erreur={incoherent} />
+    <form onSubmit={enregistrer} className="space-y-6" noValidate>
+      <Champ id="nouveau-depart" libelle="Heure de départ" type="datetime-local"
+             value={depart} onChange={(e) => setDepart(e.target.value)} erreur={incoherent} />
 
-        <ChampMotif valeur={motif} onChange={setMotif} />
+      <ChampMotif valeur={motif} onChange={setMotif} />
 
-        <div aria-live="polite" className="space-y-3">
-          {incoherent && <Message ton="erreur">Le départ doit être postérieur à l&apos;arrivée.</Message>}
-          {erreur && <Message ton="erreur">{erreur}</Message>}
-        </div>
+      <div aria-live="polite" className="space-y-3">
+        {incoherent && <Message ton="erreur">Le départ doit être postérieur à l&apos;arrivée.</Message>}
+        {erreur && <Message ton="erreur">{erreur}</Message>}
+      </div>
 
-        <div className="flex flex-col gap-3 sm:flex-row-reverse">
-          <Bouton type="submit" chargement={envoi} enfantsChargement="Enregistrement"
-                  disabled={!motif.trim() || incoherent}>
-            Enregistrer
-          </Bouton>
-          <Bouton type="button" variante="secondaire" onClick={onFermer}>Annuler</Bouton>
-        </div>
-      </form>
-    </Modale>
+      <PiedModale>
+        <Bouton type="button" variante="secondaire" onClick={onFermer} className="sm:w-auto sm:px-5">
+          Annuler
+        </Bouton>
+        <Bouton type="submit" chargement={envoi} enfantsChargement="Enregistrement"
+                disabled={!motif.trim() || incoherent} className="sm:w-auto sm:px-5">
+          Enregistrer
+        </Bouton>
+      </PiedModale>
+    </form>
   );
 }
 
@@ -130,76 +114,71 @@ function ModaleDecision({ demande, decision, onFermer, onTraite }) {
   }
 
   return (
-    <Modale
-      ouverte={Boolean(demande)}
-      titre={accepte ? 'Accepter la demande' : 'Refuser la demande'}
-      description={
-        accepte
-          ? 'Les heures demandées seront appliquées à la présence de cet étudiant.'
-          : 'La présence restera inchangée. L\'étudiant verra votre motif.'
-      }
-      onFermer={onFermer}
-    >
-      <form onSubmit={trancher} className="space-y-5" noValidate>
-        <div className="rounded-xl border border-sable-300 bg-sable-100 p-4">
-          <p className="text-xs font-medium text-sable-600">Demande de {demande?.etudiant_nom}</p>
-          <p className="mt-1 text-sm text-sable-900">{demande?.motif}</p>
-          {(demande?.heure_arrivee_demandee || demande?.heure_depart_demandee) && (
-            <p className="mt-2 text-xs text-sable-600">
-              Heures demandées : {heure(demande.heure_arrivee_demandee ?? demande.heure_arrivee)} à{' '}
-              {heure(demande.heure_depart_demandee ?? demande.heure_depart)}
-            </p>
-          )}
-        </div>
+    <form onSubmit={trancher} className="space-y-6" noValidate>
+      <div className="rounded-xl border border-sable-300 bg-sable-100 p-4">
+        <p className="text-xs font-medium text-sable-600">Demande de {demande?.etudiant_nom}</p>
+        <p className="mt-1 text-sm leading-relaxed text-sable-900">{demande?.motif}</p>
+        {(demande?.heure_arrivee_demandee || demande?.heure_depart_demandee) && (
+          <p className="mt-2 text-xs text-sable-600">
+            Heures demandées : {heure(demande.heure_arrivee_demandee ?? demande.heure_arrivee)} à{' '}
+            {heure(demande.heure_depart_demandee ?? demande.heure_depart)}
+          </p>
+        )}
+      </div>
 
-        {/* Motif exige AUSSI pour un refus : c'est ce que l'etudiant pourra
-            contester, et ce qu'une inspection lira. */}
-        <ChampMotif valeur={motif} onChange={setMotif} id="motif-decision" />
+      {/* Motif exige AUSSI pour un refus : c'est ce que l'etudiant pourra
+          contester, et ce qu'une inspection lira. */}
+      <ChampMotif valeur={motif} onChange={setMotif} id="motif-decision" />
 
-        <div aria-live="polite">{erreur && <Message ton="erreur">{erreur}</Message>}</div>
+      <div aria-live="polite">{erreur && <Message ton="erreur">{erreur}</Message>}</div>
 
-        <div className="flex flex-col gap-3 sm:flex-row-reverse">
-          <Bouton type="submit" chargement={envoi} enfantsChargement="Enregistrement" disabled={!motif.trim()}>
-            {accepte ? 'Accepter la demande' : 'Refuser la demande'}
-          </Bouton>
-          <Bouton type="button" variante="secondaire" onClick={onFermer}>Annuler</Bouton>
-        </div>
-      </form>
-    </Modale>
+      <PiedModale>
+        <Bouton type="button" variante="secondaire" onClick={onFermer} className="sm:w-auto sm:px-5">
+          Annuler
+        </Bouton>
+        <Bouton type="submit" chargement={envoi} enfantsChargement="Enregistrement"
+                disabled={!motif.trim()} className="sm:w-auto sm:px-5">
+          {accepte ? 'Accepter la demande' : 'Refuser la demande'}
+        </Bouton>
+      </PiedModale>
+    </form>
   );
 }
 
+/** Cadence d'actualisation de la vue seance, en millisecondes. */
+const INTERVALLE_ACTUALISATION_MS = 5000;
+
 function DetailSeance({ seanceId, onRetour }) {
-  const [donnees, setDonnees] = useState(null);
-  const [rectifications, setRectifications] = useState(null);
-  const [erreur, setErreur] = useState('');
-  const [version, setVersion] = useState(0);
   const [presenceModifiee, setPresenceModifiee] = useState(null);
   const [demandeTraitee, setDemandeTraitee] = useState(null);
   const [decision, setDecision] = useState(null);
   const [confirmation, setConfirmation] = useState('');
 
-  useEffect(() => {
-    let annule = false;
-    Promise.all([
-      appelerApi(`/api/seances/${seanceId}/presences`),
-      appelerApi(`/api/seances/${seanceId}/rectifications`),
-    ])
-      .then(([p, r]) => {
-        if (annule) return;
-        setDonnees(p);
-        setRectifications(r.rectifications);
-      })
-      .catch((e) => { if (!annule) setErreur(e.message); });
-    return () => { annule = true; };
-  }, [seanceId, version]);
+  // Une modale ouverte suspend l'actualisation : voir la liste se reordonner
+  // sous une boite de dialogue en cours de saisie est desagreable, et le
+  // formulaire pourrait porter sur une ligne qui vient de changer.
+  const modaleOuverte = Boolean(presenceModifiee || demandeTraitee);
+
+  const presencesRes = useRessource(`/api/seances/${seanceId}/presences`, {
+    intervalleMs: INTERVALLE_ACTUALISATION_MS, suspendu: modaleOuverte,
+  });
+  const rectificationsRes = useRessource(`/api/seances/${seanceId}/rectifications`, {
+    intervalleMs: INTERVALLE_ACTUALISATION_MS, suspendu: modaleOuverte,
+  });
+
+  const donnees = presencesRes.donnees;
+  const rectifications = rectificationsRes.donnees?.rectifications ?? null;
+  const erreur = presencesRes.erreur || rectificationsRes.erreur;
 
   const rafraichir = useCallback((texte) => {
     setPresenceModifiee(null);
     setDemandeTraitee(null);
     setConfirmation(texte);
-    setVersion((v) => v + 1);
-  }, []);
+    // Rechargement immediat plutot qu'attendre le prochain tour : apres une
+    // action explicite, l'utilisateur doit voir le resultat sans delai.
+    presencesRes.recharger();
+    rectificationsRes.recharger();
+  }, [presencesRes, rectificationsRes]);
 
   const enAttente = rectifications?.filter((r) => r.statut === 'en_attente') ?? [];
   const traitees = rectifications?.filter((r) => r.statut !== 'en_attente') ?? [];
@@ -216,9 +195,18 @@ function DetailSeance({ seanceId, onRetour }) {
               </p>
             )}
           </div>
-          <Bouton variante="secondaire" onClick={onRetour} className="w-auto px-3 py-2 text-xs">
-            Retour
-          </Bouton>
+          <div className="flex shrink-0 items-center gap-3">
+            {/* Signale que la vue se met a jour seule. Sans cette mention, un
+                formateur rafraichirait la page par reflexe, sans savoir que
+                c'est inutile. */}
+            <span className="hidden items-center gap-1.5 text-xs text-sable-600 sm:flex">
+              <span aria-hidden="true" className="size-1.5 rounded-full bg-emerald-600" />
+              Actualisation automatique
+            </span>
+            <Bouton variante="secondaire" onClick={onRetour} className="w-auto px-3 py-2 text-xs">
+              Retour
+            </Bouton>
+          </div>
         </div>
 
         <div aria-live="polite">
@@ -226,7 +214,7 @@ function DetailSeance({ seanceId, onRetour }) {
         </div>
 
         {erreur && <div className="mt-4"><Message ton="erreur">{erreur}</Message></div>}
-        {!donnees && !erreur && <ChargementEnLigne libelle="Chargement des présences" />}
+        {presencesRes.chargement && <ChargementEnLigne libelle="Chargement des présences" />}
 
         {donnees && donnees.presences.length === 0 && (
           <div className="mt-5">
@@ -280,7 +268,7 @@ function DetailSeance({ seanceId, onRetour }) {
           {enAttente.length > 0 && <Badge ton="attention">{enAttente.length} en attente</Badge>}
         </div>
 
-        {!rectifications && !erreur && <ChargementEnLigne libelle="Chargement des demandes" />}
+        {rectificationsRes.chargement && <ChargementEnLigne libelle="Chargement des demandes" />}
 
         {rectifications && rectifications.length === 0 && (
           <div className="mt-5">
@@ -340,26 +328,46 @@ function DetailSeance({ seanceId, onRetour }) {
         )}
       </Carte>
 
-      {presenceModifiee && (
-        <ModaleModificationHoraire
-          presence={presenceModifiee}
-          onFermer={() => setPresenceModifiee(null)}
-          onEnregistre={() => rafraichir('Horaire modifié. La modification est consignée dans le journal d\'audit.')}
-        />
-      )}
+      {/* Les modales restent MONTEES pour que leur animation de sortie joue ;
+          seul leur contenu est conditionnel. */}
+      <Modale
+        ouverte={Boolean(presenceModifiee)}
+        titre="Modifier l'horaire"
+        description={presenceModifiee
+          ? `${presenceModifiee.etudiant_nom} · arrivée à ${heure(presenceModifiee.heure_arrivee)}`
+          : ''}
+        onFermer={() => setPresenceModifiee(null)}
+      >
+        {presenceModifiee && (
+          <ModaleModificationHoraire
+            presence={presenceModifiee}
+            onFermer={() => setPresenceModifiee(null)}
+            onEnregistre={() => rafraichir("Horaire modifié. La modification est consignée dans le journal d'audit.")}
+          />
+        )}
+      </Modale>
 
-      {demandeTraitee && (
-        <ModaleDecision
-          demande={demandeTraitee}
-          decision={decision}
-          onFermer={() => setDemandeTraitee(null)}
-          onTraite={() => rafraichir(
-            decision === 'acceptee'
-              ? 'Demande acceptée. Les heures ont été mises à jour et la modification consignée.'
-              : 'Demande refusée. Votre motif sera visible par l\'étudiant.'
-          )}
-        />
-      )}
+      <Modale
+        ouverte={Boolean(demandeTraitee)}
+        titre={decision === 'acceptee' ? 'Accepter la demande' : 'Refuser la demande'}
+        description={decision === 'acceptee'
+          ? 'Les heures demandées seront appliquées à la présence de cet étudiant.'
+          : "La présence restera inchangée. L'étudiant verra votre motif."}
+        onFermer={() => setDemandeTraitee(null)}
+      >
+        {demandeTraitee && (
+          <ModaleDecision
+            demande={demandeTraitee}
+            decision={decision}
+            onFermer={() => setDemandeTraitee(null)}
+            onTraite={() => rafraichir(
+              decision === 'acceptee'
+                ? 'Demande acceptée. Les heures ont été mises à jour et la modification consignée.'
+                : "Demande refusée. Votre motif sera visible par l'étudiant."
+            )}
+          />
+        )}
+      </Modale>
     </div>
   );
 }

@@ -7,12 +7,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import EnTeteApplication from '../components/EnTeteApplication';
 import QRScanner from '../components/QRScanner';
-import Modale from '../components/Modale';
+import Modale, { PiedModale, ZoneTexte } from '../components/Modale';
 import {
   Badge, Bouton, Carte, Champ, ChargementEnLigne, EtatVide, Message,
 } from '../components/ui';
 import { dateCourte, duree, heure } from '../components/format';
 import { appelerApi } from '../services/api';
+import { useRessource } from '../services/useRessource';
 import {
   generateAndStoreKeyPair, exportPublicKey, possedeDejaUneCle,
   signData, memoriserIdAppareil, lireIdAppareil,
@@ -214,53 +215,37 @@ function ModaleSignalement({ presence, onFermer, onEnvoye }) {
   }
 
   return (
-    <Modale
-      ouverte={Boolean(presence)}
-      titre="Signaler une erreur"
-      description="Votre formateur recevra cette demande et pourra l'accepter ou la refuser."
-      onFermer={onFermer}
-    >
-      <form onSubmit={envoyer} className="space-y-5" noValidate>
-        <div className="space-y-1.5">
-          <label htmlFor="motif" className="block text-sm font-medium text-sable-900">
-            Que faut-il corriger ?
-          </label>
-          <p id="motif-aide" className="text-xs text-sable-500">
-            Expliquez brièvement la situation. Ce texte sera lu par votre formateur.
-          </p>
-          <textarea
-            id="motif" rows={3} required aria-describedby="motif-aide"
-            value={motif} onChange={(e) => setMotif(e.target.value)}
-            placeholder="Exemple : je suis parti à 11h pour un rendez-vous médical."
-            className="w-full resize-y rounded-xl border border-sable-400 bg-white px-3.5 py-3 text-sm
-                       text-sable-900 shadow-sm transition-colors placeholder:text-sable-500
-                       focus-visible:border-accent-600 focus-visible:outline-none
-                       focus-visible:ring-4 focus-visible:ring-accent-500/15"
-          />
-        </div>
+    <form onSubmit={envoyer} className="space-y-6" noValidate>
+      <ZoneTexte
+        id="motif" libelle="Que faut-il corriger ?" obligatoire required
+        aide="Expliquez brièvement la situation. Ce texte sera lu par votre formateur."
+        value={motif} onChange={(e) => setMotif(e.target.value)}
+        placeholder="Exemple : je suis parti à 11h pour un rendez-vous médical."
+      />
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Champ id="arrivee" libelle="Arrivée réelle" type="datetime-local"
-                 value={arrivee} onChange={(e) => setArrivee(e.target.value)} />
-          <Champ id="depart" libelle="Départ réel" type="datetime-local"
-                 value={depart} onChange={(e) => setDepart(e.target.value)}
-                 erreur={bornesIncoherentes} />
-        </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Champ id="arrivee" libelle="Arrivée réelle" type="datetime-local"
+               value={arrivee} onChange={(e) => setArrivee(e.target.value)} />
+        <Champ id="depart" libelle="Départ réel" type="datetime-local"
+               value={depart} onChange={(e) => setDepart(e.target.value)}
+               erreur={bornesIncoherentes} />
+      </div>
 
-        <div aria-live="polite" className="space-y-3">
-          {bornesIncoherentes && <Message ton="erreur">Le départ doit être postérieur à l&apos;arrivée.</Message>}
-          {erreur && <Message ton="erreur">{erreur}</Message>}
-        </div>
+      <div aria-live="polite" className="space-y-3">
+        {bornesIncoherentes && <Message ton="erreur">Le départ doit être postérieur à l&apos;arrivée.</Message>}
+        {erreur && <Message ton="erreur">{erreur}</Message>}
+      </div>
 
-        <div className="flex flex-col gap-3 sm:flex-row-reverse">
-          <Bouton type="submit" chargement={envoi} enfantsChargement="Envoi en cours"
-                  disabled={!motif.trim() || bornesIncoherentes}>
-            Envoyer la demande
-          </Bouton>
-          <Bouton type="button" variante="secondaire" onClick={onFermer}>Annuler</Bouton>
-        </div>
-      </form>
-    </Modale>
+      <PiedModale>
+        <Bouton type="button" variante="secondaire" onClick={onFermer} className="sm:w-auto sm:px-5">
+          Annuler
+        </Bouton>
+        <Bouton type="submit" chargement={envoi} enfantsChargement="Envoi en cours"
+                disabled={!motif.trim() || bornesIncoherentes} className="sm:w-auto sm:px-5">
+          Envoyer la demande
+        </Bouton>
+      </PiedModale>
+    </form>
   );
 }
 
@@ -308,22 +293,46 @@ function LigneHistorique({ presence, onSignaler }) {
   );
 }
 
-function HistoriquePresences({ rafraichir }) {
-  const [presences, setPresences] = useState(null);
-  const [erreur, setErreur] = useState('');
+function HistoriquePresences({ declencheur }) {
   const [presenceSignalee, setPresenceSignalee] = useState(null);
   const [confirmation, setConfirmation] = useState('');
-  const [version, setVersion] = useState(0);
+  const [demandesEnvoyees, setDemandesEnvoyees] = useState(() => new Set());
 
-  useEffect(() => {
-    let annule = false;
-    appelerApi('/api/mes-presences')
-      .then((r) => { if (!annule) setPresences(r.presences); })
-      .catch((e) => { if (!annule) setErreur(e.message); });
-    return () => { annule = true; };
-  }, [rafraichir, version]);
+  const { donnees, erreur, chargement, recharger } = useRessource('/api/mes-presences');
+
+  // Un scan reussi doit faire apparaitre la presence sans que l'etudiant ait
+  // a recharger la page. Rechargement SILENCIEUX : la liste se met a jour
+  // sans indicateur ni disparition, l'ancienne restant affichee entre-temps.
+  useEffect(() => { if (declencheur) recharger(); }, [declencheur, recharger]);
+
+  /**
+   * Mise a jour optimiste apres l'envoi d'un signalement.
+   *
+   * Le serveur est bien la source de verite -- un rechargement suit
+   * immediatement -- mais l'attendre laisserait le bouton "Signaler une
+   * erreur" affiche pendant l'aller-retour, avec le risque d'un second clic
+   * qui recevrait un 409. On marque donc la presence localement des la
+   * confirmation, et le rechargement remplace ensuite cette supposition par
+   * l'etat reel.
+   */
+  const marquerDemandeEnvoyee = useCallback((presenceId) => {
+    setDemandesEnvoyees((precedent) => new Set(precedent).add(presenceId));
+  }, []);
+
+  const presences = donnees?.presences?.map((p) => (
+    demandesEnvoyees.has(p.id) && !p.demande_statut
+      ? { ...p, demande_statut: 'en_attente' }
+      : p
+  )) ?? null;
 
   const fermer = useCallback(() => setPresenceSignalee(null), []);
+
+  const handleSignalementEnvoye = useCallback(() => {
+    if (presenceSignalee) marquerDemandeEnvoyee(presenceSignalee.id);
+    setPresenceSignalee(null);
+    setConfirmation('Votre demande a été transmise au formateur.');
+    recharger();
+  }, [presenceSignalee, marquerDemandeEnvoyee, recharger]);
 
   return (
     <Carte>
@@ -338,7 +347,7 @@ function HistoriquePresences({ rafraichir }) {
       </div>
 
       {erreur && <div className="mt-4"><Message ton="erreur">{erreur}</Message></div>}
-      {!presences && !erreur && <ChargementEnLigne libelle="Chargement de votre historique" />}
+      {chargement && <ChargementEnLigne libelle="Chargement de votre historique" />}
 
       {presences && presences.length === 0 && (
         <div className="mt-5">
@@ -356,17 +365,22 @@ function HistoriquePresences({ rafraichir }) {
         </ul>
       )}
 
-      {presenceSignalee && (
-        <ModaleSignalement
-          presence={presenceSignalee}
-          onFermer={fermer}
-          onEnvoye={() => {
-            setPresenceSignalee(null);
-            setConfirmation('Votre demande a été transmise au formateur.');
-            setVersion((v) => v + 1);
-          }}
-        />
-      )}
+      {/* La modale reste MONTEE en permanence pour que son animation de
+          sortie puisse jouer ; seul son contenu est conditionnel. */}
+      <Modale
+        ouverte={Boolean(presenceSignalee)}
+        titre="Signaler une erreur"
+        description="Votre formateur recevra cette demande et pourra l'accepter ou la refuser."
+        onFermer={fermer}
+      >
+        {presenceSignalee && (
+          <ModaleSignalement
+            presence={presenceSignalee}
+            onFermer={fermer}
+            onEnvoye={handleSignalementEnvoye}
+          />
+        )}
+      </Modale>
     </Carte>
   );
 }
@@ -461,7 +475,7 @@ function TableauBordEtudiant() {
           </div>
         </Carte>
 
-        <HistoriquePresences rafraichir={resultatScan?.ton === 'succes'} />
+        <HistoriquePresences declencheur={resultatScan?.ton === 'succes' ? resultatScan : null} />
       </main>
     </div>
   );

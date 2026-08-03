@@ -94,3 +94,86 @@ body {
   from { opacity: 0; transform: translateY(0.5rem); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
+/* ---------------------------------------------------------------------------
+ * Modales
+ *
+ * Écrit en CSS et non en classes utilitaires, pour une raison précise :
+ * animer l'ouverture ET la fermeture d'un <dialog> exige trois choses qui ne
+ * s'expriment pas en utilitaires.
+ *
+ * 1. `@starting-style` définit l'état de départ d'un élément qui vient
+ *    d'apparaître. Sans lui, le navigateur n'a pas d'état initial à
+ *    interpoler et l'ouverture est instantanée, quelle que soit la
+ *    transition déclarée.
+ * 2. `transition-behavior: allow-discrete` sur `display` et `overlay` fait
+ *    que le dialogue reste affiché le temps de l'animation de sortie. Sans
+ *    cela il disparaît au premier frame et seule l'ouverture est animée.
+ * 3. `::backdrop` est un pseudo-élément que les classes utilitaires ne
+ *    peuvent pas cibler avec des transitions.
+ *
+ * L'ensemble est natif : aucune bibliothèque d'animation, aucun état React
+ * à synchroniser, et la fermeture par Échap est animée comme les autres.
+ * ------------------------------------------------------------------------ */
+.modale {
+  padding: 0;
+  border: none;
+  background: transparent;
+  max-width: min(34rem, calc(100vw - 2rem));
+  width: 100%;
+  /* Les marges automatiques centrent le dialogue dans sa couche supérieure,
+   * horizontalement comme verticalement, sans position fixe ni transform. */
+  margin: auto;
+
+  opacity: 0;
+  transform: translateY(0.75rem) scale(0.97);
+  transition:
+    opacity 180ms ease-out,
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    display 180ms allow-discrete,
+    overlay 180ms allow-discrete;
+}
+
+.modale[open] {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+@starting-style {
+  .modale[open] {
+    opacity: 0;
+    transform: translateY(0.75rem) scale(0.97);
+  }
+}
+
+.modale::backdrop {
+  background: oklch(0.26 0.014 64 / 0.5);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  transition:
+    opacity 180ms ease-out,
+    display 180ms allow-discrete,
+    overlay 180ms allow-discrete;
+}
+
+.modale[open]::backdrop {
+  opacity: 1;
+}
+
+@starting-style {
+  .modale[open]::backdrop {
+    opacity: 0;
+  }
+}
+
+/* Respect de la réduction des animations : la modale apparaît sans mouvement,
+ * mais reste parfaitement fonctionnelle. */
+@media (prefers-reduced-motion: reduce) {
+  .modale,
+  .modale::backdrop {
+    transition-duration: 1ms;
+  }
+  .modale {
+    transform: none;
+  }
+}

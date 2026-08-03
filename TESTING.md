@@ -2177,6 +2177,51 @@ docker compose exec frontend npm test
 ```
 Attendu : `76 passed` (8 suites) et `15 passed`.
 
+## 8. Réactivité sans rechargement
+
+**Côté formateur** : ouvrir la vue « Présences » d'une séance en cours.
+Attendu : la mention « Actualisation automatique » avec une pastille verte
+dans l'en-tête.
+
+Depuis un second navigateur, faire scanner un étudiant. Attendu :
+**l'étudiant apparaît dans le tableau en moins de cinq secondes, sans
+aucun F5**, et le compteur de présences se met à jour.
+
+Contrôles qui comptent :
+- La liste ne doit **jamais clignoter** ni afficher d'indicateur de
+  chargement lors des actualisations. Seul le tout premier affichage en
+  montre un.
+- Ouvrir la modale « Modifier » et la laisser ouverte une trentaine de
+  secondes : la liste dessous ne doit **pas** bouger. L'actualisation est
+  suspendue pendant la saisie.
+- Passer sur un autre onglet une minute, puis revenir : les données doivent
+  être à jour **immédiatement**, sans attendre le cycle suivant.
+
+Pour vérifier la mise en veille, ouvrir l'onglet **Réseau** des outils de
+développement, filtrer sur `presences`, puis basculer sur un autre onglet du
+navigateur. Attendu : **plus aucune requête** tant que l'onglet est masqué.
+
+**Côté étudiant** : après un scan réussi, la carte « Mes présences » se
+complète sans rechargement. Après l'envoi d'un signalement, le badge
+« Signalement en attente » apparaît **instantanément**, avant même la réponse
+du serveur (mise à jour optimiste), et le bouton disparaît.
+
+## 9. Modales
+
+Ouvrir n'importe quelle modale. Attendu : le fond s'assombrit et se floute
+progressivement, la fenêtre apparaît avec un léger mouvement vers le haut et
+un agrandissement. À la fermeture, l'animation joue **en sens inverse** au
+lieu d'une disparition brutale.
+
+Contrôles d'accessibilité :
+- **Tab** ne sort jamais de la modale tant qu'elle est ouverte ;
+- **Échap** la ferme, avec l'animation de sortie ;
+- le bouton de fermeture en haut à droite fonctionne également ;
+- le focus revient à un endroit sensé après fermeture.
+
+Activer la réduction des animations du système, rouvrir une modale. Attendu :
+elle apparaît sans mouvement, et reste parfaitement utilisable.
+
 ## Critère de succès global — Suivi du temps
 
 Validée si et seulement si : un scan crée une présence liée à son scan
@@ -2187,7 +2232,11 @@ d'expiration au-delà, sans dépendre de l'horloge du client (section 3) ;
 accepter et refuser exigent tous deux un motif (section 4) ; la modification
 manuelle recalcule la durée (section 5) ; le journal contient une entrée par
 champ et résiste à `UPDATE` comme à `DELETE` (section 6) ; les deux suites
-passent (section 7).
+passent (section 7) ; un étudiant qui scanne apparaît chez le formateur en
+moins de cinq secondes sans rechargement, et l'actualisation se suspend quand
+l'onglet est masqué ou qu'une modale est ouverte (section 8) ; les modales
+s'ouvrent et se ferment avec une transition, et restent utilisables au
+clavier (section 9).
 
 ---
 
