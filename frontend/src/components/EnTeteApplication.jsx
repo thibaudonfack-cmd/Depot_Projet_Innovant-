@@ -21,7 +21,14 @@ function initiales(nom) {
     .join('');
 }
 
-function EnTeteApplication({ sousTitre }) {
+/**
+ * @param {string} sousTitre
+ * @param {string} [confirmationRetour] si fourni, un clic sur la marque
+ *   demande confirmation avant de quitter la page. Utilise lorsqu'un ecran
+ *   affiche quelque chose que l'utilisateur perdrait en partant, typiquement
+ *   un QR code projete devant une classe.
+ */
+function EnTeteApplication({ sousTitre, confirmationRetour }) {
   const { utilisateur, deconnecter } = useAuth();
   const navigate = useNavigate();
   const [deconnexionEnCours, setDeconnexionEnCours] = useState(false);
@@ -43,6 +50,14 @@ function EnTeteApplication({ sousTitre }) {
    * d'un bouton mort.
    */
   function handleRetour() {
+    // Garde-fou : quitter cet ecran ferait disparaitre le QR projete, et le
+    // formateur devrait rouvrir une seance devant sa classe. Un clic
+    // accidentel sur la marque ne doit pas avoir cette consequence.
+    // confirm() plutot qu'une boite maison : l'action est rare, bloquante et
+    // sans nuance, et le dialogue natif est deja accessible au clavier et
+    // traduit dans la langue du systeme.
+    if (confirmationRetour && !window.confirm(confirmationRetour)) return;
+
     if (window.history.length > 1) navigate(-1);
     else navigate('/');
   }
@@ -57,8 +72,8 @@ function EnTeteApplication({ sousTitre }) {
         <button
           type="button"
           onClick={handleRetour}
-          title="Revenir à la page précédente"
-          aria-label="Revenir à la page précédente"
+          title={confirmationRetour ? 'Quitter cet écran' : 'Revenir à la page précédente'}
+          aria-label={confirmationRetour ? 'Quitter cet écran' : 'Revenir à la page précédente'}
           className="-m-2 shrink-0 rounded-2xl p-2 transition-colors duration-200
                      hover:bg-sable-100 focus-visible:outline-none focus-visible:ring-2
                      focus-visible:ring-accent-600 focus-visible:ring-offset-2"
