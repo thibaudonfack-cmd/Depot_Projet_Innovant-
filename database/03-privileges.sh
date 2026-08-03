@@ -79,6 +79,25 @@ mysql -h "${MYSQL_HOST:-localhost}" -uroot -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
   -- puis supprimee. Ne pas accorder un privilege dont on n'a pas l'usage.
   GRANT DELETE ON db_logs.sessions TO '${MYSQL_USER}'@'%';
 
+  -- Suivi du temps : presences et demandes_rectification evoluent dans le
+  -- temps (heure de depart renseignee a la cloture, statut d'une demande
+  -- tranche par le formateur), d'ou UPDATE. Aucun DELETE : une presence ou
+  -- une demande ne se supprime pas, elle se corrige -- et la correction
+  -- laisse une trace dans le journal d'audit.
+  GRANT UPDATE ON db_logs.presences TO '${MYSQL_USER}'@'%';
+  GRANT UPDATE ON db_logs.demandes_rectification TO '${MYSQL_USER}'@'%';
+
+  -- EXCEPTION DELIBEREE ET ETROITE a la separation des deux bases.
+  -- L'utilisateur applicatif n'a, par principe, aucun acces a
+  -- db_attestations (cf. plus haut). Le journal d'audit y reside pourtant,
+  -- puisqu'il doit survivre a la purge de db_logs (RF-20) pour couvrir les
+  -- cinq ans de conservation legale. L'application doit donc pouvoir l'ecrire.
+  -- L'exception est reduite au strict minimum : INSERT et SELECT sur CETTE
+  -- SEULE table, jamais sur attestations. Et surtout AUCUN UPDATE ni DELETE :
+  -- c'est ce qui rend le journal reellement inalterable, garanti par le
+  -- moteur et non par la discipline du code.
+  GRANT SELECT, INSERT ON db_attestations.journal_modifications TO '${MYSQL_USER}'@'%';
+
   -- Aucun privilege d'ECRITURE sur utilisateurs : le pool applicatif lit les
   -- comptes pour authentifier (SELECT, deja couvert plus haut) mais ne doit
   -- jamais pouvoir en creer, en modifier ni en supprimer. La creation de

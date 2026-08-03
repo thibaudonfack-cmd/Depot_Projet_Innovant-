@@ -13,7 +13,9 @@ USE db_logs;
 -- 1 UF
 -- -----------------------------------------------------------------------------
 INSERT INTO uf (id, intitule, date_cloture) VALUES
-  ('11111111-1111-1111-1111-111111111111', 'Anglais - Niveau 2', NULL);
+  ('11111111-1111-1111-1111-111111111111', 'Anglais - Niveau 2', NULL),
+  ('11111111-1111-1111-1111-111111111112', 'Bureautique - Initiation', NULL),
+  ('11111111-1111-1111-1111-111111111113', 'Comptabilite generale', NULL);
 
 -- -----------------------------------------------------------------------------
 -- 1 salle, avec un polygone GeoJSON reel (rectangle englobant un batiment
@@ -32,6 +34,22 @@ INSERT INTO salles (id, nom, polygone_geojson) VALUES
        JSON_ARRAY(4.8712, 50.4670)
      ))
    ));
+
+-- Deux salles supplementaires, avec des polygones distincts. Necessaires des
+-- maintenant : le formulaire d'ouverture de seance propose une liste, et une
+-- liste a un seul element n'aurait aucun sens. Elles serviront aussi a
+-- verifier le geofencing (RF-13) sur des lieux differents.
+INSERT INTO salles (id, nom, polygone_geojson) VALUES
+  ('22222222-2222-2222-2222-222222222223', 'Local 4 - Aile Sud',
+   JSON_OBJECT('type', 'Polygon', 'coordinates', JSON_ARRAY(JSON_ARRAY(
+     JSON_ARRAY(4.8700, 50.4662), JSON_ARRAY(4.8710, 50.4662),
+     JSON_ARRAY(4.8710, 50.4668), JSON_ARRAY(4.8700, 50.4668),
+     JSON_ARRAY(4.8700, 50.4662))))),
+  ('22222222-2222-2222-2222-222222222224', 'Atelier informatique',
+   JSON_OBJECT('type', 'Polygon', 'coordinates', JSON_ARRAY(JSON_ARRAY(
+     JSON_ARRAY(4.8726, 50.4670), JSON_ARRAY(4.8736, 50.4670),
+     JSON_ARRAY(4.8736, 50.4676), JSON_ARRAY(4.8726, 50.4676),
+     JSON_ARRAY(4.8726, 50.4670)))));
 
 -- -----------------------------------------------------------------------------
 -- 4 etudiants fictifs

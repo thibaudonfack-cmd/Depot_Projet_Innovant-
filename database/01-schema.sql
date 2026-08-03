@@ -214,6 +214,10 @@ CREATE TABLE seances (
   date_ouverture     DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
   heure_debut_prevue DATETIME  NULL,
   heure_fin_prevue   DATETIME  NULL,
+  -- Quota d'heures conventionne, distinct des bornes ci-dessus : une seance
+  -- de 4 h peut ne valider que 3 h 30 au titre du programme. Les confondre
+  -- interdirait de justifier un ecart devant une inspection.
+  quota_minutes      INT       NULL,
   date_cloture       DATETIME  NULL,
   statut          ENUM('ouverte', 'cloturee') NOT NULL DEFAULT 'ouverte',
   CONSTRAINT fk_seance_uf FOREIGN KEY (uf_id) REFERENCES uf(id),
@@ -266,6 +270,95 @@ CREATE TABLE scans (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------------------------------------------------------
+-- presences  (suivi du temps)
+--
+-- TABLE D'ETAT, distincte de scans qui reste le JOURNAL BRUT IMMUABLE.
+-- C'est le point d'architecture le plus important de cette partie : scans est
+-- en ecriture seule pour l'utilisateur applicatif depuis l'Etape 1 (ni UPDATE
+-- ni DELETE, cf. 03-privileges.sh, RF-18/RNF-13). Y ajouter une heure de fin
+-- modifiable romprait cette immuabilite, qui est precisement ce qui donne au
+-- journal sa valeur probatoire. On separe donc : scans consigne ce qui s'est
+-- passe, presences porte l'etat courant, deduit puis eventuellement corrige.
+--
+-- QUE DES INSTANTS, JAMAIS DE DUREE STOCKEE. La duree se calcule a la lecture
+-- (heure_depart - heure_arrivee). Trois raisons :
+--   1. une duree stockee peut diverger de ses bornes apres correction, et
+--      plus rien ne dit alors laquelle fait foi ;
+--   2. les instants sont composables (chevauchements, pauses, cumuls par UF),
+--      une duree ne l'est pas ;
+--   3. en cas d'inspection il faut pouvoir repondre "a quelle heure
+--      exactement ?", pas seulement "combien d'heures ?" -- une duree seule
+--      est indefendable devant un controle.
+--
+-- Tous les DATETIME de ce schema sont en UTC, la conversion vers l'heure
+-- locale se faisant a l'affichage. Un stockage en heure locale ferait diverger
+-- les cumuls de part et d'autre du changement d'heure.
+--
+-- heure_depart NULLABLE : la presence reste ouverte tant que l'etudiant n'est
+-- pas parti (ou tant que la seance n'est pas cloturee). Un NULL signifie
+-- "en cours", pas "donnee manquante".
+--
+-- scan_arrivee_id relie la presence au scan qui l'a creee : c'est le lien
+-- entre l'etat et sa preuve d'origine. Nullable, car une presence peut avoir
+-- ete creee manuellement par un formateur pour un etudiant dont le telephone
+-- etait hors service (mode degrade).
+-- -----------------------------------------------------------------------------
+CREATE TABLE presences (
+  id              CHAR(36)  NOT NULL DEFAULT (UUID()) PRIMARY KEY,
+  seance_id       CHAR(36)  NOT NULL,
+  etudiant_id     CHAR(36)  NOT NULL,
+  scan_arrivee_id CHAR(36)  NULL,
+  heure_arrivee   DATETIME  NOT NULL,
+  heure_depart    DATETIME  NULL,
+  source          ENUM('scan', 'correction_formateur', 'rectification_validee')
+                    NOT NULL DEFAULT 'scan',
+  CONSTRAINT fk_presence_seance FOREIGN KEY (seance_id) REFERENCES seances(id),
+  CONSTRAINT fk_presence_etudiant FOREIGN KEY (etudiant_id) REFERENCES etudiants(id),
+  CONSTRAINT fk_presence_scan FOREIGN KEY (scan_arrivee_id) REFERENCES scans(id),
+  -- Coherence des bornes portee par le SCHEMA et non par le seul code : une
+  -- duree negative fausserait les cumuls d'heures sans qu'aucune erreur ne
+  -- soit levee. Le NULL est accepte (presence en cours).
+  CONSTRAINT chk_presence_bornes CHECK (heure_depart IS NULL OR heure_depart > heure_arrivee),
+  -- Une seule presence par etudiant et par seance, coherent avec
+  -- uq_scan_presence sur la table scans.
+  UNIQUE KEY uq_presence (seance_id, etudiant_id),
+  KEY idx_presence_etudiant (etudiant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -----------------------------------------------------------------------------
+-- demandes_rectification
+--
+-- L'etudiant dispose de 24 h apres la seance pour signaler que son temps ne
+-- reflete pas la realite. La fenetre est verifiee COTE SERVEUR contre
+-- l'horloge de la base, jamais contre une date fournie par le client -- meme
+-- principe qu'a l'Etape 7c.
+--
+-- Elle court a partir de heure_fin_prevue de la seance, et NON du depart
+-- effectif de l'etudiant : sinon un etudiant parti tot disposerait d'une
+-- fenetre plus courte qu'un autre, ce qui serait difficile a justifier.
+--
+-- Les heures demandees sont conservees separement des heures effectives :
+-- accepter une demande ne doit pas effacer ce qui avait ete demande, sous
+-- peine de rendre la decision incomprehensible a posteriori.
+-- -----------------------------------------------------------------------------
+CREATE TABLE demandes_rectification (
+  id                     CHAR(36)     NOT NULL DEFAULT (UUID()) PRIMARY KEY,
+  presence_id            CHAR(36)     NOT NULL,
+  motif                  VARCHAR(500) NOT NULL,
+  heure_arrivee_demandee DATETIME     NULL,
+  heure_depart_demandee  DATETIME     NULL,
+  statut                 ENUM('en_attente', 'acceptee', 'refusee') NOT NULL DEFAULT 'en_attente',
+  date_soumission        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  date_decision          DATETIME     NULL,
+  decideur_id            CHAR(36)     NULL,
+  motif_decision         VARCHAR(500) NULL,
+  CONSTRAINT fk_demande_presence FOREIGN KEY (presence_id) REFERENCES presences(id),
+  CONSTRAINT fk_demande_decideur FOREIGN KEY (decideur_id) REFERENCES utilisateurs(id),
+  KEY idx_demande_presence (presence_id),
+  KEY idx_demande_statut (statut)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -----------------------------------------------------------------------------
 -- corrections
 -- RF-17/RF-18 : journal immuable des corrections. auteur_id n'est PAS une FK :
 -- l'ERD du chapitre 4.4 ne modelise pas les formateurs/secretariat comme des
@@ -297,6 +390,47 @@ CREATE TABLE corrections (
 -- peut structurellement jamais echouer ni casser l'integrite referentielle
 -- des attestations deja emises, puisqu'aucun lien technique ne les relie.
 -- -----------------------------------------------------------------------------
+-- -----------------------------------------------------------------------------
+-- journal_modifications  (AUDIT TRAIL -- base db_attestations)
+--
+-- PLACE DANS db_attestations, ET NON db_logs. Decision de conformite, pas
+-- technique : db_logs est purge en fin d'UF (RF-20), alors que la preuve
+-- d'assiduite doit etre conservee 5 ans en Belgique. Un journal d'audit place
+-- dans db_logs disparaitrait avec la purge, emportant avec lui la
+-- justification des quotas d'heures -- exactement ce qu'une inspection
+-- viendrait verifier.
+--
+-- INSERT SEULEMENT pour l'application (cf. 03-privileges.sh) : ni UPDATE ni
+-- DELETE, jamais. Un journal que l'application peut reecrire ne prouve rien.
+-- L'immuabilite est portee par les PRIVILEGES MySQL, pas par la discipline du
+-- code -- meme demarche que pour la table scans.
+--
+-- valeur_avant / valeur_apres en TEXTE, sans cle etrangere ni type contraint.
+-- La trace doit survivre a la purge de db_logs et rester lisible meme si la
+-- ligne d'origine a disparu : une FK vers db_logs serait de toute facon
+-- impossible (pas de cle etrangere inter-bases en MySQL) et surtout contraire
+-- au but recherche. Meme raisonnement que pour corrections.auteur_id.
+--
+-- table_cible et ligne_id identifient la donnee modifiee par valeur, sans
+-- lien technique : le journal reste autoportant.
+-- -----------------------------------------------------------------------------
+CREATE TABLE db_attestations.journal_modifications (
+  id            CHAR(36)      NOT NULL DEFAULT (UUID()) PRIMARY KEY,
+  table_cible   VARCHAR(64)   NOT NULL,
+  ligne_id      CHAR(36)      NOT NULL,
+  champ         VARCHAR(64)   NOT NULL,
+  valeur_avant  TEXT          NULL,
+  valeur_apres  TEXT          NULL,
+  auteur_id     CHAR(36)      NOT NULL,
+  auteur_email  VARCHAR(255)  NOT NULL,
+  role_auteur   VARCHAR(32)   NOT NULL,
+  motif         VARCHAR(500)  NOT NULL,
+  origine       ENUM('formateur', 'rectification', 'systeme') NOT NULL,
+  horodatage    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_journal_cible (table_cible, ligne_id),
+  KEY idx_journal_horodatage (horodatage)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE db_attestations.attestations (
   id                CHAR(36)  NOT NULL DEFAULT (UUID()) PRIMARY KEY,
   etudiant_id       CHAR(36)  NOT NULL,

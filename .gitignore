@@ -45,3 +45,11 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# ==============================================================
+# Residus de tests manuels (jars de cookies curl : cookies.txt,
+# etu.txt, form.txt...). Ils contiennent des JETONS DE SESSION
+# valides : les commiter reviendrait a publier une session ouverte.
+# ==============================================================
+*.txt
+!requirements.txt
