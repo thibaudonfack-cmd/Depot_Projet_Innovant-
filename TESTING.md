@@ -1942,7 +1942,131 @@ suites de tests passent (section 7).
 
 ---
 
-# Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
+# Étape 7d (bis) — Tableaux de bord et QR dynamique
+
+**Migration obligatoire** : le schéma et le seed changent (suivi du temps,
+3 UF et 3 salles).
+
+```bash
+git pull origin dev
+docker compose down -v
+docker compose up -d --build
+```
+
+## 1. Le formulaire ne propose que des données réelles
+
+Se connecter en formateur. Attendu : les listes contiennent trois unités de
+formation et trois salles, **chargées depuis la base**. Créer une séance avec
+n'importe quelle combinaison : elle doit réussir à chaque fois. Plus aucune
+erreur de clé étrangère n'est possible, puisque le client ne peut proposer
+que ce qui existe.
+
+## 2. QR dynamique
+
+Une fois la séance créée, observer le QR code. Attendu :
+- la mention « Jeton renouvelé automatiquement toutes les 20 secondes » avec
+  une pastille verte ;
+- au premier instant, un cadre « En attente du premier jeton » très bref ;
+- **le QR change visuellement toutes les 20 secondes**. Le laisser tourner une
+  minute pour observer au moins deux renouvellements.
+
+Vérifier le contenu réellement encodé : ouvrir la console et exécuter
+```js
+document.querySelector('svg[height]')?.outerHTML.length
+```
+avant puis après un renouvellement. La valeur doit changer.
+
+**Test du vecteur V1** : faire une capture d'écran du QR, attendre 30
+secondes, puis la scanner depuis `/etudiant`. Attendu : `JETON_EXPIRE`. C'est
+la démonstration que photographier l'écran ne sert à rien.
+
+## 3. Verrouillage de sortie
+
+Pendant que le QR est projeté, cliquer sur la marque en haut à gauche.
+Attendu : une demande de confirmation « Le QR code cessera d'être affiché ».
+Annuler : rien ne se passe, le QR reste. Confirmer : retour arrière normal.
+
+Sur un écran sans QR (liste des séances), le clic ne doit **pas** demander
+confirmation.
+
+## 4. Liste des séances et réaffichage
+
+Revenir à la liste. Attendu : les séances créées, avec unité de formation,
+date, salle, nombre de présences et un badge « Ouverte ».
+
+Cliquer **Réafficher le QR** sur une séance ouverte : le QR revient, et le
+flux se reconnecte. C'est le cas d'usage des retardataires.
+
+## 5. Vue des présences
+
+Cliquer **Présences**. Attendu : un tableau avec étudiant, arrivée, départ et
+durée. Une présence sans heure de départ affiche le badge « En cours » et non
+une durée de zéro. Sans donnée, un encadré explicite s'affiche plutôt qu'un
+vide.
+
+## 6. Historique étudiant
+
+Se connecter en étudiant, associer l'appareil, puis scanner le QR projeté
+depuis un second navigateur connecté en formateur. Attendu : la carte
+« Mes présences » se met à jour **sans rechargement**.
+
+Pour peupler l'historique sans attendre, insérer une présence de test :
+```bash
+docker compose exec mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "
+  INSERT INTO db_logs.presences (id, seance_id, etudiant_id, heure_arrivee, heure_depart)
+  SELECT UUID(), s.id, '33333333-3333-3333-3333-333333333331',
+         '2026-09-01 09:05:00', '2026-09-01 12:00:00'
+  FROM db_logs.seances s ORDER BY s.date_ouverture DESC LIMIT 1;"
+```
+Attendu à l'écran : une ligne avec la durée `2 h 55`, et non `175 min`.
+
+## 7. Fenêtre de rectification calculée par le serveur
+
+La séance insérée ci-dessus se terminant le 01/09/2026, la fenêtre de 24 h
+est ouverte ou fermée selon la date du jour. Attendu : soit un bouton
+« Signaler une erreur », soit le message « Le délai de signalement de 24
+heures est écoulé ».
+
+**Contrôle qui compte** : changer l'heure de votre machine ne doit rien
+changer. Le drapeau est calculé par la base, à partir de son horloge. Si
+modifier l'heure locale rouvrait la fenêtre, n'importe quel étudiant pourrait
+contester une séance vieille de plusieurs mois.
+
+## 8. L'audit trail est inaltérable
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "DELETE FROM db_attestations.journal_modifications;"
+```
+Attendu : **échec**, `DELETE command denied`. L'application ne peut
+qu'insérer et lire. C'est ce qui donne sa valeur au journal.
+
+Même contrôle sur les présences :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "DELETE FROM db_logs.presences LIMIT 1;"
+```
+Attendu : échec également. Une présence se corrige, elle ne se supprime pas.
+
+## 9. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+Attendu : `62 passed` (7 suites) et `15 passed`.
+
+## Critère de succès global — Étape 7d (bis)
+
+Validée si et seulement si : toute combinaison UF/salle crée une séance sans
+erreur (section 1) ; le QR change toutes les 20 secondes et une capture
+d'écran devient invalide (section 2) ; quitter l'écran de projection demande
+confirmation, et seulement dans ce cas (section 3) ; le réaffichage du QR
+fonctionne depuis la liste (section 4) ; une présence ouverte affiche
+« En cours » et non zéro (sections 5 et 6) ; la fenêtre de rectification ne
+dépend pas de l'horloge du client (section 7) ; les suppressions sur le
+journal d'audit et sur les présences sont refusées par MySQL (section 8) ; et
+les deux suites de tests passent (section 9). de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte
 

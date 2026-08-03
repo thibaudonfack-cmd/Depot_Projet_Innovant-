@@ -2377,12 +2377,146 @@ nouveau badge « En cours » vérifié par calcul : 7,14:1, niveau AAA.
 
 ---
 
+# Étape 7d (bis) — Suivi du temps en base, tableaux de bord, QR dynamique
+
+## Écart signalé : la cadence de rotation
+
+La mission demandait un renouvellement du jeton **toutes les 5 secondes**. Le
+projet utilise `ROTATION_INTERVAL_SECONDS = 20` avec `TOKEN_TTL_SECONDS = 25`,
+constantes justifiées en détail à l'Étape 2 : le recouvrement de 5 secondes
+évite qu'un étudiant scannant à la dix-neuvième seconde soit rejeté. Un test
+dédié verrouille cette relation.
+
+Les constantes sont donc restées **inchangées**. Passer à 5 secondes casserait
+le test et, surtout, exigerait de revoir le TTL en conséquence : avec un TTL
+de 25 secondes et une rotation de 5, cinq jetons seraient valides
+simultanément, ce qui affaiblirait la fermeture du vecteur V1 au lieu de la
+renforcer. À confirmer si le changement est réellement souhaité.
+
+## Le journal d'audit vit dans `db_attestations`
+
+Décision de conformité, tranchée avec la durée légale belge de cinq ans :
+`db_logs` est purgé en fin d'UF (RF-20), alors que la preuve d'assiduité doit
+survivre. Un journal d'audit placé dans `db_logs` disparaîtrait avec la purge,
+emportant la justification des quotas d'heures, soit exactement ce qu'une
+inspection viendrait vérifier.
+
+Cela crée une tension avec la séparation stricte des deux bases posée à
+l'Étape 1 : l'utilisateur applicatif n'a, par principe, aucun accès à
+`db_attestations`. L'exception accordée est **réduite au strict minimum** :
+`INSERT` et `SELECT` sur la seule table `journal_modifications`, jamais sur
+`attestations`, et surtout **aucun `UPDATE` ni `DELETE`**. C'est ce qui rend
+le journal réellement inaltérable, garanti par le moteur et non par la
+discipline du code.
+
+## Une contrainte de privilèges qui se manifeste jusque dans les tests
+
+Le nettoyage de la nouvelle suite de tests a échoué avec `DELETE command
+denied to user 'app_logs' for table demandes_rectification`. Ce n'est pas un
+défaut mais le modèle qui fonctionne : ni `presences` ni
+`demandes_rectification` ne reçoivent `DELETE`, parce qu'une présence ne se
+supprime pas, elle se corrige, et la correction laisse une trace.
+
+Corrigé en **retirant le nettoyage**, jamais en élargissant les privilèges.
+Même constat qu'à l'Étape 3 sur la table `scans`. C'est la troisième fois que
+ce modèle se rappelle au code de test, et à chaque fois la bonne réponse a
+été d'adapter le test.
+
+## Ce que corrigent les routes de référentiel
+
+Le formulaire d'ouverture proposait des identifiants **écrits en dur** dans le
+frontend, dont certains ne correspondaient à aucune ligne : toute création les
+utilisant échouait en violation de clé étrangère. Servir la liste depuis la
+base supprime la classe entière du problème, le client ne pouvant plus
+proposer que ce qui existe.
+
+Deux décisions dans ces routes méritent d'être relevées :
+
+- Les **UF clôturées sont exclues** : ouvrir une séance sur une UF terminée
+  produirait des heures inexploitables.
+- `polygone_geojson` **n'est pas renvoyé** par `GET /api/salles`. Il n'aide en
+  rien au choix d'une salle, mais transmettre les contours géographiques de
+  chaque local à tout client authentifié faciliterait la falsification de
+  position une fois le géofencing en place. Autant ne pas construire soi-même
+  l'outil qui affaiblira la mesure suivante.
+
+## La durée n'est jamais lue, toujours calculée
+
+Conformément au choix de modélisation, `presences` ne stocke que des instants.
+La durée est calculée par `TIMESTAMPDIFF` **en SQL** et non en JavaScript,
+pour que le fuseau de la base fasse foi de bout en bout.
+
+Une présence encore ouverte renvoie `null`, pas `0`. La distinction n'est pas
+cosmétique : zéro signifierait « resté zéro minute », ce qui est faux, et
+afficherait un étudiant présent comme n'ayant pas assisté. L'interface le
+traduit par un badge « En cours ».
+
+## La fenêtre de 24 heures appartient au serveur
+
+`rectification_ouverte` est calculé par la base (`NOW()` contre
+`heure_fin_prevue + 24 h`), jamais par le client. Laisser le navigateur en
+décider suffirait à rouvrir, en changeant l'heure de sa machine, une fenêtre
+fermée depuis des semaines.
+
+L'interface signale **explicitement** la fenêtre fermée plutôt que de masquer
+simplement le bouton : sans explication, un étudiant conclurait à un défaut de
+l'application et contacterait le secrétariat.
+
+## QR dynamique : le flux et son nettoyage
+
+`AffichageQR` accepte désormais un `seanceId` et s'abonne au flux de jetons
+tournants. Le QR n'encode plus un identifiant fixe mais un jeton signé à durée
+de vie courte : c'est ce qui ferme réellement le vecteur V1, photographier
+l'écran ne servant à rien passé la fenêtre.
+
+Le nettoyage est aussi strict que pour la caméra (Étape 6), et pour la même
+raison : une connexion non fermée ne se voit pas. Le serveur continuerait de
+pousser un jeton toutes les vingt secondes vers une connexion que plus
+personne n'écoute, et chaque ouverture d'écran en laisserait une de plus
+derrière elle. La fermeture est inconditionnelle, y compris sur un socket
+encore en état `CONNECTING`.
+
+Deux choix de repli : aucun QR n'est affiché tant qu'aucun jeton n'est arrivé,
+car mieux vaut un espace vide qu'un code que personne ne pourrait valider ; et
+un message inattendu est ignoré plutôt que de casser l'affichage, un QR périmé
+valant mieux qu'un écran blanc devant une classe.
+
+**Validé par mutation** : en retirant `ws.close()` du nettoyage, le test
+« CAS CRITIQUE : le démontage ferme la connexion » échoue ; restauré, 15/15
+repassent.
+
+## Verrouillage de sortie pendant la projection
+
+Un clic sur la marque faisait disparaître le QR devant la classe.
+`EnTeteApplication` accepte désormais une confirmation, active uniquement
+quand un QR est projeté. Le dialogue natif `confirm()` est préféré à une boîte
+maison : l'action est rare, bloquante et sans nuance, et le dialogue natif est
+déjà accessible au clavier et traduit dans la langue du système.
+
+## Résidus de tests
+
+`*.txt` est ajouté au `.gitignore`. Les jars de cookies produits par `curl`
+(`cookies.txt`, `etu.txt`, `form.txt`) contiennent des **jetons de session
+valides** : les committer reviendrait à publier une session ouverte.
+Vérification faite, aucun n'avait jamais été committé.
+
+## Vérifications
+
+**62 tests backend** sur 7 suites, **15 tests frontend**. Build, lint et
+`npm ci` à froid sans erreur. Contrainte `CHECK` des bornes de présence
+vérifiée en conditions réelles (`ER_CHECK_CONSTRAINT_VIOLATED`).
+
+---
+
 ## Prochaine étape suggérée
 
 **Étape 7e** (géofencing, en signalement et non en blocage), puis
-l'implémentation du suivi du temps selon l'architecture étudiée, avec
-`journal_modifications` placé dans `db_attestations` pour survivre à la purge
-de `db_logs` et couvrir les cinq ans de conservation légale.
+l'implémentation des écritures du suivi du temps : création automatique d'une
+présence au scan, clôture de séance renseignant les heures de départ,
+modification manuelle par le formateur avec écriture dans le journal d'audit
+(les deux opérations dans une même transaction, sans quoi une panne
+produirait une modification sans trace), et traitement des demandes de
+rectification.
 
 **Géofencing (RF-13)** — analyse conservée ci-dessous : c'est le seul
 mécanisme capable de fermer le vecteur résiduel documenté ci-dessus (relais
