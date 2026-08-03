@@ -45,6 +45,7 @@ function installerReseau(profil) {
     if (url === '/api/salles') return rep(200, { status: 'ok', salles: [] });
     if (url === '/api/seances') return rep(200, { status: 'ok', seances: [] });
     if (url === '/api/mes-presences') return rep(200, { status: 'ok', presences: [] });
+    if (url === '/api/mon-appareil') return rep(200, { status: 'ok', appareil: null });
     return rep(200, { status: 'ok' });
   });
 }

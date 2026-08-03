@@ -2508,10 +2508,190 @@ vérifiée en conditions réelles (`ER_CHECK_CONSTRAINT_VIOLATED`).
 
 ---
 
+# Le verrouillage matériel : ce que nous faisons, et ce que nous ne pouvons pas faire
+
+*Section rédigée pour la soutenance. Elle répond à la question qui viendra
+presque certainement : « comment savez-vous qu'il s'agit du bon téléphone ? »*
+
+## Nous n'utilisons ni adresse MAC, ni numéro de série, ni identifiant matériel
+
+Ce point doit être énoncé d'emblée, car il est contre-intuitif : **une
+application web ne peut pas lire l'identité matérielle d'un appareil**. Ni
+adresse MAC, ni IMEI, ni numéro de série, ni identifiant publicitaire. Aucune
+API navigateur ne les expose.
+
+Ce n'est pas une limitation technique que l'on pourrait contourner avec plus
+d'ingéniosité : c'est un **choix délibéré des éditeurs de navigateurs**. Un
+identifiant matériel stable est un traceur parfait — il suit l'utilisateur sur
+tous les sites, survit à l'effacement des cookies, et ne peut pas être
+réinitialisé. Les navigateurs ont donc fermé ces accès, et vont plus loin en
+réduisant activement les signaux de *fingerprinting* (résolution d'écran,
+polices installées, rendu graphique) qui permettraient de le reconstituer.
+
+Toute solution qui prétendrait lier une présence à un identifiant matériel
+depuis une page web ment, ou repose sur une application native installée.
+C'était précisément l'option que ce projet a écartée (voir Étape 6 : aucune
+installation, pas de store, pas de double maintenance Android/iOS).
+
+## L'identité repose entièrement sur une clé cryptographique
+
+Ce que nous lions n'est donc pas un appareil, mais un **secret que seul cet
+appareil détient**.
+
+Au premier enrôlement, le navigateur génère une paire de clés ECDSA P-256.
+La clé privée est créée avec `extractable: false` et rangée dans `IndexedDB`.
+Ces deux caractéristiques se complètent :
+
+- `extractable: false` signifie que le moteur cryptographique du navigateur
+  **refuse catégoriquement de la restituer**. `crypto.subtle.exportKey()` lève
+  une exception, quel que soit le code qui le demande. La clé peut être
+  *utilisée* pour signer, jamais *lue*.
+- `IndexedDB` est le seul stockage navigateur capable de faire persister un
+  tel objet. `localStorage` ne conserve que des chaînes : y ranger la clé
+  supposerait de l'exporter d'abord, donc de renoncer à la garantie
+  précédente.
+
+La conséquence est simple à formuler devant un jury : **la clé privée ne peut
+pas être copiée d'un téléphone à un autre**. Ni par l'étudiant, ni par un
+script, ni par nous. C'est ce qui fait qu'un « appareil » est identifiable
+alors même que nous ignorons tout de son matériel.
+
+Le serveur, lui, ne connaît que la clé publique correspondante, stockée dans
+`appareils_enroles`. Elle ne permet pas de signer, seulement de vérifier.
+
+## La révocation, et pourquoi elle est cryptographique et non déclarative
+
+Quand un étudiant enrôle un nouvel appareil A2, le serveur exécute, **dans une
+seule transaction** : passage de A1 à `statut = 'revoque'`, puis insertion de
+A2 en `actif`. La contrainte `uq_appareil_actif` (colonne générée
+`actif_key`, Étape 1) garantit au niveau du schéma qu'il ne peut jamais y
+avoir deux appareils actifs pour un même étudiant, fût-ce un instant.
+
+Que se passe-t-il si l'étudiant tente ensuite de scanner depuis A1 ?
+
+A1 possède toujours sa clé privée et produit une signature parfaitement
+valide *en soi*. Mais le serveur ne vérifie pas « cette signature est-elle
+bien formée ? » : il vérifie « cette signature correspond-elle à la clé
+publique de l'appareil **actif** de cet étudiant ? ». Il charge donc la clé
+publique de A2, contre laquelle une signature produite par A1 ne peut pas se
+vérifier. Le rejet est **mathématique**, pas déclaratif : il ne dépend
+d'aucun drapeau que l'on pourrait oublier de tester.
+
+Cette étape ajoute une nuance qui compte pour l'utilisateur. Le rejet brut
+donnait « signature invalide », ce qui laisse croire à un défaut technique.
+Le serveur vérifie désormais, avant de conclure, si la signature correspond à
+une clé **révoquée** du même étudiant. Si oui, il répond `403
+APPAREIL_REVOQUE` avec un message explicite. Le résultat est identique — la
+présence est refusée — mais l'étudiant comprend ce qui se passe, et
+l'interface peut afficher un avertissement actionnable au lieu d'une erreur
+cryptographique.
+
+## Ce que ce mécanisme ne prouve pas
+
+Honnêteté nécessaire, car un jury posera la question :
+
+- Il prouve **la possession d'une clé**, pas l'identité d'une personne. Un
+  étudiant qui prête son téléphone déverrouillé contourne tout.
+- Il ne survit pas à un effacement des données du navigateur : l'étudiant
+  devra se réenrôler. C'est le prix de l'absence d'identifiant matériel.
+- Il n'empêche pas un étudiant d'enrôler l'appareil d'un tiers, tant que
+  l'enrôlement ne comporte pas de preuve de possession (défi-réponse) ni de
+  validation par un tiers.
+- Il ne dit rien de la **position** de l'appareil. Deux étudiants tous deux
+  enrôlés peuvent encore s'échanger un jeton en temps réel. Seul le
+  géofencing peut trancher ce cas, et lui-même avec les réserves déjà
+  documentées sur la falsification du GPS.
+
+Ce que le mécanisme apporte réellement : il rend la fraude **individuelle,
+délibérée et traçable**, là où un système déclaratif la rend collective et
+invisible.
+
+---
+
+# Suivi du temps : les écritures
+
+## Le scan crée désormais une présence
+
+Constat de revue : le scan écrivait dans `scans` mais **jamais** dans
+`presences`. Toute la chaîne de suivi du temps était donc inerte — un étudiant
+ayant réellement scanné restait absent de tous les relevés d'heures, sans
+qu'aucune erreur ne soit levée.
+
+Les deux écritures se font maintenant dans **une seule transaction**.
+`heure_arrivee` vaut `NOW()` de la base, jamais une heure fournie par le
+client : c'est l'horloge du serveur qui fait foi pour tout ce qui servira à
+justifier des quotas.
+
+## Un piège de fuseau horaire, découvert à l'exécution
+
+La validation d'une demande de rectification échouait sur
+`chk_presence_bornes` : l'heure d'arrivée se retrouvait postérieure à l'heure
+de départ, alors que les valeurs saisies étaient cohérentes.
+
+Cause : `mysql2` convertit une colonne `DATETIME` en objet `Date` JavaScript
+en supposant le fuseau de la connexion, puis la re-sérialise dans ce même
+fuseau à l'écriture. **Un simple aller-retour d'une valeur inchangée la décale
+donc de plusieurs heures.**
+
+Deux corrections, complémentaires :
+- Les `DATETIME` sont lus **sous forme de chaînes** (`DATE_FORMAT`), qui
+  traversent sans interprétation.
+- L'`UPDATE` utilise `COALESCE(?, colonne)` : un champ non demandé n'est pas
+  réécrit du tout, ce qui supprime la possibilité même de l'aller-retour.
+
+Le même piège s'est reproduit **dans les tests**, sous une autre forme : une
+heure calculée en JavaScript (`toISOString()`, donc UTC) était comparée à une
+valeur posée par `NOW()` de MySQL (fuseau de session). Selon le décalage, le
+départ demandé tombait avant l'arrivée et le contrôle rejetait à juste titre.
+Corrigé en faisant produire les deux valeurs par la base. Mélanger deux
+horloges est exactement ce que ce projet cherche à éviter ; le test ne devait
+pas l'introduire lui-même.
+
+## Le motif n'est jamais facultatif
+
+Toute action modifiant une présence — modification manuelle par le formateur,
+acceptation ou **refus** d'une demande — exige un motif, contrôlé côté
+interface *et* côté serveur, et refusé s'il est vide ou composé d'espaces.
+
+Le refus est inclus délibérément : c'est ce que l'étudiant pourra contester,
+et ce qu'une inspection lira.
+
+Le journal est écrit **dans la même transaction** que la modification qu'il
+décrit. C'est la raison pour laquelle `journalService.consigner()` prend une
+*connexion* en paramètre et jamais le pool : la signature de la fonction rend
+l'appartenance à la transaction obligatoire et visible. Sans cela, une panne
+entre les deux produirait une modification sans trace, soit le pire des deux
+mondes — la donnée a changé sans qu'on puisse dire qui ni pourquoi.
+
+Une entrée est consignée **par champ réellement modifié**, et non un bloc
+global : lors d'un contrôle, la question sera « qu'est-ce qui a changé
+exactement ? ».
+
+`FOR UPDATE` verrouille la demande le temps de la transaction : deux
+formateurs traitant simultanément la même demande, le second attend et
+constate qu'elle est déjà tranchée (`409 DEJA_TRAITEE`) au lieu de l'écraser.
+
+## La fenêtre de 24 heures est vérifiée deux fois, mais une seule compte
+
+Le contrôle côté navigateur n'est qu'un confort visuel : appeler l'API
+directement le contourne en une commande. C'est la vérification serveur,
+faite contre l'horloge de la base et à partir de `heure_fin_prevue` de la
+séance, qui fait foi. Un test dédié l'établit en soumettant une demande sur
+une séance terminée depuis trente heures.
+
+## Vérifications
+
+**76 tests backend** sur 8 suites, **15 tests frontend**. L'inaltérabilité du
+journal est vérifiée par un test qui tente un `DELETE` et un `UPDATE` dessus
+et attend un échec : la garantie est portée par les privilèges MySQL, pas par
+la discipline du code.
+
+---
+
 ## Prochaine étape suggérée
 
 **Étape 7e** (géofencing, en signalement et non en blocage), puis
-l'implémentation des écritures du suivi du temps : création automatique d'une
+l'implémentation des écritures restantes du suivi du temps : création automatique d'une
 présence au scan, clôture de séance renseignant les heures de départ,
 modification manuelle par le formateur avec écriture dans le journal d'audit
 (les deux opérations dans une même transaction, sans quoi une panne

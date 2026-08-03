@@ -36,6 +36,9 @@ const enrolementRoutes = require('./src/routes/enrolementRoutes');
 const authRoutes = require('./src/routes/authRoutes');
 const referentielRoutes = require('./src/routes/referentielRoutes');
 const mesPresencesRoutes = require('./src/routes/mesPresencesRoutes');
+const rectificationRoutes = require('./src/routes/rectificationRoutes');
+const presenceRoutes = require('./src/routes/presenceRoutes');
+const appareilRoutes = require('./src/routes/appareilRoutes');
 const { attachQrBroadcaster } = require('./src/services/qrBroadcaster');
 
 const app = express();
@@ -72,6 +75,9 @@ app.get('/api/db-health', async (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api', referentielRoutes);
 app.use('/api/mes-presences', mesPresencesRoutes);
+app.use('/api/mon-appareil', appareilRoutes);
+app.use('/api/rectifications', rectificationRoutes);
+app.use('/api/presences', presenceRoutes);
 app.use('/api/seances', seanceRoutes);
 app.use('/api/scans', scanRoutes);
 app.use('/api/enrolements', enrolementRoutes);

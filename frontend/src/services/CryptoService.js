@@ -44,6 +44,10 @@ const magasinAppareil = createStore('presence-appareil-db', 'cles-cryptographiqu
 
 const CLE_PRIVEE_ID = 'appareil-cle-privee';
 const CLE_PUBLIQUE_ID = 'appareil-cle-publique';
+// Identifiant attribue par le serveur lors de l'enrolement. Conserve
+// localement pour permettre a l'interface de detecter, AVANT toute tentative
+// de scan, que cet appareil a ete dissocie au profit d'un autre.
+const APPAREIL_ID = 'appareil-id-serveur';
 
 const ALGORITHME = {
   name: 'ECDSA',
@@ -105,6 +109,20 @@ export async function exportPublicKey() {
 
   const spki = await window.crypto.subtle.exportKey('spki', clePublique);
   return derVersPem(spki, 'PUBLIC KEY');
+}
+
+/**
+ * Memorise l'identifiant serveur de cet appareil, retourne par l'enrolement.
+ * Ce n'est PAS un secret : c'est un identifiant opaque, sans valeur pour qui
+ * ne detient pas la cle privee correspondante.
+ */
+export async function memoriserIdAppareil(appareilId) {
+  await set(APPAREIL_ID, appareilId, magasinAppareil);
+}
+
+/** Identifiant serveur memorise, ou null si cet appareil n'a jamais ete enrole. */
+export async function lireIdAppareil() {
+  return (await get(APPAREIL_ID, magasinAppareil)) ?? null;
 }
 
 /**
@@ -201,5 +219,5 @@ function derVersPem(derBuffer, etiquette) {
 // sans avoir a passer par un import dynamique). Jamais expose en dehors du
 // mode developpement -- ce n'est pas une surface d'API destinee a la production.
 if (import.meta.env && import.meta.env.DEV) {
-  window.CryptoService = { generateAndStoreKeyPair, exportPublicKey, signData, possedeDejaUneCle };
+  window.CryptoService = { generateAndStoreKeyPair, exportPublicKey, signData, possedeDejaUneCle, lireIdAppareil };
 }

@@ -146,14 +146,16 @@ async function scannerJeton(req, res) {
   // --- c) : signature ECDSA de l'appareil enrole. AVANT toute ecriture
   // (voir l'en-tete de ce fichier pour l'ecart assume sur l'ordre). ---
   let appareil;
+  let appareilsRevoques = [];
   try {
     const [appareils] = await pool.query(
-      `SELECT cle_publique FROM appareils_enroles
-       WHERE etudiant_id = ? AND statut = 'actif'
-       LIMIT 1`,
+      `SELECT id, cle_publique, statut FROM appareils_enroles
+       WHERE etudiant_id = ?
+       ORDER BY (statut = 'actif') DESC, date_enrolement DESC`,
       [etudiantId]
     );
-    appareil = appareils[0];
+    appareil = appareils.find((a) => a.statut === 'actif');
+    appareilsRevoques = appareils.filter((a) => a.statut === 'revoque');
   } catch (error) {
     console.error('[scanController] Erreur lors de la lecture de l\'appareil enrole :', error.message);
     return res.status(500).json({
@@ -194,6 +196,32 @@ async function scannerJeton(req, res) {
           message: "La cle publique enregistree pour cet appareil est illisible : re-enrolez l'appareil.",
         });
       }
+      // AVANT de conclure a une signature invalide, verifier si le jeton a
+      // ete signe par un appareil REVOQUE de cet etudiant. C'est le cas le
+      // plus frequent en pratique : l'etudiant a change de telephone, et
+      // l'ancien continue d'essayer. Le rejet est le meme, mais le message
+      // doit dire la verite -- "signature invalide" laisserait croire a un
+      // defaut technique alors que le systeme fonctionne exactement comme
+      // prevu. C'est aussi ce qui permet a l'interface d'afficher un message
+      // actionnable ("cet appareil a ete dissocie") plutot qu'une erreur
+      // cryptographique incomprehensible.
+      const signeParUnAppareilRevoque = appareilsRevoques.some((revoque) => {
+        try {
+          verifierSignatureAppareil(jeton, signatureAppareil, revoque.cle_publique);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+
+      if (signeParUnAppareilRevoque) {
+        return res.status(403).json({
+          status: 'error',
+          code: 'APPAREIL_REVOQUE',
+          message: "Cet appareil a ete dissocie de votre compte. Utilisez l'appareil actuellement enrole, ou enrolez celui-ci a nouveau.",
+        });
+      }
+
       return res.status(401).json({
         status: 'error',
         code: 'SIGNATURE_APPAREIL_INVALIDE',
@@ -208,25 +236,48 @@ async function scannerJeton(req, res) {
   }
 
   const scanId = crypto.randomUUID();
+  const presenceId = crypto.randomUUID();
 
   // --- d) et e) : unicite du nonce ET unicite de la presence, chacune
   // appliquee par sa propre contrainte UNIQUE sur la table scans -- voir
   // l'en-tete de ce fichier pour la justification complete du choix
   // "laisser l'INSERT echouer" plutot qu'un SELECT prealable, dans les deux cas.
+  //
+  // Le scan ET la presence sont ecrits dans UNE SEULE TRANSACTION. scans est
+  // le journal brut immuable, presences l'etat courant : un scan sans
+  // presence correspondante laisserait un etudiant ayant reellement scanne
+  // absent de tous les releves d'heures, sans qu'aucune erreur ne soit
+  // levee. Les deux ecritures reussissent ensemble ou aucune n'est appliquee.
+  const connexion = await pool.getConnection();
   try {
-    await pool.query(
+    await connexion.beginTransaction();
+
+    await connexion.query(
       'INSERT INTO scans (id, seance_id, etudiant_id, jti, resultat) VALUES (?, ?, ?, ?, ?)',
       [scanId, sessionId, etudiantId, jti, 'valide']
     );
 
+    // heure_arrivee = NOW() de la BASE, jamais une heure fournie par le
+    // client : c'est l'horloge du serveur qui fait foi pour tout ce qui
+    // servira a justifier des quotas.
+    await connexion.query(
+      `INSERT INTO presences (id, seance_id, etudiant_id, scan_arrivee_id, heure_arrivee, source)
+       VALUES (?, ?, ?, ?, NOW(), 'scan')`,
+      [presenceId, sessionId, etudiantId, scanId]
+    );
+
+    await connexion.commit();
+
     return res.status(201).json({
       status: 'ok',
       scan_id: scanId,
+      presence_id: presenceId,
       seance_id: sessionId,
       etudiant_id: etudiantId,
       resultat: 'valide',
     });
   } catch (error) {
+    await connexion.rollback();
     if (error.code === 'ER_DUP_ENTRY') {
       // La contrainte UNIQUE (l'une des deux -- MySQL ne dit pas laquelle
       // via error.code, toujours 1062 dans les deux cas) vient de rejeter
@@ -267,7 +318,7 @@ async function scannerJeton(req, res) {
       });
     }
 
-    if (error.code === 'ER_NO_REFERENCED_ROW_2') {
+    if (error.code === 'ER_NO_REFERENCED_ROW_2' || error.code === 'ER_NO_REFERENCED_ROW') {
       // seance_id (extrait du jeton, jamais du client) ou etudiant_id
       // (fourni par le client) ne correspond a aucune ligne existante --
       // meme raisonnement que seanceController.js : erreur de saisie/etat
@@ -283,6 +334,10 @@ async function scannerJeton(req, res) {
       status: 'error',
       message: "Erreur serveur lors de l'enregistrement du scan.",
     });
+  } finally {
+    // Restitution au pool dans TOUS les cas : sans ce finally, quelques
+    // scans en erreur suffiraient a epuiser les dix connexions du pool.
+    connexion.release();
   }
 }
 

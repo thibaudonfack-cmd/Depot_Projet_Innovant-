@@ -9,10 +9,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import EnTeteApplication from '../components/EnTeteApplication';
 import AffichageQR from '../components/AffichageQR';
+import DetailSeance from './DetailSeance';
 import {
   Badge, Bouton, Carte, ChargementEnLigne, Champ, EtatVide, Message, Selection,
 } from '../components/ui';
-import { dateCourte, duree, heure } from '../components/format';
+import { dateCourte } from '../components/format';
 import { appelerApi } from '../services/api';
 
 /** Date du jour au format AAAA-MM-JJ, en composantes LOCALES.
@@ -110,90 +111,6 @@ function FormulaireSeance({ unitesFormation, salles, onCreee }) {
 }
 
 // ---------------------------------------------------------------------------
-// Detail des presences
-// ---------------------------------------------------------------------------
-
-function DetailPresences({ seanceId, onRetour }) {
-  const [donnees, setDonnees] = useState(null);
-  const [erreur, setErreur] = useState('');
-
-  useEffect(() => {
-    let annule = false;
-    appelerApi(`/api/seances/${seanceId}/presences`)
-      .then((r) => { if (!annule) setDonnees(r); })
-      .catch((e) => { if (!annule) setErreur(e.message); });
-    return () => { annule = true; };
-  }, [seanceId]);
-
-  return (
-    <Carte>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-semibold text-sable-900">Présences</h2>
-          {donnees && (
-            <p className="mt-1 text-sm text-sable-600">
-              {donnees.seance.uf_intitule} · {donnees.seance.salle_nom}
-            </p>
-          )}
-        </div>
-        <Bouton variante="secondaire" onClick={onRetour} className="w-auto px-3 py-2 text-xs">
-          Retour
-        </Bouton>
-      </div>
-
-      {erreur && <div className="mt-4"><Message ton="erreur">{erreur}</Message></div>}
-      {!donnees && !erreur && <ChargementEnLigne libelle="Chargement des présences" />}
-
-      {donnees && donnees.presences.length === 0 && (
-        <div className="mt-5">
-          <EtatVide titre="Aucune présence enregistrée">
-            Les étudiants apparaîtront ici dès qu&apos;ils auront scanné le QR code.
-          </EtatVide>
-        </div>
-      )}
-
-      {donnees && donnees.presences.length > 0 && (
-        <div className="mt-5 overflow-x-auto">
-          <table className="w-full text-sm">
-            <caption className="sr-only">Présences enregistrées pour cette séance</caption>
-            <thead>
-              <tr className="border-b border-sable-300 text-left text-xs text-sable-600">
-                <th scope="col" className="pb-2 font-medium">Étudiant</th>
-                <th scope="col" className="pb-2 font-medium">Arrivée</th>
-                <th scope="col" className="pb-2 font-medium">Départ</th>
-                <th scope="col" className="pb-2 font-medium">Durée</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-sable-200">
-              {donnees.presences.map((p) => (
-                <tr key={p.id}>
-                  <td className="py-3 pr-3 font-medium text-sable-900">{p.etudiant_nom}</td>
-                  <td className="py-3 pr-3 text-sable-700">{heure(p.heure_arrivee)}</td>
-                  <td className="py-3 pr-3 text-sable-700">{heure(p.heure_depart)}</td>
-                  <td className="py-3">
-                    {p.heure_depart
-                      ? <span className="text-sable-900">{duree(p.duree_minutes)}</span>
-                      : <Badge ton="actif">En cours</Badge>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {donnees && (
-        <p className="mt-5 text-xs text-sable-600">
-          La modification manuelle des heures arrivera avec le suivi du temps.
-          Chaque changement laissera une trace horodatée et motivée dans le
-          journal d&apos;audit, conservé cinq ans.
-        </p>
-      )}
-    </Carte>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Ecran principal
 // ---------------------------------------------------------------------------
 
@@ -272,7 +189,7 @@ function TableauBordFormateur() {
             </div>
           </Carte>
         ) : seanceDetaillee ? (
-          <DetailPresences seanceId={seanceDetaillee} onRetour={() => setSeanceDetaillee(null)} />
+          <DetailSeance seanceId={seanceDetaillee} onRetour={() => { setSeanceDetaillee(null); chargerSeances(); }} />
         ) : (
           <>
             <Carte>
