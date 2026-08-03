@@ -2066,7 +2066,132 @@ fonctionne depuis la liste (section 4) ; une présence ouverte affiche
 « En cours » et non zéro (sections 5 et 6) ; la fenêtre de rectification ne
 dépend pas de l'horloge du client (section 7) ; les suppressions sur le
 journal d'audit et sur les présences sont refusées par MySQL (section 8) ; et
-les deux suites de tests passent (section 9). de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
+les deux suites de tests passent (section 9).
+
+---
+
+# Étape 7e (préalable) — Suivi du temps complet
+
+**Migration obligatoire** (le scan écrit maintenant dans `presences`) :
+```bash
+git pull origin dev && docker compose down -v && docker compose up -d --build
+```
+
+## 1. Le scan crée bien une présence
+
+Connectez-vous en formateur, ouvrez une séance, projetez le QR. Dans un autre
+navigateur, connectez-vous en étudiant, associez l'appareil, scannez.
+
+Attendu : la carte « Mes présences » affiche la séance avec la mention
+« En cours » (aucune heure de départ). Vérification en base :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, heure_arrivee, heure_depart, source, scan_arrivee_id
+      FROM db_logs.presences ORDER BY heure_arrivee DESC LIMIT 1\G"
+```
+Attendu : `source = scan`, `heure_depart` à `NULL`, et `scan_arrivee_id`
+renseigné, reliant la présence à sa preuve d'origine.
+
+## 2. Verrouillage de l'appareil
+
+**Sans appareil associé** : le bouton « Scanner le QR code » est désactivé,
+avec la mention « Associez d'abord cet appareil ».
+
+**Appareil dissocié** : dans une fenêtre privée, connectez-vous avec **le même
+étudiant** et associez cet appareil. Revenez à la première fenêtre et
+rechargez.
+
+Attendu : un **encadré rouge « Cet appareil a été dissocié »**, le badge passe
+à « Dissocié », et le bouton de scan est désactivé avec la raison affichée.
+L'étudiant est prévenu **avant** de tenter quoi que ce soit.
+
+Tentez malgré tout un scan en appelant l'API depuis la console : le serveur
+doit répondre `403 APPAREIL_REVOQUE`, et non une erreur de signature.
+
+## 3. Signalement dans les 24 heures
+
+Sur une séance terminée, cliquer **Signaler une erreur**. Contrôles :
+- le bouton d'envoi reste **désactivé** tant que le motif est vide ;
+- un départ antérieur à l'arrivée affiche une erreur immédiate ;
+- **Échap** ferme la modale (comportement natif de `<dialog>`) ;
+- la navigation au clavier reste piégée dans la modale.
+
+Après envoi : badge « Signalement en attente », bouton disparu, seconde
+tentative impossible.
+
+Sur une séance terminée depuis plus de 24 h : un badge discret
+**« Délai de signalement expiré »** remplace le bouton.
+
+**Contrôle qui compte** : changer l'heure de votre machine ne doit rien
+changer. Le délai est calculé par la base.
+
+## 4. Traitement par le formateur
+
+Espace formateur, séance concernée, bouton **Présences**. La demande apparaît
+dans un encadré ambré avec le motif, les heures demandées et les actuelles.
+
+**Refuser** puis **Accepter** : la modale exige un motif dans les deux cas,
+le bouton restant désactivé tant qu'il est vide. Vérifier que le motif est
+exigé **même pour un refus**.
+
+Après acceptation :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT source, heure_arrivee, heure_depart FROM db_logs.presences
+      ORDER BY heure_arrivee DESC LIMIT 1\G"
+```
+Attendu : `source = rectification_validee`.
+
+## 5. Modification manuelle
+
+Sur une ligne de présence, bouton **Modifier**. Changer l'heure de départ,
+saisir un motif, enregistrer. Attendu : la durée se recalcule et `source`
+passe à `correction_formateur`.
+
+## 6. Le journal d'audit contient la trace
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT champ, valeur_avant, valeur_apres, auteur_email, role_auteur,
+             motif, origine, horodatage
+      FROM db_attestations.journal_modifications ORDER BY horodatage DESC LIMIT 5\G"
+```
+Attendu : une entrée **par champ modifié**, avec la valeur précédente, le
+motif saisi, l'adresse du formateur et l'origine.
+
+**Preuve d'inaltérabilité, à montrer au jury** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "UPDATE db_attestations.journal_modifications SET motif = 'falsifie';"
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "DELETE FROM db_attestations.journal_modifications;"
+```
+Attendu : **les deux échouent**. L'application ne peut qu'insérer et lire ;
+la garantie vient du moteur, pas du code.
+
+## 7. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+Attendu : `76 passed` (8 suites) et `15 passed`.
+
+## Critère de succès global — Suivi du temps
+
+Validée si et seulement si : un scan crée une présence liée à son scan
+d'origine (section 1) ; un appareil dissocié est signalé en rouge et le scan
+verrouillé avant toute tentative, l'API répondant `APPAREIL_REVOQUE`
+(section 2) ; le signalement fonctionne dans les 24 h et affiche un badge
+d'expiration au-delà, sans dépendre de l'horloge du client (section 3) ;
+accepter et refuser exigent tous deux un motif (section 4) ; la modification
+manuelle recalcule la durée (section 5) ; le journal contient une entrée par
+champ et résiste à `UPDATE` comme à `DELETE` (section 6) ; les deux suites
+passent (section 7).
+
+---
+
+# Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte
 
