@@ -21,6 +21,14 @@ const DELAI_MAX_MS = 8000;
  */
 export function obtenirPosition() {
   return new Promise((resoudre) => {
+    // Diagnostic explicite du contexte securise. window.isSecureContext est
+    // le seul moyen fiable de distinguer "le navigateur refuse l'API" de
+    // "le capteur n'a rien trouve" : sans ce controle, les deux se
+    // presentent de la meme facon et le diagnostic est impossible.
+    if (!window.isSecureContext) {
+      resoudre({ position: null, motif: 'CONTEXTE_NON_SECURISE' });
+      return;
+    }
     if (!navigator.geolocation) {
       resoudre({ position: null, motif: 'INDISPONIBLE' });
       return;
@@ -63,9 +71,13 @@ export function obtenirPosition() {
 /** Message court destine a l'utilisateur, selon le motif d'echec. */
 export function messagePosition(motif) {
   return {
-    REFUSEE: "Position non partagée. La présence reste valable, mais elle ne pourra pas être confirmée géographiquement.",
-    INDISPONIBLE: "Position indisponible sur cet appareil. La présence reste valable.",
-    DELAI_DEPASSE: "La position n'a pas pu être obtenue à temps. La présence reste valable.",
-    ERREUR: "La position n'a pas pu être obtenue. La présence reste valable.",
+    REFUSEE: "Position non partagée. L'action reste valable, mais ne pourra pas être confirmée géographiquement.",
+    // Cas le plus frequent sur un ordinateur fixe : sans puce GPS ni carte
+    // Wi-Fi, le navigateur n'a aucune source pour se localiser. Le dire
+    // explicitement evite de chercher un defaut dans l'application.
+    INDISPONIBLE: "Aucune source de position sur cet appareil. C'est courant sur un ordinateur fixe sans Wi-Fi. L'action reste valable.",
+    DELAI_DEPASSE: "La position n'a pas pu être obtenue à temps. L'action reste valable.",
+    CONTEXTE_NON_SECURISE: "La géolocalisation est bloquée car la page n'est pas dans un contexte sécurisé. Acceptez le certificat, ou consultez TESTING.md. L'action reste valable.",
+    ERREUR: "La position n'a pas pu être obtenue. L'action reste valable.",
   }[motif] ?? '';
 }

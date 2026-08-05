@@ -8,7 +8,7 @@
 
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../context/contexte-auth';
+import { useAuth, accueilDuRole } from '../context/contexte-auth';
 import { Marque } from './ui';
 
 /** Initiales pour l'avatar, deux lettres au maximum. */
@@ -40,14 +40,17 @@ function EnTeteApplication({ sousTitre, confirmationRetour }) {
   }
 
   /**
-   * Retour arriere au clic sur la marque.
+   * Clic sur la marque : retour a l'ACCUEIL DU ROLE.
    *
-   * history.length > 1 distingue deux situations : l'onglet a un historique
-   * (on peut revenir en arriere) ou il a ete ouvert directement sur cette
-   * page (revenir sortirait du site, ou ne ferait rien). Dans ce second cas,
-   * on renvoie vers la racine, qui aiguille ensuite selon la session.
-   * Sans ce controle, un clic depuis un onglet neuf donnerait l'impression
-   * d'un bouton mort.
+   * La version precedente faisait un retour arriere dans l'historique
+   * (navigate(-1)), ce qui produisait un comportement imprevisible : depuis
+   * un onglet neuf le bouton ne faisait rien, et depuis une sous-page il
+   * pouvait ramener n'importe ou selon le chemin parcouru. Une marque
+   * cliquable est universellement comprise comme un retour a l'accueil, pas
+   * comme un bouton "precedent" : c'est cette attente qui est respectee ici.
+   *
+   * La destination depend du role, puisqu'il n'existe pas d'accueil commun :
+   * un formateur n'a rien a faire sur /etudiant et inversement.
    */
   function handleRetour() {
     // Garde-fou : quitter cet ecran ferait disparaitre le QR projete, et le
@@ -58,8 +61,7 @@ function EnTeteApplication({ sousTitre, confirmationRetour }) {
     // traduit dans la langue du systeme.
     if (confirmationRetour && !window.confirm(confirmationRetour)) return;
 
-    if (window.history.length > 1) navigate(-1);
-    else navigate('/');
+    navigate(utilisateur ? accueilDuRole(utilisateur.role) : '/', { replace: false });
   }
 
   return (
@@ -72,8 +74,8 @@ function EnTeteApplication({ sousTitre, confirmationRetour }) {
         <button
           type="button"
           onClick={handleRetour}
-          title={confirmationRetour ? 'Quitter cet écran' : 'Revenir à la page précédente'}
-          aria-label={confirmationRetour ? 'Quitter cet écran' : 'Revenir à la page précédente'}
+          title={confirmationRetour ? "Quitter cet écran et revenir à l'accueil" : "Revenir à l'accueil"}
+          aria-label={confirmationRetour ? "Quitter cet écran et revenir à l'accueil" : "Revenir à l'accueil"}
           className="-m-2 shrink-0 rounded-2xl p-2 transition-colors duration-200
                      hover:bg-sable-100 focus-visible:outline-none focus-visible:ring-2
                      focus-visible:ring-accent-600 focus-visible:ring-offset-2"

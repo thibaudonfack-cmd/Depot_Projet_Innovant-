@@ -15,7 +15,7 @@ import {
 } from '../components/ui';
 import { dateCourte } from '../components/format';
 import { appelerApi } from '../services/api';
-import { obtenirPosition } from '../services/geolocalisation';
+import { obtenirPosition, messagePosition } from '../services/geolocalisation';
 
 /** Date du jour au format AAAA-MM-JJ, en composantes LOCALES.
  *  toISOString() convertirait en UTC et renverrait la veille en soiree pour
@@ -132,8 +132,8 @@ function FormulaireSeance({ unitesFormation, salles, onCreee }) {
         {bornesIncoherentes && <Message ton="erreur">La fin doit être postérieure au début.</Message>}
         {erreur && <Message ton="erreur">{erreur}</Message>}
         {avertissementPosition && (
-          <Message ton="info">
-            Position non obtenue. La séance sera créée sans référence géographique.
+          <Message ton="info" titre="Séance créée sans référence géographique">
+            {messagePosition(avertissementPosition)}
           </Message>
         )}
       </div>

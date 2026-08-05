@@ -22,7 +22,24 @@
 // l'enrolement initial lui-meme (qui a lieu sur un appareil qui vient tout
 // juste de generer sa propre paire, cf. CryptoService.js).
 //
-// ETAPE 7c : en revanche, l'IDENTITE de l'etudiant est desormais etablie.
+// PREUVE DE POSSESSION (challenge-response). L'enrolement se fait desormais
+// en DEUX temps : le client demande un defi, le signe avec la cle privee
+// qu'il vient de generer, et transmet signature et cle publique. Le serveur
+// verifie la signature AVEC LA CLE PUBLIQUE SOUMISE -- c'est le point
+// central : reussir cette verification n'est possible qu'en detenant la cle
+// privee associee.
+//
+// Ce que cela ferme : soumettre la cle publique d'un tiers (elle est publique
+// et se recupere aisement, mais signer exigerait sa cle privee), et rejouer
+// un enrolement intercepte (le defi est a usage unique et expire).
+//
+// Ce que cela NE ferme PAS : enroler SON PROPRE appareil sous l'identite d'un
+// autre etudiant apres avoir obtenu ses identifiants. L'attaquant genere sa
+// paire et signe correctement -- la preuve de possession est satisfaite. Cet
+// angle mort releve de l'authentification (Etape 7c) et de la friction
+// documentee dans "Trois arguments pour la soutenance", pas du defi-reponse.
+//
+// ETAPE 7c : l'IDENTITE de l'etudiant est etablie.
 // Elle provient de la session authentifiee, plus du corps de la requete --
 // il n'est donc plus possible d'enroler son propre appareil sous
 // l'identifiant d'un autre etudiant, ce qui etait jusqu'ici le contournement
@@ -30,10 +47,45 @@
 
 const crypto = require('crypto');
 const pool = require('../config/db');
+const {
+  verifierSignatureAppareil,
+  SignatureAppareilInvalideError,
+} = require('../services/deviceSignatureService');
+
+/** Duree de vie d'un defi. Court : il n'a de sens que le temps de l'echange. */
+const DUREE_DEFI_SECONDES = 120;
+
+/**
+ * POST /api/enrolements/defi
+ * Role etudiant. Emet un defi a signer.
+ */
+async function emettreDefi(req, res) {
+  try {
+    const defiId = crypto.randomUUID();
+    // 32 octets aleatoires via randomBytes, jamais Math.random() : la valeur
+    // doit etre impredictible, sans quoi un attaquant pourrait preparer une
+    // signature a l'avance.
+    const valeur = crypto.randomBytes(32).toString('hex');
+
+    await pool.query(
+      `INSERT INTO defis_enrolement (id, etudiant_id, valeur, date_expiration)
+       VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))`,
+      [defiId, req.utilisateur.etudiant_id, valeur, DUREE_DEFI_SECONDES]
+    );
+
+    return res.status(201).json({
+      status: 'ok',
+      defi: { id: defiId, valeur, duree_secondes: DUREE_DEFI_SECONDES },
+    });
+  } catch (error) {
+    console.error('[enrolementController] Erreur POST /api/enrolements/defi :', error.message);
+    return res.status(500).json({ status: 'error', message: 'Erreur serveur.' });
+  }
+}
 
 /**
  * POST /api/enrolements
- * Corps attendu : { public_key: string, device_info?: string }
+ * Corps attendu : { public_key, defi_id, signature_defi, device_info? }
  * Route PROTEGEE : exige une session authentifiee de role 'etudiant'.
  *
  * etudiant_id provient de req.utilisateur.etudiant_id (session), jamais du
@@ -60,15 +112,20 @@ const pool = require('../config/db');
  *   2. INSERT : le nouvel appareil est enregistre avec statut='actif'.
  */
 async function enrolerAppareil(req, res) {
-  const { public_key: clePublique, device_info: infoAppareil } = req.body || {};
+  const {
+    public_key: clePublique,
+    device_info: infoAppareil,
+    defi_id: defiId,
+    signature_defi: signatureDefi,
+  } = req.body || {};
 
   // Identite issue de la SESSION, jamais du client (cf. en-tete de fonction).
   const etudiantId = req.utilisateur.etudiant_id;
 
-  if (!clePublique) {
+  if (!clePublique || !defiId || !signatureDefi) {
     return res.status(400).json({
       status: 'error',
-      message: 'public_key est obligatoire.',
+      message: 'public_key, defi_id et signature_defi sont obligatoires.',
     });
   }
 
@@ -88,6 +145,63 @@ async function enrolerAppareil(req, res) {
 
   try {
     await connexion.beginTransaction();
+
+    // --- PREUVE DE POSSESSION ---
+    //
+    // Consommation ATOMIQUE du defi : l'UPDATE ne reussit que si le defi
+    // existe, appartient a cet etudiant, n'a pas expire et n'a jamais ete
+    // consomme. Verifier par un SELECT puis marquer par un UPDATE ouvrirait
+    // une fenetre de course pendant laquelle deux requetes simultanees
+    // pourraient consommer le meme defi -- le rendant reutilisable, soit
+    // exactement l'inverse du but recherche. affectedRows tranche sans
+    // ambiguite.
+    const [consommation] = await connexion.query(
+      `UPDATE defis_enrolement
+       SET date_consommation = NOW()
+       WHERE id = ? AND etudiant_id = ?
+         AND date_consommation IS NULL
+         AND date_expiration > NOW()`,
+      [defiId, etudiantId]
+    );
+
+    if (consommation.affectedRows !== 1) {
+      await connexion.rollback();
+      // Message unique pour les trois causes (inconnu, expire, deja
+      // consomme) : les distinguer renseignerait un attaquant sur l'etat des
+      // defis sans aucun benefice pour l'utilisateur legitime, qui n'a de
+      // toute facon qu'une action a faire -- recommencer.
+      return res.status(400).json({
+        status: 'error',
+        code: 'DEFI_INVALIDE',
+        message: 'Defi invalide, expire ou deja utilise. Relancez l\'association de cet appareil.',
+      });
+    }
+
+    const [defis] = await connexion.query(
+      'SELECT valeur FROM defis_enrolement WHERE id = ?', [defiId]
+    );
+
+    try {
+      // Verification avec la cle publique SOUMISE, et non une cle lue en base :
+      // l'appareil n'est pas encore enrole, il n'y a rien a lire. C'est tout
+      // l'interet du procede -- prouver que l'expediteur detient la cle privee
+      // correspondant a la cle publique qu'il presente.
+      verifierSignatureAppareil(defis[0].valeur, signatureDefi, clePublique);
+    } catch (err) {
+      await connexion.rollback();
+      if (err instanceof SignatureAppareilInvalideError && err.code === 'CLE_ILLISIBLE') {
+        return res.status(400).json({
+          status: 'error',
+          code: 'CLE_PUBLIQUE_INVALIDE',
+          message: 'La cle publique transmise est illisible.',
+        });
+      }
+      return res.status(401).json({
+        status: 'error',
+        code: 'PREUVE_POSSESSION_INVALIDE',
+        message: "La signature du defi est invalide : cet appareil ne detient pas la cle privee correspondant a la cle publique transmise.",
+      });
+    }
 
     const [resultatRevocation] = await connexion.query(
       `UPDATE appareils_enroles
@@ -158,4 +272,4 @@ async function enrolerAppareil(req, res) {
   }
 }
 
-module.exports = { enrolerAppareil };
+module.exports = { enrolerAppareil, emettreDefi, DUREE_DEFI_SECONDES };

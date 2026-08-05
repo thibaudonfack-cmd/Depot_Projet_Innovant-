@@ -14,7 +14,7 @@ import {
 import { dateCourte, duree, heure } from '../components/format';
 import { appelerApi } from '../services/api';
 import { useRessource } from '../services/useRessource';
-import { obtenirPosition } from '../services/geolocalisation';
+import { obtenirPosition, messagePosition } from '../services/geolocalisation';
 import {
   generateAndStoreKeyPair, exportPublicKey, possedeDejaUneCle,
   signData, memoriserIdAppareil, lireIdAppareil,
@@ -81,11 +81,32 @@ function CarteAppareil({ etat, appareilActif, onEnrole }) {
     setEnCours(true);
     setMessage(null);
     try {
+      // ENROLEMENT EN DEUX TEMPS (preuve de possession).
+      //
+      // 1. Le serveur emet un defi aleatoire.
+      // 2. On genere la paire de cles, puis on SIGNE ce defi avec la cle
+      //    privee toute neuve.
+      // 3. On transmet cle publique ET signature. Le serveur verifie la
+      //    signature avec la cle publique recue : la verification ne peut
+      //    reussir que si l'on detient reellement la cle privee associee.
+      //
+      // L'ordre importe : le defi est demande AVANT de generer la paire, pour
+      // que la fenetre de validite (deux minutes) ne soit pas entamee par la
+      // generation, qui peut prendre un instant sur un telephone modeste.
+      const { defi } = await appelerApi('/api/enrolements/defi', { methode: 'POST' });
+
       await generateAndStoreKeyPair();
       const clePublique = await exportPublicKey();
+      const signatureDefi = await signData(defi.valeur);
+
       const reponse = await appelerApi('/api/enrolements', {
         methode: 'POST',
-        corps: { public_key: clePublique, device_info: decrireAppareil() },
+        corps: {
+          public_key: clePublique,
+          device_info: decrireAppareil(),
+          defi_id: defi.id,
+          signature_defi: signatureDefi,
+        },
       });
       // L'identifiant serveur est memorise localement : c'est lui qui
       // permettra plus tard de detecter une dissociation.
@@ -425,7 +446,7 @@ function TableauBordEtudiant() {
         ton: 'succes',
         texte: geo.position
           ? 'Votre présence a bien été enregistrée.'
-          : 'Votre présence a bien été enregistrée. La position n\'a pas pu être obtenue, ce qui ne remet pas en cause sa validité.',
+          : `Votre présence a bien été enregistrée. ${messagePosition(geo.motif)}`,
       });
     } catch (echec) {
       setResultatScan({ ton: 'erreur', texte: echec.message });

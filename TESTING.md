@@ -2349,13 +2349,102 @@ l'application derrière un vrai certificat via un tunnel HTTPS public.
 poste (QR affiché à l'écran, scanné par la webcam du même ordinateur) reste
 plus rapide et suffit à tout vérifier sauf l'ergonomie mobile réelle.
 
-## 5. Tests automatisés
+## 5. Si la position reste vide en test local
+
+Symptôme fréquent : même après avoir cliqué sur « Autoriser », la position
+reste `NULL` en base et le badge affiche « Sans référence de position ».
+
+**Diagnostic en une commande.** Dans la console du navigateur :
+```js
+console.log('Contexte sécurisé :', window.isSecureContext);
+navigator.geolocation.getCurrentPosition(
+  (p) => console.log('OK', p.coords.latitude, p.coords.longitude, '±', p.coords.accuracy, 'm'),
+  (e) => console.log('ÉCHEC code', e.code, e.message)
+);
+```
+
+| Résultat | Cause | Solution |
+|---|---|---|
+| `isSecureContext: false` | Page hors contexte sécurisé | Voir ci-dessous |
+| code `1` | Permission refusée | Réautoriser dans les paramètres du site |
+| code `2` | **Aucune source de position** | Voir ci-dessous |
+| code `3` | Délai dépassé | Réessayer près d'une fenêtre |
+
+**Le code 2 sur un ordinateur fixe est le cas le plus courant, et ce n'est
+pas un défaut de l'application.** La Geolocation API expose ce que le système
+sait de sa position, elle ne le devine pas : sans récepteur GNSS ni carte
+Wi-Fi à trianguler, le navigateur n'a aucune source. Une machine reliée
+uniquement en Ethernet échouera systématiquement. Testez alors depuis un
+portable avec Wi-Fi activé, ou depuis un téléphone.
+
+**À savoir sur `localhost`** : contrairement à une idée répandue, le
+certificat auto-signé de Caddy **n'est pas** en cause ici. La spécification
+*Secure Contexts* classe `localhost` et `127.0.0.1` parmi les origines
+potentiellement dignes de confiance, quel que soit le certificat. Le
+géofencing fonctionne donc sur `https://localhost` dès lors qu'une source de
+position existe.
+
+**Le certificat redevient bloquant hors de `localhost`.** Une adresse LAN
+(`https://192.168.1.42`) n'est pas une origine de confiance : tant que
+l'avertissement n'est pas accepté, la page n'est pas en contexte sécurisé et
+la géolocalisation, WebCrypto et la caméra sont **toutes trois** refusées.
+Deux options pour un test mobile réel :
+
+1. **Installer l'autorité de Caddy sur le téléphone.** L'exporter depuis le
+   conteneur :
+   ```bash
+   docker compose exec proxy cat /data/caddy/pki/authorities/local/root.crt > caddy-root-ca.crt
+   ```
+   puis la transférer sur le téléphone et l'installer comme profil de
+   confiance. Sur iOS, il faut en plus l'activer dans *Réglages → Général →
+   Informations → Réglages des certificats*, étape que beaucoup oublient.
+2. **Passer par un tunnel HTTPS public** (ngrok, Cloudflare Tunnel). Le
+   certificat est alors émis par une autorité reconnue et aucun réglage n'est
+   nécessaire sur le téléphone. C'est la voie la plus rapide pour une
+   démonstration, au prix d'exposer temporairement l'application sur
+   Internet — à ne faire qu'avec le jeu de données de démonstration.
+
+## 6. Preuve de possession à l'enrôlement
+
+L'enrôlement se fait désormais en deux temps. Ouvrir l'onglet **Réseau**, puis
+associer un appareil. Attendu : **deux** requêtes successives,
+`POST /api/enrolements/defi` puis `POST /api/enrolements`, la seconde
+contenant `defi_id` et `signature_defi` en plus de `public_key`.
+
+**Vérifier l'usage unique** en rejouant la seconde requête. Dans l'onglet
+Réseau, clic droit sur `POST /api/enrolements` → *Copier comme fetch*, coller
+dans la console et exécuter. Attendu : `400` avec
+`"code":"DEFI_INVALIDE"` — le défi a déjà été consommé, un rejeu est
+impossible.
+
+**Trace des défis en base** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, etudiant_id, date_creation, date_expiration, date_consommation
+      FROM db_logs.defis_enrolement ORDER BY date_creation DESC LIMIT 5\G"
+```
+Attendu : `date_consommation` renseignée pour le défi utilisé, `NULL` pour
+ceux restés inutilisés. Ces lignes ne sont jamais supprimées : elles
+constituent une trace des tentatives, utile pour repérer une succession
+anormale sur un même compte.
+
+## 7. Navigation par la marque
+
+Connecté en étudiant, ouvrir la vue d'historique puis cliquer sur la marque
+en haut à gauche. Attendu : retour à `/etudiant`. En formateur, retour à
+`/formateur`. Depuis un onglet ouvert directement sur une page, le clic doit
+**également** fonctionner, alors qu'il ne faisait rien auparavant.
+
+Pendant la projection d'un QR, le clic doit toujours demander confirmation
+avant de quitter.
+
+## 8. Tests automatisés
 
 ```bash
 docker compose exec backend npm test
 docker compose exec frontend npm test
 ```
-Attendu : `92 passed` (9 suites) et `20 passed`.
+Attendu : `101 passed` (9 suites) et `20 passed`.
 
 ## Critère de succès global — Étape 7e
 
@@ -2364,8 +2453,11 @@ l'affiche par un badge, tout en se créant normalement en cas de refus
 (section 1) ; un scan enregistre coordonnées, précision et distance, et
 `position_coherente` vaut NULL et non 0 quand la position est refusée
 (section 2) ; une position falsifiée produit un badge orange **sans bloquer la
-validation**, avec la distance au survol (section 3) ; et les deux suites
-passent (section 5).
+validation**, avec la distance au survol (section 3) ; le diagnostic de la
+section 5 identifie sans ambiguïté la cause d'une position manquante ;
+l'enrôlement produit bien deux requêtes et un défi rejoué est refusé
+(section 6) ; la marque ramène à l'accueil du rôle (section 7) ; et les deux
+suites passent (section 8).
 
 ---
 

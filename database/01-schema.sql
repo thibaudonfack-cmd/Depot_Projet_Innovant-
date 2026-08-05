@@ -64,6 +64,45 @@ CREATE TABLE appareils_enroles (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------------------------------------------------------
+-- defis_enrolement  (preuve de possession -- challenge-response)
+--
+-- Ferme un angle mort de l'enrolement : jusqu'ici, le serveur enregistrait la
+-- cle publique qu'on lui presentait, sans aucun moyen de verifier que
+-- l'expediteur detenait la cle privee correspondante. Rien n'empechait donc
+-- de soumettre la cle publique d'un tiers -- elle est publique par nature et
+-- se recupere aisement.
+--
+-- Le principe : le serveur emet une valeur aleatoire, le client la signe avec
+-- la cle privee qu'il vient de generer, et transmet signature ET cle publique.
+-- Si la signature se verifie avec cette cle publique, l'expediteur detient
+-- necessairement la cle privee associee. C'est une preuve, pas une
+-- declaration.
+--
+-- USAGE UNIQUE, verifie de facon atomique (voir enrolementController.js).
+-- Sans cela, rejouer un couple (defi, signature) intercepte permettrait de
+-- refaire un enrolement -- exactement l'attaque par rejeu que le mecanisme
+-- doit fermer.
+--
+-- DUREE DE VIE COURTE (2 minutes) : le defi n'a de sens que le temps de
+-- l'echange. Une fenetre longue laisserait des defis exploitables trainer en
+-- base, et multiplierait les occasions d'interception.
+--
+-- Le defi est rattache a l'ETUDIANT : un defi emis pour l'un ne peut pas
+-- servir a enroler un appareil pour un autre.
+-- -----------------------------------------------------------------------------
+CREATE TABLE defis_enrolement (
+  id                CHAR(36)  NOT NULL DEFAULT (UUID()) PRIMARY KEY,
+  etudiant_id       CHAR(36)  NOT NULL,
+  valeur            CHAR(64)  NOT NULL,
+  date_creation     DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  date_expiration   DATETIME  NOT NULL,
+  date_consommation DATETIME  NULL,
+  CONSTRAINT fk_defi_etudiant FOREIGN KEY (etudiant_id) REFERENCES etudiants(id),
+  UNIQUE KEY uq_defi_valeur (valeur),
+  KEY idx_defi_etudiant (etudiant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -----------------------------------------------------------------------------
 -- utilisateurs  (Etape 7a -- EXTENSION MVP)
 --
 -- ECART ASSUME PAR RAPPORT AU PERIMETRE INITIAL. Le commentaire de la table

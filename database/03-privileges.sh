@@ -84,6 +84,12 @@ mysql -h "${MYSQL_HOST:-localhost}" -uroot -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
   -- tranche par le formateur), d'ou UPDATE. Aucun DELETE : une presence ou
   -- une demande ne se supprime pas, elle se corrige -- et la correction
   -- laisse une trace dans le journal d'audit.
+  -- Un defi doit pouvoir etre marque comme consomme (usage unique) : UPDATE
+  -- est donc necessaire. Aucun DELETE : les defis expires restent en base et
+  -- constituent une trace des tentatives d'enrolement, utile pour reperer une
+  -- succession anormale sur un meme compte.
+  GRANT UPDATE ON db_logs.defis_enrolement TO '${MYSQL_USER}'@'%';
+
   GRANT UPDATE ON db_logs.presences TO '${MYSQL_USER}'@'%';
   GRANT UPDATE ON db_logs.demandes_rectification TO '${MYSQL_USER}'@'%';
 

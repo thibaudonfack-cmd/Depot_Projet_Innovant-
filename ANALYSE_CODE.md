@@ -3096,6 +3096,176 @@ internes. **20 tests frontend**, lint et build sans erreur.
 
 ---
 
+# Pourquoi la géolocalisation reste NULL en test local
+
+Constat rapporté : même après avoir cliqué sur « Autoriser », la position
+reste `NULL` en base, côté formateur comme côté étudiant.
+
+## Une hypothèse à écarter d'abord : le certificat auto-signé
+
+L'explication qui vient naturellement est que le certificat auto-signé de
+Caddy empêcherait l'API de fonctionner. **Elle est inexacte pour un test sur
+`localhost`**, et il vaut mieux le savoir avant qu'un jury ne le relève.
+
+La spécification *Secure Contexts* du W3C définit une catégorie d'**origines
+potentiellement dignes de confiance**, qui bénéficient du contexte sécurisé
+indépendamment de TLS. Elle inclut explicitement `http://localhost`,
+`http://127.0.0.1` et `http://*.localhost`, au motif qu'ils désignent la
+machine elle-même : il n'y a pas d'intermédiaire réseau à protéger. Un test
+sur `https://localhost`, même avec un certificat non approuvé, s'exécute donc
+bien en contexte sécurisé, et la Geolocation API y est disponible.
+
+Le certificat **redevient déterminant dès qu'on quitte `localhost`** : une
+adresse LAN comme `https://192.168.1.42` n'est pas une origine
+potentiellement digne de confiance. Tant que l'avertissement n'est pas
+accepté, la page n'est pas en contexte sécurisé et l'API est refusée. C'est
+le cas du test sur téléphone, traité dans `TESTING.md`.
+
+## La cause réelle sur un poste fixe : aucune source de position
+
+La Geolocation API n'est qu'une **interface** : elle expose ce que le système
+sait de sa position, elle ne le devine pas. Les sources possibles sont un
+récepteur GNSS, la triangulation Wi-Fi (le navigateur envoie la liste des
+réseaux visibles à un service de localisation qui les rapproche d'une base
+cartographiée), ou la cellule mobile.
+
+**Un ordinateur fixe sans carte Wi-Fi n'en possède aucune.** Le navigateur
+n'a alors rien à interroger et renvoie `POSITION_UNAVAILABLE`. Sur une
+machine relié en Ethernet uniquement, le résultat est donc systématiquement
+un échec, quel que soit le protocole et quelles que soient les permissions
+accordées.
+
+Deux facteurs aggravants dans notre configuration : `enableHighAccuracy: true`
+sollicite en priorité un GPS qui n'existe pas sur un poste fixe, ce qui mène
+au délai d'attente plutôt qu'à un repli rapide ; et `maximumAge: 0` interdit
+toute position mise en cache qui aurait pu masquer le problème.
+
+## Pourquoi cela se solde par NULL et non par une erreur
+
+C'est un choix de conception, pas un défaut. Le géofencing est un **indicateur
+secondaire** : il ne doit jamais empêcher un formateur d'ouvrir sa séance ni
+un étudiant de valider sa présence. `obtenirPosition()` ne rejette donc
+jamais ; elle retourne `position: null` accompagnée d'un motif.
+
+Et en base, `position_coherente` vaut alors **`NULL` et non `0`** — soit
+« indéterminable » et non « hors zone ». La distinction, posée dès la
+conception du schéma, prend ici tout son sens : sans elle, chaque scan
+effectué depuis un poste fixe apparaîtrait comme suspect.
+
+## Ce qui a été corrigé
+
+L'échec était fonctionnellement correct mais **muet** : l'utilisateur voyait
+« Sans référence de position » sans savoir pourquoi. Deux ajouts :
+
+- `window.isSecureContext` est désormais testé explicitement avant tout
+  appel. C'est le seul moyen fiable de distinguer « le navigateur refuse
+  l'API » de « le capteur n'a rien trouvé » — sans ce contrôle, les deux se
+  présentent à l'identique et le diagnostic est impossible.
+- Le motif précis est affiché à l'écran, avec un message adapté. Le cas le
+  plus fréquent mentionne explicitement qu'il est **courant sur un ordinateur
+  fixe sans Wi-Fi**, pour éviter de chercher un défaut dans l'application.
+
+---
+
+# Preuve de possession à l'enrôlement (challenge-response)
+
+## L'angle mort que cela ferme
+
+Jusqu'ici, le serveur enregistrait la clé publique qu'on lui présentait, sans
+aucun moyen de vérifier que l'expéditeur détenait la clé privée
+correspondante. Or **une clé publique est publique** : elle circule
+légitimement, elle se récupère. Rien n'empêchait donc de soumettre celle d'un
+tiers.
+
+Le procédé retenu est le *challenge-response*, en deux temps :
+
+1. Le client demande un **défi** : le serveur génère 32 octets aléatoires,
+   les associe à l'étudiant avec une expiration de deux minutes, et les
+   renvoie.
+2. Le client génère sa paire de clés, **signe le défi** avec la clé privée
+   toute neuve, et transmet clé publique *et* signature.
+3. Le serveur vérifie la signature **avec la clé publique reçue**.
+
+Ce dernier point est le cœur du mécanisme, et il surprend souvent : la
+vérification n'utilise aucune clé lue en base, puisque l'appareil n'est pas
+encore enrôlé et qu'il n'y a rien à lire. C'est précisément l'intérêt —
+réussir cette vérification n'est mathématiquement possible qu'en détenant la
+clé privée associée à la clé publique présentée. La possession devient une
+**preuve**, plus une déclaration.
+
+## Ce que cela ferme, et ce que cela ne ferme pas
+
+**Fermé — usurpation de clé publique.** Soumettre la clé publique d'un tiers
+échoue désormais : signer le défi exigerait sa clé privée. Vérifié par un test
+qui signe avec une paire A tout en présentant la clé publique d'une paire B,
+et attend un rejet.
+
+**Fermé — rejeu.** Le défi est à **usage unique** et expire en deux minutes.
+Un couple (défi, signature) intercepté ne peut pas resservir. La consommation
+est faite par un `UPDATE` conditionnel dont on inspecte `affectedRows` :
+vérifier par un `SELECT` puis marquer par un `UPDATE` ouvrirait une fenêtre
+de course pendant laquelle deux requêtes simultanées pourraient consommer le
+même défi, le rendant réutilisable — soit exactement l'inverse du but.
+
+**Fermé — défi d'autrui.** Le défi est rattaché à un étudiant ; celui de
+Bilal ne permet pas d'enrôler un appareil pour Amara, même correctement signé.
+
+**NON fermé — le partage volontaire d'identifiants.** Un ami disposant des
+identifiants d'un étudiant génère sa propre paire et signe correctement : la
+preuve de possession est satisfaite. C'est normal, et il faut le dire
+clairement — le *challenge-response* prouve la détention d'une clé, **pas
+l'identité d'une personne**. Cet angle mort relève de l'authentification
+(Étape 7c) et surtout de la friction documentée plus haut : l'enrôlement de
+l'ami révoque immédiatement l'appareil de l'étudiant, et le ping-pong qui
+s'ensuit est dissuasif et traçable.
+
+## Détails d'implémentation
+
+Les trois causes de rejet d'un défi — inconnu, expiré, déjà consommé —
+partagent **un message unique**. Les distinguer renseignerait un attaquant sur
+l'état des défis sans aucun bénéfice pour l'utilisateur légitime, qui n'a de
+toute façon qu'une seule action possible : recommencer.
+
+Le défi est demandé **avant** la génération de la paire de clés, côté client.
+La fenêtre de deux minutes ne doit pas être entamée par une génération qui
+peut prendre un instant sur un téléphone modeste.
+
+Les défis expirés ne sont **pas supprimés** : `app_logs` reçoit `UPDATE` mais
+jamais `DELETE` sur cette table. Ils constituent une trace des tentatives
+d'enrôlement, utile pour repérer une succession anormale sur un même compte —
+exactement le motif que l'argument de la friction rend détectable.
+
+## Vérification par mutation
+
+| Mutation | Résultat |
+|---|---|
+| Suppression de la vérification de signature | « CAS CENTRAL » et « signer une autre valeur » **échouent** |
+| Suppression de l'usage unique et de l'expiration | « REJEU » et « défi expiré » **échouent** |
+| Restauration | 101/101 repassent |
+
+**101 tests backend** sur 9 suites, dont 8 pour la preuve de possession. Les
+paires de test sont générées via `crypto.webcrypto.subtle`, comme le fait le
+navigateur : `generateKeyPairSync` + `createSign` produiraient des signatures
+DER que le backend rejette à juste titre, et les tests valideraient alors un
+format que le vrai client n'envoie jamais.
+
+---
+
+# Navigation : la marque ramène à l'accueil du rôle
+
+Le clic sur la marque effectuait un retour arrière dans l'historique
+(`navigate(-1)`), ce qui produisait un comportement imprévisible : depuis un
+onglet neuf le bouton ne faisait rien, et depuis une sous-page il pouvait
+ramener n'importe où selon le chemin parcouru.
+
+Une marque cliquable est universellement comprise comme un **retour à
+l'accueil**, pas comme un bouton « précédent ». C'est cette attente qui est
+désormais respectée. La destination dépend du rôle, puisqu'il n'existe pas
+d'accueil commun : un formateur n'a rien à faire sur `/etudiant`, et
+inversement. La confirmation pendant la projection du QR est conservée.
+
+---
+
 ## Prochaine étape suggérée
 
 Le prototype couvre désormais l'ensemble de la chaîne. Les compléments

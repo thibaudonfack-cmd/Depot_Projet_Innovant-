@@ -38,6 +38,48 @@ function genererClePubliquePem() {
   return publicKey;
 }
 
+/**
+ * Paire ECDSA generee via WebCrypto, comme le fait le navigateur.
+ * generateKeyPairSync + createSign produiraient des signatures DER, que le
+ * backend rejette : il attend le format brut r||s (ieee-p1363) de WebCrypto.
+ * Des tests ecrits ainsi valideraient un format que le vrai client n'envoie
+ * jamais.
+ */
+async function genererPaireWebCrypto() {
+  const paire = await crypto.webcrypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']
+  );
+  const spki = await crypto.webcrypto.subtle.exportKey('spki', paire.publicKey);
+  const pem = `-----BEGIN PUBLIC KEY-----\n${Buffer.from(spki).toString('base64').match(/.{1,64}/g).join('\n')}\n-----END PUBLIC KEY-----\n`;
+  return { paire, pem };
+}
+
+async function signerAvec(paire, texte) {
+  const signature = await crypto.webcrypto.subtle.sign(
+    { name: 'ECDSA', hash: 'SHA-256' }, paire.privateKey, new TextEncoder().encode(texte)
+  );
+  return Buffer.from(signature).toString('base64');
+}
+
+/** Demande un defi et retourne { id, valeur }. */
+async function demanderDefi(cookie) {
+  const reponse = await request(app)
+    .post('/api/enrolements/defi').set('Cookie', cookie);
+  expect(reponse.status).toBe(201);
+  return reponse.body.defi;
+}
+
+/** Enrolement complet : defi, generation, signature, envoi. */
+async function enrolerCorrectement(cookie, infoAppareil = 'Test Suite') {
+  const defi = await demanderDefi(cookie);
+  const { paire, pem } = await genererPaireWebCrypto();
+  const signature = await signerAvec(paire, defi.valeur);
+  const reponse = await request(app)
+    .post('/api/enrolements').set('Cookie', cookie)
+    .send({ public_key: pem, device_info: infoAppareil, defi_id: defi.id, signature_defi: signature });
+  return { reponse, paire, pem, defi };
+}
+
 beforeAll(async () => {
   const { cookie, utilisateur } = await connecter('amara');
   cookieAmara = cookie;
@@ -58,12 +100,8 @@ afterAll(async () => {
 
 describe('POST /api/enrolements -- enrolement cryptographique (RF-07/RF-09)', () => {
   test('premier enrolement pour un etudiant : accepte (201), aucun appareil precedent', async () => {
-    const clePublique = genererClePubliquePem();
-
-    const response = await request(app)
-      .post('/api/enrolements')
-      .set('Cookie', cookieAmara)
-      .send({ public_key: clePublique, device_info: 'Test Suite - Appareil 1' });
+    const { reponse: response, pem: clePublique } =
+      await enrolerCorrectement(cookieAmara, 'Test Suite - Appareil 1');
 
     expect(response.status).toBe(201);
     expect(response.body.status).toBe('ok');
@@ -81,12 +119,8 @@ describe('POST /api/enrolements -- enrolement cryptographique (RF-07/RF-09)', ()
   });
 
   test('RF-09 : un second enrolement pour le MEME etudiant revoque le premier et active le second', async () => {
-    const deuxiemeClePublique = genererClePubliquePem();
-
-    const response = await request(app)
-      .post('/api/enrolements')
-      .set('Cookie', cookieAmara)
-      .send({ public_key: deuxiemeClePublique, device_info: 'Test Suite - Appareil 2 (remplacement)' });
+    const { reponse: response } =
+      await enrolerCorrectement(cookieAmara, 'Test Suite - Appareil 2 (remplacement)');
 
     expect(response.status).toBe(201);
     expect(response.body.appareil_precedent_revoque).toBe(true);
@@ -110,12 +144,17 @@ describe('POST /api/enrolements -- enrolement cryptographique (RF-07/RF-09)', ()
     expect(revoques[0].date_revocation).not.toBeNull();
   });
 
-  test('public_key manquante : 400 explicite, avant toute ecriture', async () => {
-    const sansClePublique = await request(app)
-      .post('/api/enrolements')
-      .set('Cookie', cookieAmara)
-      .send({});
-    expect(sansClePublique.status).toBe(400);
+  test('champs obligatoires manquants : 400 explicite, avant toute ecriture', async () => {
+    const sansRien = await request(app)
+      .post('/api/enrolements').set('Cookie', cookieAmara).send({});
+    expect(sansRien.status).toBe(400);
+
+    // La cle publique seule ne suffit plus : sans defi signe, il n'y a
+    // aucune preuve que l'expediteur detient la cle privee associee.
+    const sansDefi = await request(app)
+      .post('/api/enrolements').set('Cookie', cookieAmara)
+      .send({ public_key: genererClePubliquePem() });
+    expect(sansDefi.status).toBe(400);
   });
 
   // --------------------------------------------------------------------
@@ -131,20 +170,28 @@ describe('POST /api/enrolements -- enrolement cryptographique (RF-07/RF-09)', ()
     expect(response.body.code).toBe('NON_AUTHENTIFIE');
   });
 
+  test('la demande de defi exige aussi une session (401)', async () => {
+    expect((await request(app).post('/api/enrolements/defi')).status).toBe(401);
+  });
+
   test("ETAPE 7c : un etudiant_id glisse dans le corps est IGNORE -- l'appareil est enrole pour l'utilisateur de la session", async () => {
     // Amara est authentifiee, mais tente d'enroler un appareil au nom de
     // Bilal. C'etait, jusqu'a l'Etape 7c, le contournement le plus direct de
     // toute la chaine : enroler SON appareil sous l'identite d'un autre
     // permettait ensuite de scanner legitimement a sa place.
     const AUTRE_ETUDIANT = '33333333-3333-3333-3333-333333333332';
-    const clePublique = genererClePubliquePem();
+    const defi = await demanderDefi(cookieAmara);
+    const { paire, pem } = await genererPaireWebCrypto();
+    const signature = await signerAvec(paire, defi.valeur);
 
     const response = await request(app)
       .post('/api/enrolements')
       .set('Cookie', cookieAmara)
       .send({
-        public_key: clePublique,
+        public_key: pem,
         device_info: 'Test Suite - tentative usurpation',
+        defi_id: defi.id,
+        signature_defi: signature,
         etudiant_id: AUTRE_ETUDIANT, // ignore
       });
 
@@ -168,5 +215,133 @@ describe('POST /api/enrolements -- enrolement cryptographique (RF-07/RF-09)', ()
 
     expect(response.status).toBe(403);
     expect(response.body.code).toBe('ROLE_INSUFFISANT');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Preuve de possession (challenge-response)
+// ---------------------------------------------------------------------------
+
+describe('Preuve de possession a l\'enrolement', () => {
+  test('le defi emis est aleatoire et jamais identique d\'une demande a l\'autre', async () => {
+    // Un defi predictible permettrait de preparer une signature a l'avance.
+    const a = await demanderDefi(cookieAmara);
+    const b = await demanderDefi(cookieAmara);
+    expect(a.valeur).not.toBe(b.valeur);
+    expect(a.valeur).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test('CAS CENTRAL : signer avec une AUTRE cle que celle transmise est refuse (401)', async () => {
+    // C'est precisement l'attaque que le mecanisme ferme : soumettre la cle
+    // publique d'un tiers (elle est publique et se recupere aisement) sans
+    // detenir la cle privee correspondante.
+    const defi = await demanderDefi(cookieAmara);
+    const { paire: paireA } = await genererPaireWebCrypto();
+    const { pem: pemB } = await genererPaireWebCrypto();
+    const signatureDeA = await signerAvec(paireA, defi.valeur);
+
+    const reponse = await request(app)
+      .post('/api/enrolements').set('Cookie', cookieAmara)
+      .send({ public_key: pemB, defi_id: defi.id, signature_defi: signatureDeA });
+
+    expect(reponse.status).toBe(401);
+    expect(reponse.body.code).toBe('PREUVE_POSSESSION_INVALIDE');
+  });
+
+  test('signer une AUTRE valeur que le defi est refuse (401)', async () => {
+    const defi = await demanderDefi(cookieAmara);
+    const { paire, pem } = await genererPaireWebCrypto();
+    const signature = await signerAvec(paire, 'une-valeur-qui-n-est-pas-le-defi');
+
+    const reponse = await request(app)
+      .post('/api/enrolements').set('Cookie', cookieAmara)
+      .send({ public_key: pem, defi_id: defi.id, signature_defi: signature });
+
+    expect(reponse.status).toBe(401);
+    expect(reponse.body.code).toBe('PREUVE_POSSESSION_INVALIDE');
+  });
+
+  test('REJEU : un defi deja consomme ne peut pas resservir (400)', async () => {
+    const defi = await demanderDefi(cookieAmara);
+    const { paire, pem } = await genererPaireWebCrypto();
+    const signature = await signerAvec(paire, defi.valeur);
+    const corps = { public_key: pem, defi_id: defi.id, signature_defi: signature };
+
+    const premier = await request(app)
+      .post('/api/enrolements').set('Cookie', cookieAmara).send(corps);
+    expect(premier.status).toBe(201);
+
+    // Rejouer EXACTEMENT le meme couple (defi, signature), comme le ferait
+    // un attaquant l'ayant intercepte.
+    const rejeu = await request(app)
+      .post('/api/enrolements').set('Cookie', cookieAmara).send(corps);
+    expect(rejeu.status).toBe(400);
+    expect(rejeu.body.code).toBe('DEFI_INVALIDE');
+  });
+
+  test('un defi expire est refuse (400)', async () => {
+    const defi = await demanderDefi(cookieAmara);
+    // Expiration forcee en base plutot que par une attente reelle de deux
+    // minutes : le comportement teste est celui du serveur, pas la patience
+    // de la suite de tests.
+    await pool.query(
+      'UPDATE defis_enrolement SET date_expiration = DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE id = ?',
+      [defi.id]
+    );
+
+    const { paire, pem } = await genererPaireWebCrypto();
+    const signature = await signerAvec(paire, defi.valeur);
+    const reponse = await request(app)
+      .post('/api/enrolements').set('Cookie', cookieAmara)
+      .send({ public_key: pem, defi_id: defi.id, signature_defi: signature });
+
+    expect(reponse.status).toBe(400);
+    expect(reponse.body.code).toBe('DEFI_INVALIDE');
+  });
+
+  test("le defi d'un AUTRE etudiant ne peut pas servir (400)", async () => {
+    const { cookie: cookieBilal } = await connecter('bilal');
+    const defiDeBilal = await demanderDefi(cookieBilal);
+    const { paire, pem } = await genererPaireWebCrypto();
+    const signature = await signerAvec(paire, defiDeBilal.valeur);
+
+    // Amara presente un defi emis pour Bilal, correctement signe.
+    const reponse = await request(app)
+      .post('/api/enrolements').set('Cookie', cookieAmara)
+      .send({ public_key: pem, defi_id: defiDeBilal.id, signature_defi: signature });
+
+    expect(reponse.status).toBe(400);
+    expect(reponse.body.code).toBe('DEFI_INVALIDE');
+  });
+
+  test('une cle publique illisible est signalee distinctement (400)', async () => {
+    const defi = await demanderDefi(cookieAmara);
+    const reponse = await request(app)
+      .post('/api/enrolements').set('Cookie', cookieAmara)
+      .send({ public_key: 'pas-un-pem', defi_id: defi.id, signature_defi: 'AAAA' });
+
+    expect(reponse.status).toBe(400);
+    expect(reponse.body.code).toBe('CLE_PUBLIQUE_INVALIDE');
+  });
+
+  test("un enrolement refuse ne cree AUCUN appareil (transaction annulee)", async () => {
+    const [avant] = await pool.query(
+      'SELECT COUNT(*) AS n FROM appareils_enroles WHERE etudiant_id = ?', [ETUDIANT_ENROLEMENT]
+    );
+
+    const defi = await demanderDefi(cookieAmara);
+    const { paire } = await genererPaireWebCrypto();
+    const { pem: autrePem } = await genererPaireWebCrypto();
+    await request(app)
+      .post('/api/enrolements').set('Cookie', cookieAmara)
+      .send({
+        public_key: autrePem, defi_id: defi.id,
+        signature_defi: await signerAvec(paire, defi.valeur),
+      });
+
+    const [apres] = await pool.query(
+      'SELECT COUNT(*) AS n FROM appareils_enroles WHERE etudiant_id = ?', [ETUDIANT_ENROLEMENT]
+    );
+    expect(apres[0].n).toBe(avant[0].n);
   });
 });
