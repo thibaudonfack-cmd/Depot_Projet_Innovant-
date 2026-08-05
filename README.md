@@ -85,7 +85,11 @@ distant en retard. Procedure complete et configuration des deux remotes :
 
 ## Etat du projet
 
-Etape 7b livree : interface de connexion, routage React et tableaux de bord
+Etape 7e livree : geofencing par HTML5 Geolocation, en SIGNALEMENT et non en
+blocage. Le prototype couvre desormais toute la chaine, de l ouverture de
+seance a la rectification des heures.
+
+Etape 7b : interface de connexion, routage React et tableaux de bord
 distincts etudiant/formateur. L'ancienne page de test unifiee a disparu.
 
 Etape 7a/7c : authentification par cookie de session (scrypt natif,

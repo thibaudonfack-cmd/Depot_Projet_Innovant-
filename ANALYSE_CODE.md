@@ -2912,10 +2912,197 @@ n'existe pas, et cliquer en dehors ne ferme pas un `<dialog>` nativement.
 
 ---
 
+# Comment ECDSA authentifie l'appareil
+
+*Sous-section destinée à la soutenance : elle explique le mécanisme
+cryptographique sans présupposer de bagage particulier.*
+
+## Le principe : deux clés, des rôles inverses
+
+La cryptographie asymétrique repose sur une paire de clés mathématiquement
+liées, aux rôles rigoureusement opposés :
+
+- la **clé privée** permet de *produire* une signature ;
+- la **clé publique** permet de *vérifier* une signature, et rien d'autre.
+
+Le point décisif est ceci : **connaître la clé publique ne permet pas de
+retrouver la clé privée**, ni de fabriquer une signature valide. La clé
+publique peut donc être stockée en base, transmise, sauvegardée, sans que cela
+n'affaiblisse quoi que ce soit. C'est précisément le contraire d'un mot de
+passe partagé, où celui qui vérifie détient forcément de quoi usurper.
+
+## Application au projet
+
+**À l'enrôlement**, le navigateur de l'étudiant génère une paire ECDSA sur la
+courbe P-256. La clé privée est créée avec `extractable: false` et rangée dans
+IndexedDB : elle ne quitte jamais le téléphone, et le moteur cryptographique du
+navigateur refuse catégoriquement de la restituer. Seule la clé publique est
+transmise au serveur, qui la conserve dans `appareils_enroles.cle_publique`.
+
+**Au scan**, l'appareil signe le jeton de séance reçu — le JWT complet, tel
+quel — avec sa clé privée. Le serveur charge alors la clé publique de
+l'appareil *actif* de cet étudiant et vérifie la signature contre le jeton
+reçu. Si la vérification réussit, une seule conclusion est possible : la
+requête a été produite par un appareil détenant la clé privée correspondante.
+
+**Deux paires de clés cohabitent, et il ne faut pas les confondre.** Le
+serveur signe les jetons de séance en RS256 avec *sa* clé privée, que le
+client pourrait vérifier ; l'appareil signe sa soumission en ECDSA avec *sa*
+clé privée, que le serveur vérifie. Les deux sens sont inverses, et c'est cette
+inversion qui ferme la boucle : chaque partie prouve à l'autre quelque chose
+que l'autre ne peut pas fabriquer seule. La première répond à « ce jeton
+vient-il bien de nous, et est-il frais ? », la seconde à « est-il présenté par
+l'appareil enrôlé de cet étudiant ? ».
+
+**Pourquoi la signature n'est pas rejouable** : elle porte sur le jeton
+complet, donc sur un `jti` unique et une fenêtre de vingt-cinq secondes.
+Capturée sur un scan légitime, elle ne validerait aucun autre jeton.
+
+**Pourquoi ECDSA plutôt que RSA côté appareil** : à sécurité équivalente, les
+clés sont bien plus courtes (256 bits contre 2048) et les opérations
+nettement plus rapides. Sur un téléphone d'entrée de gamme, la génération
+d'une paire RSA se compte en secondes ; ECDSA P-256 est quasi instantanée.
+
+---
+
+# Étape 7e — Géofencing
+
+## Ce que ce dispositif est, et ce qu'il n'est pas
+
+**Les coordonnées sont rapportées par le client.** Ce sont deux nombres dans
+un corps JSON, et `navigator.geolocation` se falsifie depuis les outils de
+développement de n'importe quel navigateur en une dizaine de secondes, sans
+compétence particulière ni outil externe.
+
+Le géofencing **n'est donc pas un contrôle de sécurité**. C'est un dispositif
+de **dissuasion et de traçabilité**. Le formuler autrement devant un jury
+serait attaquable en trois secondes.
+
+Sa valeur réelle tient en trois points : il élève la barre pour la fraude
+opportuniste ; il transforme une fraude passive en **acte délibéré**, puisqu'il
+faut falsifier activement un capteur ; et il laisse une trace exploitable a
+posteriori. Comme pour le verrouillage d'appareil, l'effet est de déplacer le
+problème du terrain technique, où il est invisible, vers le terrain
+disciplinaire, où il se traite.
+
+## Une correction au cahier des charges : `DECIMAL(10,8)`
+
+Le type demandé pour les deux coordonnées était `DECIMAL(10,8)`. Il convient
+pour la **latitude** (maximum 90, donc deux chiffres avant la virgule) mais
+**déborde pour la longitude**, qui va jusqu'à 180 et en exige trois. Une
+longitude de 180,x serait rejetée ou tronquée.
+
+Le défaut serait passé inaperçu en Belgique, où la longitude vaut environ
+4,87. Il se manifesterait ailleurs, sans message clair. Les colonnes sont donc
+volontairement dissymétriques : `DECIMAL(10,8)` pour la latitude,
+`DECIMAL(11,8)` pour la longitude.
+
+Huit décimales représentent environ un millimètre, très au-delà de la
+précision réelle d'un GPS. Sans coût notable, et cela évite d'avoir à
+justifier un arrondi.
+
+## Trois états, jamais deux
+
+`position_coherente` peut valoir **vrai**, **faux** ou **null**. Ce troisième
+état n'est pas une commodité : il distingue « nous avons mesuré, la position
+ne colle pas » de « nous n'avons pas pu conclure ». Trois situations mènent à
+`null` — la séance n'a pas de référence, l'étudiant n'a pas partagé sa
+position, ou la précision annoncée est trop mauvaise.
+
+Les confondre serait injuste et contre-productif : signaler « position
+incertaine » à un étudiant dont le GPS n'a simplement pas fonctionné
+décrédibiliserait l'indicateur, et le formateur cesserait rapidement d'y prêter
+attention.
+
+## La règle de décision déduit l'incertitude avant de juger
+
+Le champ `coords.accuracy`, que la plupart des implémentations ignorent, donne
+un rayon d'incertitude en mètres à 95 % de confiance. Il est conservé en base
+et **soustrait de la distance** avant comparaison au rayon de tolérance.
+
+Une position n'est donc déclarée incohérente que si elle l'est **même en
+accordant à l'appareil tout le bénéfice de son incertitude**. Comparer la
+distance brute au rayon signalerait à tort des étudiants réellement présents
+dont le téléphone capte mal — exactement la population que ce dispositif ne
+doit pas pénaliser. Deux tests opposés l'établissent : 140 m avec 60 m
+d'incertitude sont acceptés, les mêmes 140 m avec 5 m d'incertitude sont
+rejetés.
+
+Au-delà de 250 m d'incertitude, aucune conclusion n'est tirée. En intérieur,
+le GPS ne fixe souvent pas du tout et le téléphone bascule sur le Wi-Fi (10 à
+40 m en zone urbaine cartographiée) ou, bien pire, sur la triangulation
+cellulaire (plusieurs centaines de mètres à plusieurs kilomètres). Juger une
+position annoncée à 500 m près reviendrait à tirer à pile ou face.
+
+La tolérance par défaut est de **100 m**, et elle est stockée *par séance*
+plutôt que figée dans le code : une salle de sport et un local de 20 m² n'ont
+pas les mêmes besoins, et une valeur historisée permet de relire un relevé
+ancien avec les règles qui s'appliquaient alors.
+
+À noter honnêtement : à cette précision, **le géofencing prouve « sur le
+campus », pas « dans le local »**. Il ne distingue pas un étudiant assis en
+classe d'un autre resté dans le couloir ou sur le parking. C'est une
+revendication nettement plus faible que ce que RF-13 laisse entendre.
+
+## Rien n'est bloquant, à aucun niveau
+
+Le formateur qui refuse de partager sa position ouvre sa séance normalement ;
+elle fonctionne simplement sans référence, et le client en est informé par
+`geofencing_actif` afin de ne pas laisser croire à une protection inexistante.
+
+L'étudiant qui refuse valide sa présence normalement, et le message de
+confirmation le dit explicitement pour qu'il ne croie pas sa présence
+compromise.
+
+Une panne du calcul géographique est interceptée et n'empêche jamais
+l'enregistrement : le géofencing est un indicateur secondaire, il ne doit
+jamais faire échouer l'opération principale.
+
+L'asymétrie des coûts justifie ce choix : un étudiant présent marqué absent
+subit un préjudice administratif et académique réel, alors qu'une fraude qui
+passe reste rattrapable autrement.
+
+## Détails d'interface
+
+**La raison de la demande est donnée avant que le navigateur ne l'affiche.**
+Une demande de permission qui surgit sans contexte est massivement refusée, et
+une fois refusée elle est pénible à réactiver — l'utilisateur doit aller la
+chercher dans les paramètres du site. Une phrase d'explication coûte peu et
+change le taux d'acceptation.
+
+**La position est demandée au moment de l'action**, pas au chargement de la
+page. Côté formateur, la référence doit être celle de la salle, pas celle d'où
+il consultait son tableau de bord dix minutes plus tôt. `maximumAge: 0`
+interdit d'ailleurs toute position mise en cache, qui pourrait dater du trajet.
+
+**Signature et position sont demandées en parallèle** côté étudiant. La
+géolocalisation peut prendre plusieurs secondes ; les enchaîner doublerait
+l'attente juste après un scan, au moment précis où l'étudiant regarde son
+écran.
+
+**L'état `null` n'affiche aucun symbole** dans le tableau du formateur.
+Marquer chaque étudiant sans position mesurable saturerait la vue de signes
+sans information et diluerait le seul cas qui mérite l'attention. Une légende
+n'apparaît que si au moins une position incertaine est présente, et rappelle
+que ce n'est **pas une preuve d'absence**.
+
+## Vérifications
+
+**92 tests backend** sur 9 suites, dont 14 pour le géofencing. La formule de
+Haversine est validée contre une **distance connue extérieure** (Paris-Londres,
+environ 343 km) et non seulement contre elle-même : une formule erronée
+resterait cohérente avec ses propres résultats et passerait tous les tests
+internes. **20 tests frontend**, lint et build sans erreur.
+
+---
+
 ## Prochaine étape suggérée
 
-**Étape 7e** (géofencing, en signalement et non en blocage), puis
-l'implémentation des écritures restantes du suivi du temps : création automatique d'une
+Le prototype couvre désormais l'ensemble de la chaîne. Les compléments
+identifiés et non traités, par ordre de valeur : la **preuve de possession à
+l'enrôlement** (défi-réponse signé, qui fermerait le dernier angle mort de
+l'usurpation d'identité), la **limitation des tentatives de connexion**, et
+les écritures restantes du suivi du temps : création automatique d'une
 présence au scan, clôture de séance renseignant les heures de départ,
 modification manuelle par le formateur avec écriture dans le journal d'audit
 (les deux opérations dans une même transaction, sans quoi une panne

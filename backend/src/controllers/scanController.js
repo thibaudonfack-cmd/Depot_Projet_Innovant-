@@ -69,6 +69,7 @@ const {
   verifierSignatureAppareil,
   SignatureAppareilInvalideError,
 } = require('../services/deviceSignatureService');
+const { evaluerPosition } = require('../services/geofencingService');
 
 /**
  * POST /api/scans
@@ -97,7 +98,11 @@ const {
  * sans la session non plus.
  */
 async function scannerJeton(req, res) {
-  const { jeton, signature_appareil: signatureAppareil } = req.body || {};
+  const {
+    jeton,
+    signature_appareil: signatureAppareil,
+    latitude, longitude, precision_m: precisionBrute,
+  } = req.body || {};
 
   // Identite issue de la SESSION, jamais du client (cf. en-tete de fonction).
   const etudiantId = req.utilisateur.etudiant_id;
@@ -235,6 +240,42 @@ async function scannerJeton(req, res) {
     });
   }
 
+  // --- Geofencing (RF-13). VOLONTAIREMENT NON BLOQUANT. ---
+  //
+  // Le resultat est consigne, jamais oppose a l'etudiant. L'asymetrie des
+  // couts le justifie : un etudiant present marque absent subit un prejudice
+  // administratif et academique reel, alors qu'une fraude qui passe reste
+  // rattrapable par d'autres moyens. Et la position venant du client, la
+  // bloquer donnerait une fausse impression de rigueur tout en penalisant
+  // surtout les etudiants dont le telephone capte mal.
+  let geo = { coherente: null, distanceM: null, motif: 'AUCUNE_REFERENCE' };
+  try {
+    const [seances] = await pool.query(
+      `SELECT latitude_reference, longitude_reference, rayon_tolerance_m
+       FROM seances WHERE id = ?`,
+      [sessionId]
+    );
+    const seance = seances[0];
+    if (seance && seance.latitude_reference !== null) {
+      geo = evaluerPosition({
+        reference: {
+          latitude: Number(seance.latitude_reference),
+          longitude: Number(seance.longitude_reference),
+        },
+        scan: {
+          latitude: Number(latitude),
+          longitude: Number(longitude),
+          precisionM: Number(precisionBrute),
+        },
+        rayonToleranceM: seance.rayon_tolerance_m,
+      });
+    }
+  } catch (error) {
+    // Une panne du calcul geographique ne doit JAMAIS empecher un etudiant
+    // de valider sa presence : le geofencing est un indicateur secondaire.
+    console.error('[scanController] Erreur lors de l\'evaluation de position :', error.message);
+  }
+
   const scanId = crypto.randomUUID();
   const presenceId = crypto.randomUUID();
 
@@ -261,9 +302,21 @@ async function scannerJeton(req, res) {
     // client : c'est l'horloge du serveur qui fait foi pour tout ce qui
     // servira a justifier des quotas.
     await connexion.query(
-      `INSERT INTO presences (id, seance_id, etudiant_id, scan_arrivee_id, heure_arrivee, source)
-       VALUES (?, ?, ?, ?, NOW(), 'scan')`,
-      [presenceId, sessionId, etudiantId, scanId]
+      `INSERT INTO presences
+         (id, seance_id, etudiant_id, scan_arrivee_id, heure_arrivee, source,
+          latitude_scan, longitude_scan, precision_m, distance_m, position_coherente)
+       VALUES (?, ?, ?, ?, NOW(), 'scan', ?, ?, ?, ?, ?)`,
+      [
+        presenceId, sessionId, etudiantId, scanId,
+        Number.isFinite(Number(latitude)) ? Number(latitude) : null,
+        Number.isFinite(Number(longitude)) ? Number(longitude) : null,
+        Number.isFinite(Number(precisionBrute)) ? Math.round(Number(precisionBrute)) : null,
+        geo.distanceM,
+        // null reste null : indeterminable n'est PAS la meme chose que
+        // "hors zone", et les confondre reviendrait a signaler des etudiants
+        // dont le GPS n'a simplement pas fonctionne.
+        geo.coherente === null ? null : (geo.coherente ? 1 : 0),
+      ]
     );
 
     await connexion.commit();
@@ -275,6 +328,7 @@ async function scannerJeton(req, res) {
       seance_id: sessionId,
       etudiant_id: etudiantId,
       resultat: 'valide',
+      position: { coherente: geo.coherente, distance_m: geo.distanceM, motif: geo.motif },
     });
   } catch (error) {
     await connexion.rollback();

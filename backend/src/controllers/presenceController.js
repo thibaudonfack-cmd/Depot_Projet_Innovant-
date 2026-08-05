@@ -64,6 +64,7 @@ async function listerPresencesDeSeance(req, res) {
     const [presences] = await pool.query(
       `SELECT p.id, p.etudiant_id, e.nom AS etudiant_nom,
               p.heure_arrivee, p.heure_depart, p.source,
+              p.position_coherente, p.distance_m, p.precision_m,
               TIMESTAMPDIFF(MINUTE, p.heure_arrivee, p.heure_depart) AS duree_minutes
        FROM presences p
        JOIN etudiants e ON e.id = p.etudiant_id

@@ -7,6 +7,7 @@
 
 const crypto = require('crypto');
 const pool = require('../config/db');
+const { coordonneeValide, RAYON_TOLERANCE_DEFAUT_M } = require('../services/geofencingService');
 
 /**
  * Normalise une heure recue du client vers le format DATETIME de MySQL.
@@ -54,6 +55,8 @@ async function creerSeance(req, res) {
     salle_id: salleId,
     heure_debut_prevue: heureDebutBrute,
     heure_fin_prevue: heureFinBrute,
+    latitude,
+    longitude,
   } = req.body || {};
 
   if (!ufId || !salleId) {
@@ -83,13 +86,28 @@ async function creerSeance(req, res) {
     });
   }
 
+  // Position de reference du geofencing. FACULTATIVE : si le formateur refuse
+  // le partage de position, ou si son appareil n'a pas de GPS, la seance est
+  // creee normalement -- simplement sans reference. Refuser la creation dans
+  // ce cas rendrait le systeme inutilisable pour un motif secondaire.
+  const latRef = Number(latitude);
+  const lonRef = Number(longitude);
+  const referenceUtilisable = coordonneeValide(latRef, lonRef);
+
   const seanceId = crypto.randomUUID();
 
   try {
     await pool.query(
-      `INSERT INTO seances (id, uf_id, salle_id, heure_debut_prevue, heure_fin_prevue)
-       VALUES (?, ?, ?, ?, ?)`,
-      [seanceId, ufId, salleId, heureDebut, heureFin]
+      `INSERT INTO seances
+         (id, uf_id, salle_id, heure_debut_prevue, heure_fin_prevue,
+          latitude_reference, longitude_reference, rayon_tolerance_m)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        seanceId, ufId, salleId, heureDebut, heureFin,
+        referenceUtilisable ? latRef : null,
+        referenceUtilisable ? lonRef : null,
+        referenceUtilisable ? RAYON_TOLERANCE_DEFAUT_M : null,
+      ]
     );
 
     // Relecture plutot que reconstruction a la main de l'objet renvoye : les
@@ -98,12 +116,20 @@ async function creerSeance(req, res) {
     // diverger. Le client recoit ainsi exactement ce qui est en base.
     const [lignes] = await pool.query(
       `SELECT id, uf_id, salle_id, statut, date_ouverture,
-              heure_debut_prevue, heure_fin_prevue
+              heure_debut_prevue, heure_fin_prevue,
+              latitude_reference, longitude_reference, rayon_tolerance_m
        FROM seances WHERE id = ?`,
       [seanceId]
     );
 
-    return res.status(201).json({ status: 'ok', seance: lignes[0] });
+    return res.status(201).json({
+      status: 'ok',
+      seance: lignes[0],
+      // Signale explicitement au client que la seance fonctionnera sans
+      // verification geographique, pour qu'il puisse en informer le formateur
+      // plutot que de le laisser croire a une protection qui n'existe pas.
+      geofencing_actif: referenceUtilisable,
+    });
   } catch (error) {
     // ER_NO_REFERENCED_ROW_2 hors transaction, ER_NO_REFERENCED_ROW dans une
     // transaction : MySQL rapporte la meme violation de cle etrangere sous

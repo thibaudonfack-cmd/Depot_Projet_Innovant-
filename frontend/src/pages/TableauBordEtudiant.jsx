@@ -14,6 +14,7 @@ import {
 import { dateCourte, duree, heure } from '../components/format';
 import { appelerApi } from '../services/api';
 import { useRessource } from '../services/useRessource';
+import { obtenirPosition } from '../services/geolocalisation';
 import {
   generateAndStoreKeyPair, exportPublicKey, possedeDejaUneCle,
   signData, memoriserIdAppareil, lireIdAppareil,
@@ -109,8 +110,10 @@ function CarteAppareil({ etat, appareilActif, onEnrole }) {
         <div className="min-w-0">
           <h2 className="text-sm font-semibold text-sable-900">Votre appareil</h2>
           <p className="mt-1 text-sm leading-relaxed text-sable-600">
-            Une clé unique est créée sur ce téléphone et ne le quitte jamais.
-            Elle sert à prouver que c&apos;est bien vous qui scannez.
+            Une paire de clés cryptographiques est générée. La clé secrète ne
+            quitte jamais ce téléphone et sert à signer numériquement vos
+            présences, prouvant mathématiquement que l&apos;action vient de cet
+            appareil.
           </p>
         </div>
         {etat && etat !== 'erreur' && (
@@ -399,12 +402,31 @@ function TableauBordEtudiant() {
     setScanEnCours(true);
     setResultatScan(null);
     try {
-      const signature = await signData(jeton);
+      // Signature et position demandees EN PARALLELE : la geolocalisation peut
+      // prendre plusieurs secondes, les enchainer doublerait inutilement
+      // l'attente juste apres un scan, moment ou l'etudiant regarde son ecran.
+      const [signature, geo] = await Promise.all([signData(jeton), obtenirPosition()]);
+
       await appelerApi('/api/scans', {
         methode: 'POST',
-        corps: { jeton, signature_appareil: signature },
+        corps: {
+          jeton,
+          signature_appareil: signature,
+          latitude: geo.position?.latitude,
+          longitude: geo.position?.longitude,
+          precision_m: geo.position?.precisionM,
+        },
       });
-      setResultatScan({ ton: 'succes', texte: 'Votre présence a bien été enregistrée.' });
+
+      // Un refus de position ne remet PAS en cause la validation : le message
+      // le dit explicitement, pour que l'etudiant ne croie pas sa presence
+      // compromise.
+      setResultatScan({
+        ton: 'succes',
+        texte: geo.position
+          ? 'Votre présence a bien été enregistrée.'
+          : 'Votre présence a bien été enregistrée. La position n\'a pas pu être obtenue, ce qui ne remet pas en cause sa validité.',
+      });
     } catch (echec) {
       setResultatScan({ ton: 'erreur', texte: echec.message });
       // Un rejet pour appareil revoque signifie que l'etat local est perime :
@@ -434,6 +456,11 @@ function TableauBordEtudiant() {
           <p className="mt-1 text-sm leading-relaxed text-sable-600">
             Scannez le QR code affiché par votre formateur. Il change
             régulièrement, visez celui qui est à l&apos;écran.
+          </p>
+          <p className="mt-2 text-xs leading-relaxed text-sable-600">
+            Votre position sera demandée au moment du scan, afin de confirmer
+            que vous êtes bien dans la salle. Vous pouvez refuser : votre
+            présence sera enregistrée quand même.
           </p>
 
           <div className="mt-5">

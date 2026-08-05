@@ -15,6 +15,7 @@ import {
 } from '../components/ui';
 import { dateCourte } from '../components/format';
 import { appelerApi } from '../services/api';
+import { obtenirPosition } from '../services/geolocalisation';
 
 /** Date du jour au format AAAA-MM-JJ, en composantes LOCALES.
  *  toISOString() convertirait en UTC et renverrait la veille en soiree pour
@@ -41,6 +42,7 @@ function FormulaireSeance({ unitesFormation, salles, onCreee }) {
   const [heureFin, setHeureFin] = useState('12:00');
   const [erreur, setErreur] = useState('');
   const [envoiEnCours, setEnvoiEnCours] = useState(false);
+  const [avertissementPosition, setAvertissementPosition] = useState('');
 
   // Les valeurs par defaut sont posees APRES chargement des listes : les
   // figer a l'initialisation donnerait une chaine vide, et le formulaire
@@ -60,6 +62,14 @@ function FormulaireSeance({ unitesFormation, salles, onCreee }) {
     setErreur('');
     setEnvoiEnCours(true);
     try {
+      // La position sert de reference au geofencing. Demandee ICI et non au
+      // chargement de la page : le navigateur n'affiche la demande de
+      // permission qu'a la suite d'un geste explicite, et surtout la position
+      // doit etre celle de la SALLE, pas celle d'ou le formateur consultait
+      // son tableau de bord dix minutes plus tot.
+      const { position, motif } = await obtenirPosition();
+      if (!position) setAvertissementPosition(motif);
+
       const reponse = await appelerApi('/api/seances', {
         methode: 'POST',
         corps: {
@@ -67,9 +77,11 @@ function FormulaireSeance({ unitesFormation, salles, onCreee }) {
           salle_id: salleId,
           heure_debut_prevue: versInstantIso(date, heureDebut),
           heure_fin_prevue: versInstantIso(date, heureFin),
+          latitude: position?.latitude,
+          longitude: position?.longitude,
         },
       });
-      onCreee(reponse.seance);
+      onCreee(reponse.seance, reponse.geofencing_actif);
     } catch (echec) {
       setErreur(echec.message || "La séance n'a pas pu être ouverte.");
     } finally {
@@ -90,6 +102,25 @@ function FormulaireSeance({ unitesFormation, salles, onCreee }) {
 
       <Champ id="date" libelle="Date" type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
 
+      {/* La raison de la demande est donnee AVANT que le navigateur ne
+          l'affiche. Une demande de permission qui surgit sans contexte est
+          massivement refusee, et une fois refusee elle est penible a
+          reactiver. Expliquer d'abord coute une phrase et change tout. */}
+      <div className="rounded-xl border border-sable-300 bg-sable-100 p-4">
+        <div className="flex gap-3">
+          <svg viewBox="0 0 24 24" aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-sable-600"
+               fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 21s7-5.5 7-11a7 7 0 1 0-14 0c0 5.5 7 11 7 11z" /><circle cx="12" cy="10" r="2.5" />
+          </svg>
+          <p className="text-xs leading-relaxed text-sable-700">
+            À la création, votre navigateur demandera l&apos;accès à votre position.
+            Elle sert de point de référence pour situer les scans de vos étudiants.
+            Si vous refusez, la séance fonctionnera normalement, simplement sans
+            cette vérification.
+          </p>
+        </div>
+      </div>
+
       <div className="grid gap-5 sm:grid-cols-2">
         <Champ id="heure-debut" libelle="Début prévu" type="time" value={heureDebut}
                onChange={(e) => setHeureDebut(e.target.value)} required />
@@ -100,6 +131,11 @@ function FormulaireSeance({ unitesFormation, salles, onCreee }) {
       <div aria-live="polite" className="space-y-3">
         {bornesIncoherentes && <Message ton="erreur">La fin doit être postérieure au début.</Message>}
         {erreur && <Message ton="erreur">{erreur}</Message>}
+        {avertissementPosition && (
+          <Message ton="info">
+            Position non obtenue. La séance sera créée sans référence géographique.
+          </Message>
+        )}
       </div>
 
       <Bouton type="submit" chargement={envoiEnCours} enfantsChargement="Ouverture en cours"
@@ -140,8 +176,8 @@ function TableauBordFormateur() {
     chargerSeances();
   }, [chargerSeances]);
 
-  function handleCreee(seance) {
-    setSeanceProjetee(seance);
+  function handleCreee(seance, geofencingActif) {
+    setSeanceProjetee({ ...seance, geofencing_actif: geofencingActif });
     chargerSeances();
   }
 
@@ -165,7 +201,12 @@ function TableauBordFormateur() {
                   Projetez ce QR code pour que vos étudiants valident leur présence.
                 </p>
               </div>
-              <Badge ton="actif">Ouverte</Badge>
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
+                <Badge ton="actif">Ouverte</Badge>
+                <Badge ton={seanceProjetee.geofencing_actif ? 'info' : 'neutre'}>
+                  {seanceProjetee.geofencing_actif ? 'Position de référence enregistrée' : 'Sans référence de position'}
+                </Badge>
+              </div>
             </div>
 
             <div className="mt-6">

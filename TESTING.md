@@ -2240,6 +2240,135 @@ clavier (section 9).
 
 ---
 
+# Étape 7e — Géofencing
+
+**Migration obligatoire** (nouvelles colonnes de position) :
+```bash
+git pull origin dev && docker compose down -v && docker compose up -d --build
+```
+
+## 1. Ouverture de séance avec position
+
+Se connecter en formateur. Attendu : sous le champ Date, un encadré explique
+que la position sera demandée et à quoi elle sert, **avant** que le navigateur
+n'affiche sa propre demande.
+
+Créer la séance et **autoriser** la position. Attendu : un badge
+« Position de référence enregistrée » à côté de « Ouverte ».
+
+Vérification en base :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT latitude_reference, longitude_reference, rayon_tolerance_m
+      FROM db_logs.seances ORDER BY date_ouverture DESC LIMIT 1\G"
+```
+
+**Cas du refus** : bloquer la position dans les paramètres du site, recharger,
+créer une séance. Attendu : elle se crée normalement, avec le badge
+« Sans référence de position ». Aucun blocage.
+
+## 2. Scan avec position
+
+Côté étudiant, la carte de scan annonce que la position sera demandée et que
+le refus est possible. Scanner en autorisant la position.
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT latitude_scan, longitude_scan, precision_m, distance_m, position_coherente
+      FROM db_logs.presences ORDER BY heure_arrivee DESC LIMIT 1\G"
+```
+Attendu : coordonnées renseignées, `distance_m` faible (formateur et étudiant
+sur la même machine), `position_coherente = 1`.
+
+**Refus de position** : la présence doit être enregistrée quand même, le
+message de confirmation précisant que la position n'a pas pu être obtenue
+« ce qui ne remet pas en cause sa validité ». En base, `position_coherente`
+doit valoir **NULL** et non 0.
+
+## 3. Simuler un étudiant éloigné
+
+Chrome et Edge permettent de falsifier la position, ce qui est **exactement**
+la démonstration de la limite du dispositif à montrer au jury.
+
+Outils de développement → menu à trois points → *More tools* → **Sensors** →
+*Location* → *Other…* et saisir des coordonnées lointaines (par exemple
+latitude `50.8503`, longitude `4.3517`, soit Bruxelles).
+
+Scanner à nouveau depuis un autre compte étudiant. Attendu :
+- **la présence est validée** (le géofencing ne bloque jamais) ;
+- côté formateur, un badge orange **« Position incertaine »** à côté du nom ;
+- au survol du badge, la distance mesurée s'affiche ;
+- une légende sous le tableau rappelle que ce n'est pas une preuve d'absence.
+
+Ce test vaut double : il vérifie le fonctionnement **et** démontre que la
+position est falsifiable, ce qui doit être assumé et non caché.
+
+## 4. Tester avec un vrai smartphone sur le réseau local
+
+Les trois fonctionnalités clés du prototype (WebCrypto, caméra,
+géolocalisation) exigent un **contexte sécurisé**. Sur téléphone, cela demande
+quelques précautions.
+
+**Étape 1 — relever l'adresse locale du PC**
+```powershell
+ipconfig
+```
+Repérer l'adresse IPv4 de la carte Wi-Fi, du type `192.168.1.42`.
+
+**Étape 2 — connecter le téléphone au même réseau Wi-Fi** que le PC. Un
+téléphone en 4G ne verra pas la machine.
+
+**Étape 3 — ouvrir `https://192.168.1.42` sur le téléphone**, en respectant
+deux points :
+- **`https://` et non `http://`** : sans TLS, WebCrypto, la caméra et la
+  géolocalisation sont toutes trois refusées ;
+- ne pas utiliser `localhost`, qui désigne le téléphone lui-même.
+
+**Étape 4 — accepter l'avertissement de sécurité.** C'est le point qui bloque
+la plupart des tentatives. Caddy émet un certificat via sa propre autorité,
+inconnue du téléphone, et pour l'adresse `localhost` et non pour cette IP. Le
+navigateur affichera donc un avertissement.
+
+- **Chrome Android** : *Paramètres avancés* → *Continuer vers le site
+  (dangereux)*.
+- **Safari iOS** : *Afficher les détails* → *Visiter ce site web* →
+  *Visiter*.
+
+**Tant que l'avertissement n'est pas accepté, la page est servie mais les API
+sensibles restent bloquées** : la caméra ne démarrera pas et l'enrôlement
+échouera, sans message explicite. C'est la cause la plus fréquente d'un test
+mobile qui « ne marche pas ».
+
+**Si Safari iOS refuse malgré tout** l'accès à la caméra : certaines versions
+refusent définitivement `getUserMedia` sur un certificat non approuvé. Deux
+options alors, hors périmètre de ce prototype : exporter l'autorité de Caddy
+et l'installer comme profil de confiance sur le téléphone, ou exposer
+l'application derrière un vrai certificat via un tunnel HTTPS public.
+
+**Rappel** : pour une simple validation fonctionnelle, le test sur un seul
+poste (QR affiché à l'écran, scanné par la webcam du même ordinateur) reste
+plus rapide et suffit à tout vérifier sauf l'ergonomie mobile réelle.
+
+## 5. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+Attendu : `92 passed` (9 suites) et `20 passed`.
+
+## Critère de succès global — Étape 7e
+
+Validée si et seulement si : la séance enregistre une position de référence et
+l'affiche par un badge, tout en se créant normalement en cas de refus
+(section 1) ; un scan enregistre coordonnées, précision et distance, et
+`position_coherente` vaut NULL et non 0 quand la position est refusée
+(section 2) ; une position falsifiée produit un badge orange **sans bloquer la
+validation**, avec la distance au survol (section 3) ; et les deux suites
+passent (section 5).
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

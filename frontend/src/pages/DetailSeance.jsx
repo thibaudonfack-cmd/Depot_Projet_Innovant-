@@ -24,6 +24,46 @@ function versChampLocal(instant) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/**
+ * Indicateur de coherence geographique.
+ *
+ * TROIS etats, comme en base. `null` (indeterminable) n'affiche RIEN plutot
+ * qu'un signe neutre : marquer chaque etudiant sans position mesurable
+ * saturerait le tableau de symboles sans information, et diluerait le seul
+ * cas qui merite l'attention du formateur.
+ */
+function IndicateurPosition({ presence }) {
+  if (presence.position_coherente === null || presence.position_coherente === undefined) {
+    return null;
+  }
+  if (presence.position_coherente) {
+    return (
+      <span title={`Position confirmée à ${presence.distance_m} m du point de référence`}
+            className="inline-flex items-center gap-1 text-xs text-emerald-800">
+        <svg viewBox="0 0 24 24" aria-hidden="true" className="size-3.5"
+             fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+        <span className="sr-only">Position confirmée</span>
+      </span>
+    );
+  }
+  return (
+    <span
+      title={`Scan effectué à environ ${presence.distance_m} m du point de référence`
+             + (presence.precision_m ? ` (précision annoncée : ${presence.precision_m} m)` : '')}
+      className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2 py-1 text-xs font-medium text-amber-900"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true" className="size-3.5"
+           fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+        <path d="M12 9v4M12 17h.01" />
+      </svg>
+      Position incertaine
+    </span>
+  );
+}
+
 /** Champ de motif, partage par les deux actions tracees. */
 function ChampMotif({ valeur, onChange, id = 'motif-action' }) {
   return (
@@ -240,7 +280,12 @@ function DetailSeance({ seanceId, onRetour }) {
               <tbody className="divide-y divide-sable-200">
                 {donnees.presences.map((p) => (
                   <tr key={p.id}>
-                    <td className="py-3 pr-3 font-medium text-sable-900">{p.etudiant_nom}</td>
+                    <td className="py-3 pr-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium text-sable-900">{p.etudiant_nom}</span>
+                        <IndicateurPosition presence={p} />
+                      </div>
+                    </td>
                     <td className="py-3 pr-3 text-sable-700">{heure(p.heure_arrivee)}</td>
                     <td className="py-3 pr-3 text-sable-700">{heure(p.heure_depart)}</td>
                     <td className="py-3 pr-3">
@@ -259,6 +304,15 @@ function DetailSeance({ seanceId, onRetour }) {
               </tbody>
             </table>
           </div>
+        )}
+        {donnees && donnees.presences.some((p) => p.position_coherente === 0) && (
+          <p className="mt-4 text-xs leading-relaxed text-sable-600">
+            <span className="font-medium">Position incertaine</span> signale un
+            scan effectué loin du point de référence de la séance. Ce n&apos;est
+            pas une preuve d&apos;absence : le GPS est imprécis en intérieur, et
+            la position est déclarée par l&apos;appareil. Survolez le badge pour
+            connaître la distance mesurée.
+          </p>
         )}
       </Carte>
 

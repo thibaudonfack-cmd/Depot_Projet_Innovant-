@@ -218,6 +218,25 @@ CREATE TABLE seances (
   -- de 4 h peut ne valider que 3 h 30 au titre du programme. Les confondre
   -- interdirait de justifier un ecart devant une inspection.
   quota_minutes      INT       NULL,
+  -- Position de reference du geofencing (RF-13), capturee sur l'appareil du
+  -- formateur au moment ou il ouvre la seance.
+  --
+  -- ATTENTION AU TYPE : DECIMAL(10,8) conviendrait pour la latitude
+  -- (max 90, donc 2 chiffres avant la virgule) mais DEBORDERAIT pour la
+  -- longitude, qui va jusqu'a 180 et en exige 3. Une longitude de 180.x
+  -- serait rejetee ou tronquee silencieusement. D'ou la dissymetrie
+  -- deliberee des deux colonnes ci-dessous.
+  --
+  -- 8 decimales representent environ 1 mm : tres au-dela de la precision
+  -- reelle d'un GPS (10 a 50 m en interieur), mais sans cout notable, et
+  -- cela evite d'avoir a justifier un arrondi.
+  latitude_reference  DECIMAL(10,8) NULL,
+  longitude_reference DECIMAL(11,8) NULL,
+  -- Rayon de tolerance retenu pour CETTE seance. Stocke plutot que fige dans
+  -- le code : une salle de sport et un local de 20 m2 n'appellent pas la meme
+  -- tolerance, et une valeur historisee permet de reinterpreter un releve
+  -- ancien avec les regles qui s'appliquaient alors.
+  rayon_tolerance_m   INT           NULL,
   date_cloture       DATETIME  NULL,
   statut          ENUM('ouverte', 'cloturee') NOT NULL DEFAULT 'ouverte',
   CONSTRAINT fk_seance_uf FOREIGN KEY (uf_id) REFERENCES uf(id),
@@ -312,6 +331,23 @@ CREATE TABLE presences (
   heure_depart    DATETIME  NULL,
   source          ENUM('scan', 'correction_formateur', 'rectification_validee')
                     NOT NULL DEFAULT 'scan',
+  -- Position rapportee par l'appareil de l'etudiant au moment du scan.
+  latitude_scan   DECIMAL(10,8) NULL,
+  longitude_scan  DECIMAL(11,8) NULL,
+  -- Rayon d'incertitude annonce par le navigateur (coords.accuracy), en
+  -- metres. Conserve car il conditionne la LECTURE de la distance : 40 m
+  -- d'ecart avec une incertitude de 10 m et les memes 40 m avec une
+  -- incertitude de 150 m ne disent pas du tout la meme chose.
+  precision_m     INT           NULL,
+  -- Distance calculee (Haversine) entre le scan et la reference de la seance.
+  distance_m      INT           NULL,
+  -- TROIS etats, et non deux : TRUE (dans le rayon), FALSE (hors du rayon de
+  -- facon certaine), NULL (indeterminable). NULL couvre l'absence de position
+  -- de reference, le refus de partager la position, et une precision trop
+  -- mauvaise pour conclure. Le distinguer de FALSE est essentiel : signaler
+  -- "position incertaine" a un etudiant dont le GPS n'a simplement pas
+  -- fonctionne serait injuste et decredibiliserait l'indicateur.
+  position_coherente TINYINT(1) NULL,
   CONSTRAINT fk_presence_seance FOREIGN KEY (seance_id) REFERENCES seances(id),
   CONSTRAINT fk_presence_etudiant FOREIGN KEY (etudiant_id) REFERENCES etudiants(id),
   CONSTRAINT fk_presence_scan FOREIGN KEY (scan_arrivee_id) REFERENCES scans(id),
