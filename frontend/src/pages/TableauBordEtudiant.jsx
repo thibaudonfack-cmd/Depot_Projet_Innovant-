@@ -14,6 +14,7 @@ import {
 import { dateCourte, duree, heure } from '../components/format';
 import { appelerApi } from '../services/api';
 import { useRessource } from '../services/useRessource';
+import { useSeanceTerminee } from '../services/useSeanceTerminee';
 import { obtenirPosition, messagePosition } from '../services/geolocalisation';
 import {
   generateAndStoreKeyPair, exportPublicKey, possedeDejaUneCle,
@@ -274,12 +275,24 @@ function ModaleSignalement({ presence, onFermer, onEnvoye }) {
 }
 
 function LigneHistorique({ presence, onSignaler }) {
+  // Bascule anticipee cote client, confirmee par le serveur au prochain
+  // rafraichissement (cf. useSeanceTerminee). Sans cela, une seance se
+  // terminant a 12h00 continuerait d'afficher "En cours" jusqu'au prochain
+  // appel reseau.
+  const terminee = useSeanceTerminee(presence.seance_terminee, presence.heure_fin_prevue);
+
   const dejaDemande = Boolean(presence.demande_statut);
   const libelle = {
     en_attente: 'Signalement en attente',
     acceptee: 'Signalement accepté',
     refusee: 'Signalement refusé',
   }[presence.demande_statut];
+
+  // Fin retenue pour l'affichage : le depart saisi s'il existe, sinon la fin
+  // prevue une fois la seance terminee. Meme regle que celle appliquee par le
+  // serveur, pour que les deux ne se contredisent jamais a l'ecran.
+  const finRetenue = presence.heure_depart ?? (terminee ? presence.heure_fin_prevue : null);
+  const minutes = presence.duree_validee_minutes ?? presence.duree_minutes;
 
   return (
     <li className="py-4 first:pt-0">
@@ -288,27 +301,45 @@ function LigneHistorique({ presence, onSignaler }) {
           <p className="truncate text-sm font-medium text-sable-900">{presence.uf_intitule}</p>
           <p className="mt-0.5 text-xs text-sable-600">
             {dateCourte(presence.heure_arrivee)} · {presence.salle_nom} ·{' '}
-            {heure(presence.heure_arrivee)} à {heure(presence.heure_depart)}
+            {heure(presence.heure_arrivee)} à {heure(finRetenue)}
           </p>
+          {terminee && !presence.heure_depart && (
+            // Le temps affiche est DEDUIT de l'heure de fin prevue, pas
+            // constate. Le taire laisserait croire a un pointage de sortie
+            // qui n'a jamais eu lieu.
+            <p className="mt-0.5 text-xs text-sable-500">
+              Départ non pointé : l&apos;heure de fin prévue a été retenue.
+            </p>
+          )}
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center gap-2">
-          <Badge ton={presence.heure_depart ? 'neutre' : 'actif'}>{duree(presence.duree_minutes)}</Badge>
+          <Badge ton={terminee ? 'neutre' : 'actif'}>
+            {terminee ? 'Terminée' : 'En cours'}
+          </Badge>
+
+          {terminee && minutes !== null && minutes !== undefined && (
+            <Badge ton="info">{duree(minutes)}</Badge>
+          )}
 
           {dejaDemande && (
             <Badge ton={presence.demande_statut === 'refusee' ? 'attention' : 'info'}>{libelle}</Badge>
           )}
 
-          {!dejaDemande && presence.rectification_ouverte && (
+          {!dejaDemande && terminee && presence.rectification_ouverte && (
             <Bouton variante="secondaire" onClick={() => onSignaler(presence)}
                     className="w-auto px-3 py-2 text-xs">
               Signaler une erreur
             </Bouton>
           )}
 
-          {!dejaDemande && !presence.rectification_ouverte && (
-            // Badge discret plutot qu'absence de bouton : sans explication,
-            // un etudiant conclurait a un defaut de l'application.
+          {/* Trois situations, trois messages distincts. Se contenter de
+              masquer le bouton laisserait l'etudiant sans explication, et il
+              conclurait a un defaut de l'application. */}
+          {!dejaDemande && !terminee && (
+            <Badge ton="neutre">Signalement à la fin de la séance</Badge>
+          )}
+          {!dejaDemande && terminee && !presence.rectification_ouverte && (
             <Badge ton="neutre">Délai de signalement expiré</Badge>
           )}
         </div>
@@ -362,8 +393,9 @@ function HistoriquePresences({ declencheur }) {
     <Carte>
       <h2 className="text-sm font-semibold text-sable-900">Mes présences</h2>
       <p className="mt-1 text-sm leading-relaxed text-sable-600">
-        Historique des séances auxquelles vous avez assisté. Vous disposez de
-        24 heures après la fin d&apos;une séance pour signaler une erreur.
+        Historique des séances auxquelles vous avez assisté. Une fois une
+        séance terminée, vous disposez de 24 heures pour signaler une erreur
+        sur vos heures.
       </p>
 
       <div aria-live="polite">

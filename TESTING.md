@@ -2461,6 +2461,106 @@ suites passent (section 8).
 
 ---
 
+# Cycle de vie de la séance et rapport administratif
+
+**Migration obligatoire** : `docker compose down -v && docker compose up -d --build`
+
+## 1. Une séance se termine toute seule
+
+Créer une séance dont la fin prévue est dans **deux minutes**. Attendu côté
+formateur : badge vert « En cours » et bouton « Réafficher le QR » disponible.
+
+Laisser la page ouverte et attendre l'échéance. Attendu **sans rechargement** :
+le badge passe à « Terminée » (gris) et le bouton de réaffichage disparaît.
+
+La bascule côté étudiant est anticipée localement mais confirmée par le
+serveur. Pour vérifier que la déduction vient bien de la base :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, statut, heure_fin_prevue, NOW() > heure_fin_prevue AS terminee
+      FROM db_logs.seances ORDER BY date_ouverture DESC LIMIT 3;"
+```
+Attendu : `statut` vaut toujours `ouverte` alors que `terminee` vaut `1`. Le
+statut est **déduit**, jamais mis à jour — un traitement périodique laisserait
+la valeur fausse entre deux passages.
+
+## 2. Temps de participation
+
+Sur `/etudiant`, une séance terminée affiche « Terminée », la durée retenue,
+et la mention « Départ non pointé : l'heure de fin prévue a été retenue »
+lorsque aucun départ n'a été saisi.
+
+Faire ensuite modifier l'heure de départ par le formateur (bouton
+**Modifier**). Attendu : la durée se recalcule et la mention disparaît, la
+valeur étant désormais constatée et non déduite.
+
+## 3. Le signalement n'est possible qu'après la fin
+
+Sur une séance **en cours** : badge « Signalement à la fin de la séance », pas
+de bouton.
+
+Sur une séance **terminée depuis moins de 24 h** : le bouton « Signaler une
+erreur » est disponible.
+
+Sur une séance **terminée depuis plus de 24 h** : badge « Délai de signalement
+expiré ».
+
+**Contrôle serveur** — le blocage ne doit pas dépendre du navigateur :
+```bash
+curl -k -b cookies.txt -s -X POST https://localhost/api/rectifications \
+  -H "Content-Type: application/json" \
+  -d '{"presence_id":"<ID_SUR_SEANCE_EN_COURS>","motif":"test"}'
+```
+Attendu : `403` avec `"code":"DELAI_EXPIRE"`, même en appelant l'API
+directement.
+
+## 4. Rapport administratif
+
+```bash
+curl -k -b form.txt -s https://localhost/api/seances/<SEANCE_ID>/rapport | python -m json.tool
+```
+
+Attendu dans `synthese` : `attendus` égal au nombre d'inscrits à l'UF (4 avec
+le jeu de démonstration), `presents`, `absents`, `minutes_validees_total`,
+`provisoire` et `demandes_en_attente`.
+
+**Point à vérifier en priorité** : les étudiants **absents** doivent figurer
+dans `etudiants`, avec `present: false`. Le rapport part des inscriptions et
+non des présences — lister les présences ne montrerait que ceux qui sont
+venus, alors que l'information administrative décisive est l'inverse.
+
+Vérifier aussi :
+- `depart_deduit: true` pour un étudiant dont le départ n'a pas été pointé ;
+- `provisoire: true` sur une séance encore en cours, `false` une fois
+  terminée ;
+- `demande_en_attente: true` après avoir soumis un signalement, et
+  `synthese.demandes_en_attente` incrémenté. Valider des crédits sur un temps
+  encore susceptible d'être corrigé exposerait à devoir revenir sur la
+  décision.
+
+Un étudiant appelant cette route doit recevoir `403`.
+
+## 5. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+Attendu : `112 passed` (10 suites) et `25 passed`.
+
+## Critère de succès global
+
+Validée si et seulement si : une séance bascule en « Terminée » sans
+rechargement et son QR devient indisponible, alors que la colonne `statut`
+n'a pas changé (section 1) ; la durée retenue s'affiche avec la mention du
+départ déduit, et se recalcule après correction (section 2) ; le signalement
+n'est possible qu'entre la fin de la séance et 24 h plus tard, y compris en
+appelant l'API directement (section 3) ; le rapport fait apparaître les
+absents et signale départs déduits, caractère provisoire et demandes en
+attente (section 4) ; et les deux suites passent (section 5).
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

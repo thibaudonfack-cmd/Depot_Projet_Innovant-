@@ -17,6 +17,38 @@ const pool = require('../config/db');
 const FENETRE_RECTIFICATION_HEURES = 24;
 
 /**
+ * Expression SQL determinant si une seance est terminee.
+ *
+ * Le statut est DEDUIT de l'horloge, il n'est pas stocke. Un champ mis a jour
+ * par un traitement periodique resterait faux entre deux passages, et une
+ * seance apparaitrait "en cours" des heures apres sa fin -- exactement le
+ * defaut constate. Deduire garantit que la reponse est juste a la
+ * milliseconde ou elle est calculee.
+ *
+ * Repli sur le statut stocke quand heure_fin_prevue est absente : les seances
+ * creees avant l'introduction des horaires prevus (colonnes nullables) n'ont
+ * pas de borne temporelle, et seule la cloture manuelle fait alors foi.
+ */
+const SQL_SEANCE_TERMINEE = `
+  CASE
+    WHEN s.heure_fin_prevue IS NOT NULL THEN (NOW() > s.heure_fin_prevue)
+    ELSE (s.statut = 'cloturee')
+  END`;
+
+/**
+ * Instant de fin retenu pour le calcul du temps de participation.
+ *
+ * Priorite a heure_depart quand elle existe : elle resulte soit d'une
+ * correction du formateur, soit d'une rectification acceptee, et fait donc
+ * autorite. A defaut, et seulement si la seance est terminee, on retient
+ * l'heure de fin PREVUE -- un etudiant present jusqu'au bout n'a aucune
+ * raison de voir son temps rester indefini parce que personne n'a saisi son
+ * depart.
+ */
+const SQL_FIN_RETENUE = `
+  COALESCE(p.heure_depart, CASE WHEN ${SQL_SEANCE_TERMINEE} THEN s.heure_fin_prevue END)`;
+
+/**
  * GET /api/seances
  * Route protegee, role formateur. Liste les seances avec le nombre de
  * presences enregistrees.
@@ -26,6 +58,7 @@ async function listerSeances(req, res) {
     const [lignes] = await pool.query(
       `SELECT s.id, s.statut, s.date_ouverture, s.heure_debut_prevue, s.heure_fin_prevue,
               u.intitule AS uf_intitule, sa.nom AS salle_nom,
+              ${SQL_SEANCE_TERMINEE} AS terminee,
               (SELECT COUNT(*) FROM presences p WHERE p.seance_id = s.id) AS nb_presences
        FROM seances s
        JOIN uf u ON u.id = s.uf_id
@@ -33,7 +66,11 @@ async function listerSeances(req, res) {
        ORDER BY s.date_ouverture DESC
        LIMIT 50`
     );
-    return res.status(200).json({ status: 'ok', seances: lignes });
+    // MySQL renvoie 0/1 pour un booleen ; on normalise ici plutot que de
+    // laisser chaque vue comparer une valeur numerique a un nom qui promet un
+    // booleen.
+    const seances = lignes.map((s) => ({ ...s, terminee: s.terminee === 1 }));
+    return res.status(200).json({ status: 'ok', seances });
   } catch (error) {
     console.error('[presenceController] Erreur GET /api/seances :', error.message);
     return res.status(500).json({ status: 'error', message: 'Erreur serveur.' });
@@ -50,7 +87,8 @@ async function listerPresencesDeSeance(req, res) {
   try {
     const [seances] = await pool.query(
       `SELECT s.id, s.statut, s.heure_debut_prevue, s.heure_fin_prevue,
-              u.intitule AS uf_intitule, sa.nom AS salle_nom
+              u.intitule AS uf_intitule, sa.nom AS salle_nom,
+              ${SQL_SEANCE_TERMINEE} AS terminee
        FROM seances s
        JOIN uf u ON u.id = s.uf_id
        JOIN salles sa ON sa.id = s.salle_id
@@ -65,15 +103,21 @@ async function listerPresencesDeSeance(req, res) {
       `SELECT p.id, p.etudiant_id, e.nom AS etudiant_nom,
               p.heure_arrivee, p.heure_depart, p.source,
               p.position_coherente, p.distance_m, p.precision_m,
-              TIMESTAMPDIFF(MINUTE, p.heure_arrivee, p.heure_depart) AS duree_minutes
+              TIMESTAMPDIFF(MINUTE, p.heure_arrivee, p.heure_depart) AS duree_minutes,
+              TIMESTAMPDIFF(MINUTE, p.heure_arrivee, ${SQL_FIN_RETENUE}) AS duree_validee_minutes
        FROM presences p
+       JOIN seances s ON s.id = p.seance_id
        JOIN etudiants e ON e.id = p.etudiant_id
        WHERE p.seance_id = ?
        ORDER BY e.nom`,
       [seanceId]
     );
 
-    return res.status(200).json({ status: 'ok', seance: seances[0], presences });
+    return res.status(200).json({
+      status: 'ok',
+      seance: { ...seances[0], terminee: seances[0].terminee === 1 },
+      presences,
+    });
   } catch (error) {
     console.error('[presenceController] Erreur GET presences :', error.message);
     return res.status(500).json({ status: 'error', message: 'Erreur serveur.' });
@@ -95,14 +139,21 @@ async function listerMesPresences(req, res) {
     const [lignes] = await pool.query(
       `SELECT p.id, p.seance_id, p.heure_arrivee, p.heure_depart, p.source,
               TIMESTAMPDIFF(MINUTE, p.heure_arrivee, p.heure_depart) AS duree_minutes,
+              TIMESTAMPDIFF(MINUTE, p.heure_arrivee, ${SQL_FIN_RETENUE}) AS duree_validee_minutes,
+              ${SQL_SEANCE_TERMINEE} AS seance_terminee,
               s.heure_debut_prevue, s.heure_fin_prevue, s.statut AS seance_statut,
               u.intitule AS uf_intitule, sa.nom AS salle_nom,
               -- Fenetre de rectification calculee PAR LA BASE, a partir de
               -- l'heure de fin PREVUE de la seance et de l'horloge serveur.
               -- Ne jamais laisser le client decider s'il est encore dans les
               -- temps : il lui suffirait de changer l'heure de sa machine.
+              -- La fenetre s'ouvre A LA FIN de la seance, pas des le scan.
+              -- Signaler une erreur sur des heures encore en train de se
+              -- constituer n'aurait aucun sens : l'etudiant est toujours en
+              -- cours, et son depart n'est pas encore connu.
               CASE
                 WHEN s.heure_fin_prevue IS NULL THEN 0
+                WHEN NOW() <= s.heure_fin_prevue THEN 0
                 WHEN NOW() <= DATE_ADD(s.heure_fin_prevue, INTERVAL ? HOUR) THEN 1
                 ELSE 0
               END AS rectification_ouverte,
@@ -125,6 +176,7 @@ async function listerMesPresences(req, res) {
     const presences = lignes.map((ligne) => ({
       ...ligne,
       rectification_ouverte: ligne.rectification_ouverte === 1,
+      seance_terminee: ligne.seance_terminee === 1,
     }));
 
     return res.status(200).json({ status: 'ok', presences });
@@ -139,4 +191,6 @@ module.exports = {
   listerPresencesDeSeance,
   listerMesPresences,
   FENETRE_RECTIFICATION_HEURES,
+  SQL_SEANCE_TERMINEE,
+  SQL_FIN_RETENUE,
 };

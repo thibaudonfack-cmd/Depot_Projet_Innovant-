@@ -3266,6 +3266,281 @@ inversement. La confirmation pendant la projection du QR est conservée.
 
 ---
 
+# Étude d'un cas réel de géofencing
+
+*Section rédigée à partir de valeurs réellement relevées en base lors d'un
+test. Elle explique la formule et, surtout, pourquoi elle est construite
+ainsi.*
+
+## Les valeurs relevées
+
+| Champ | Valeur | Signification |
+|---|---|---|
+| `distance_m` | **3** | Distance entre l'étudiant et le point de référence |
+| `precision_m` | **178** | Rayon d'incertitude annoncé par l'appareil |
+| `rayon_tolerance_m` | **100** | Tolérance retenue pour cette séance |
+| `position_coherente` | **1** | Verdict : position cohérente |
+
+À première lecture, ces chiffres paraissent contradictoires : l'incertitude
+(178 m) est presque deux fois supérieure à la tolérance (100 m), et pourtant
+la position est acceptée. C'est exactement le comportement recherché.
+
+## La formule
+
+L'algorithme ne compare pas la distance au rayon. Il compare :
+
+```
+distance_m − precision_m  >  rayon_tolerance_m   →  position incohérente
+```
+
+Appliqué au cas relevé :
+
+```
+3 − 178 = −175        et    −175 > 100  →  faux
+```
+
+La position est donc déclarée **cohérente**. Autrement dit : même en supposant
+que l'appareil se soit trompé de 178 m dans la direction la plus défavorable,
+il reste impossible d'affirmer que l'étudiant se trouvait hors de la zone.
+
+Le principe se formule simplement : **on ne déclare une position incohérente
+que si elle l'est encore après avoir accordé à l'appareil tout le bénéfice de
+son incertitude.** Le doute profite à l'étudiant, ce qui est le seul choix
+défendable quand la mesure elle-même est douteuse.
+
+## Pourquoi cette soustraction est vitale
+
+`precision_m: 178` n'a rien d'anormal : c'est la signature d'une
+**localisation par Wi-Fi**, et non par GPS.
+
+En intérieur, un téléphone ne reçoit généralement pas assez de satellites pour
+obtenir un point GNSS. Il bascule alors sur le positionnement Wi-Fi : il
+relève les réseaux visibles et les compare à une base cartographiée. La
+précision obtenue se situe typiquement entre 100 et 200 m en zone urbaine —
+et 178 m tombe précisément dans cette fourchette.
+
+Sans la soustraction, la comparaison aurait été `3 > 100`, soit... également
+« cohérent » dans ce cas particulier. Mais inversons légèrement les chiffres,
+en gardant la même incertitude : un étudiant réellement assis à côté du
+formateur, dont le téléphone rapporte une position décalée de 140 m — ce qui
+est parfaitement possible avec une incertitude annoncée de 178 m.
+
+| Méthode | Calcul | Verdict |
+|---|---|---|
+| Sans soustraction | `140 > 100` | **Incohérente** — étudiant signalé à tort |
+| Avec soustraction | `140 − 178 = −38 > 100` → faux | **Cohérente** — correct |
+
+C'est là que se joue l'utilisabilité du dispositif. Sans cette correction, la
+population signalée ne serait pas celle des fraudeurs, mais celle des
+**étudiants dont le téléphone capte mal** — c'est-à-dire, très exactement,
+ceux qui sont assis au fond d'une salle en béton. Le formateur verrait
+apparaître des avertissements sur des étudiants manifestement présents,
+cesserait rapidement d'y prêter attention, et l'indicateur perdrait toute
+valeur.
+
+Deux tests opposés verrouillent ce comportement : 140 m avec 60 m
+d'incertitude sont acceptés, les mêmes 140 m avec 5 m d'incertitude sont
+rejetés. Le second confirme que le premier tient bien à la marge, et non à un
+rayon trop généreux.
+
+## Le garde-fou complémentaire
+
+Au-delà de **250 m** d'incertitude, aucun verdict n'est rendu :
+`position_coherente` vaut `NULL`. Une position annoncée à un demi-kilomètre
+près ne permet ni de confirmer ni d'infirmer quoi que ce soit — la
+mentionner comme « cohérente » serait tout aussi trompeur que l'inverse. Le
+cas relevé (178 m) reste sous ce seuil, le verdict est donc rendu.
+
+---
+
+# L'attaque par rejeu et le verrou `date_consommation`
+
+## Ce qu'est une attaque par rejeu
+
+Une **attaque par rejeu** (*replay attack*) consiste à intercepter un message
+valide et à le renvoyer tel quel plus tard, pour en obtenir à nouveau l'effet.
+L'attaquant n'a rien à casser : il ne déchiffre rien, ne falsifie rien, ne
+devine aucun secret. Il se contente de **répéter** quelque chose qui a déjà
+fonctionné.
+
+C'est la faiblesse structurelle de toute preuve cryptographique statique. Une
+signature valide reste valide indéfiniment : si elle suffit à prouver quelque
+chose, alors quiconque en détient une copie peut prouver la même chose.
+
+Appliqué à l'enrôlement : sans protection, un attaquant qui intercepterait le
+couple (clé publique, signature) d'un enrôlement légitime pourrait le
+resoumettre pour enrôler un appareil, sans jamais avoir détenu la moindre clé
+privée.
+
+## Le défi comme jeton à usage unique
+
+La parade est de rendre chaque preuve **valable une seule fois**. C'est le
+rôle du défi : une valeur aléatoire de 32 octets, générée par le serveur,
+différente à chaque demande, et que le client doit signer.
+
+La signature ne prouve donc plus « je détiens une clé privée » dans l'absolu,
+mais « je détiens une clé privée **maintenant**, et je le prouve sur une
+valeur que vous venez tout juste de choisir ». C'est ce que l'on appelle une
+preuve de possession **instantanée** : elle est indissociable du moment où
+elle a été demandée.
+
+La colonne `date_consommation` matérialise ce verrou. Tant qu'elle vaut
+`NULL`, le défi est utilisable. Dès qu'il sert, elle est renseignée et le défi
+devient définitivement inerte. Rejouer exactement le même couple (défi,
+signature) échoue alors — non parce que la signature serait devenue invalide,
+elle l'est toujours mathématiquement, mais parce que **le serveur refuse de
+considérer un défi déjà consommé**.
+
+## Un détail d'implémentation qui fait toute la différence
+
+Le verrou ne serait qu'une illusion s'il était posé en deux temps. Vérifier
+par un `SELECT` que le défi est libre, puis le marquer par un `UPDATE`, ouvre
+une fenêtre pendant laquelle deux requêtes simultanées peuvent toutes deux
+lire « libre » avant qu'aucune n'ait écrit — et toutes deux réussir. Le défi
+deviendrait alors utilisable deux fois, soit exactement l'inverse du but
+recherché.
+
+La consommation est donc faite par un **unique `UPDATE` conditionnel** :
+
+```sql
+UPDATE defis_enrolement
+SET date_consommation = NOW()
+WHERE id = ? AND etudiant_id = ?
+  AND date_consommation IS NULL
+  AND date_expiration > NOW()
+```
+
+Le moteur garantit l'atomicité de cette opération. Le nombre de lignes
+affectées tranche sans ambiguïté : `1` signifie « le défi était libre et vient
+d'être consommé par nous » ; `0` couvre indistinctement toutes les autres
+situations. Aucune fenêtre de course n'existe, parce qu'il n'y a qu'une seule
+opération.
+
+À cela s'ajoute une **expiration de deux minutes**. Le défi n'a de sens que le
+temps de l'échange ; une fenêtre plus large laisserait des preuves
+exploitables traîner en base et multiplierait les occasions d'interception.
+
+## Pourquoi les lignes sont conservées
+
+Les défis consommés et expirés ne sont **jamais supprimés** : `app_logs`
+reçoit `UPDATE` sur cette table, mais pas `DELETE`.
+
+Ce n'est pas de la négligence. Chaque ligne horodate une tentative
+d'enrôlement, et cette série constitue une trace exploitable. Une succession
+de défis rapprochés sur un même compte, ou une alternance d'enrôlements entre
+deux appareils, est un motif statistiquement anormal — précisément celui que
+produirait le partage d'identifiants décrit dans l'argument de la friction.
+Purger la table effacerait le seul indice permettant de le détecter après
+coup.
+
+## Vérification par mutation
+
+| Mutation | Résultat |
+|---|---|
+| Suppression des conditions `date_consommation IS NULL` et `date_expiration > NOW()` | Les tests « REJEU » et « défi expiré » **échouent** |
+| Restauration | 112/112 repassent |
+
+---
+
+# Cycle de vie de la séance
+
+## Le défaut corrigé
+
+Une séance dont l'heure de fin était dépassée restait indéfiniment « En
+cours » : le QR pouvait toujours être projeté, et le temps de participation ne
+se calculait jamais.
+
+La cause tient à ce que le statut était **lu** dans une colonne, alors qu'il
+aurait dû être **déduit** de l'horloge. Or `seances.statut` n'est mis à jour
+que par une clôture manuelle, qui n'a jamais lieu en pratique.
+
+## Déduire plutôt que stocker
+
+Le statut est désormais calculé en SQL à chaque lecture :
+
+```sql
+CASE
+  WHEN s.heure_fin_prevue IS NOT NULL THEN (NOW() > s.heure_fin_prevue)
+  ELSE (s.statut = 'cloturee')
+END
+```
+
+L'alternative aurait été un traitement périodique mettant à jour la colonne.
+Elle a été écartée : entre deux passages, la valeur serait fausse, et c'est
+exactement le défaut constaté qui se reproduirait à plus petite échelle.
+Déduire garantit une réponse juste à la milliseconde où elle est calculée, et
+supprime toute possibilité de dérive.
+
+Le repli sur la colonne `statut` couvre les séances créées avant
+l'introduction des horaires prévus : sans borne temporelle, seule la clôture
+manuelle peut faire foi.
+
+## Deux durées, qui ne disent pas la même chose
+
+- `duree_minutes` est la durée **constatée** : arrivée jusqu'au départ
+  réellement pointé. Elle vaut `NULL` tant qu'aucun départ n'a été saisi.
+- `duree_validee_minutes` est la durée **retenue** : elle utilise le départ
+  s'il existe, et à défaut l'heure de fin prévue, mais uniquement une fois la
+  séance terminée.
+
+Les confondre serait une erreur : un étudiant présent jusqu'au bout n'a aucune
+raison de voir son temps rester indéfini parce que personne n'a saisi son
+départ, mais il serait tout aussi faux de présenter une valeur déduite comme
+si elle avait été relevée. L'interface le signale donc explicitement — « départ
+non pointé : l'heure de fin prévue a été retenue » — et le rapport porte un
+drapeau `depart_deduit`.
+
+## La fenêtre de rectification a désormais deux bornes
+
+Elle s'ouvre **à la fin** de la séance et se referme 24 h plus tard.
+Auparavant, seule la borne haute était vérifiée : un étudiant pouvait donc
+signaler une erreur alors que la séance était encore en cours, sur des heures
+qui n'étaient pas encore constituées et un départ pas encore connu.
+
+La règle est appliquée aux deux endroits, et l'asymétrie de leurs rôles est
+assumée : le contrôle en lecture ne sert qu'à l'affichage, celui en écriture
+fait foi. Un test dédié soumet une demande sur une séance en cours et vérifie
+le refus serveur.
+
+## La bascule côté client
+
+`useSeanceTerminee` anticipe le changement d'état entre deux rafraîchissements.
+Sans lui, une séance se terminant à 12h00 continuerait d'afficher « En cours »
+jusqu'au prochain appel réseau.
+
+La règle de combinaison est délibérément **asymétrique** : si le serveur dit
+« terminée », on le suit sans discuter ; sinon seulement, on consulte l'horloge
+locale. Une horloge locale en retard ne peut donc pas faire réapparaître une
+séance terminée, tandis qu'une horloge en avance ne fait qu'anticiper de
+quelques secondes un état que le serveur confirmera. **L'erreur possible est
+toujours du côté inoffensif**, et le serveur reste seul juge de ce qu'il
+accepte.
+
+---
+
+# Étape 8 — Le rapport administratif
+
+`GET /api/seances/:id/rapport` prépare l'export destiné à la validation des
+crédits. L'interface d'export n'est pas encore réalisée.
+
+**Le rapport part des inscriptions, pas des présences.** C'est le choix de
+conception central. Lister les présences ne montrerait que ceux qui sont
+venus, alors que l'information administrative décisive est exactement
+l'inverse : **qui manquait**. Une jointure externe depuis `inscriptions`
+garantit que chaque étudiant attendu figure au rapport, présent ou non.
+
+Trois informations complètent le relevé, chacune pour éviter une décision mal
+fondée :
+
+- `depart_deduit` distingue une heure de sortie relevée d'une heure inférée.
+- `provisoire` marque tout rapport établi sur une séance encore en cours, pour
+  qu'il ne soit pas archivé comme définitif.
+- `demande_en_attente` signale une contestation pendante. Valider des crédits
+  sur un temps encore susceptible d'être corrigé exposerait à devoir revenir
+  sur la décision.
+
+---
+
 ## Prochaine étape suggérée
 
 Le prototype couvre désormais l'ensemble de la chaîne. Les compléments

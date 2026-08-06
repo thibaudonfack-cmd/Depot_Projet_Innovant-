@@ -64,8 +64,13 @@ async function soumettreRectification(req, res) {
     // soumettre une demande en son nom.
     const [presences] = await pool.query(
       `SELECT p.id, p.etudiant_id, s.heure_fin_prevue,
+              -- MEME regle que dans presenceController : la fenetre s'ouvre
+              -- a la FIN de la seance et se referme 24 h plus tard. Le
+              -- controle cote lecture n'est qu'un confort d'affichage ; c'est
+              -- celui-ci, a l'ecriture, qui fait foi.
               CASE
                 WHEN s.heure_fin_prevue IS NULL THEN 0
+                WHEN NOW() <= s.heure_fin_prevue THEN 0
                 WHEN NOW() <= DATE_ADD(s.heure_fin_prevue, INTERVAL ? HOUR) THEN 1
                 ELSE 0
               END AS fenetre_ouverte
@@ -86,7 +91,7 @@ async function soumettreRectification(req, res) {
       return res.status(403).json({
         status: 'error',
         code: 'DELAI_EXPIRE',
-        message: 'Le delai de signalement de 24 heures est ecoule pour cette seance.',
+        message: "Le signalement n'est possible qu'apres la fin de la seance, et pendant 24 heures.",
       });
     }
 

@@ -267,10 +267,14 @@ function TableauBordFormateur() {
                       </div>
 
                       <div className="flex shrink-0 items-center gap-2">
-                        <Badge ton={s.statut === 'ouverte' ? 'actif' : 'neutre'}>
-                          {s.statut === 'ouverte' ? 'Ouverte' : 'Clôturée'}
+                        {/* Statut DEDUIT de l'horloge par le serveur, pas lu
+                            dans la colonne statut : une seance dont l'heure de
+                            fin est passee est terminee, qu'on l'ait cloturee
+                            manuellement ou non. */}
+                        <Badge ton={s.terminee ? 'neutre' : 'actif'}>
+                          {s.terminee ? 'Terminée' : 'En cours'}
                         </Badge>
-                        {s.statut === 'ouverte' && (
+                        {!s.terminee && (
                           <Bouton variante="secondaire" onClick={() => setSeanceProjetee(s)}
                                   className="w-auto px-3 py-2 text-xs">
                             Réafficher le QR

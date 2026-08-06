@@ -142,17 +142,23 @@ describe('GET /api/mes-presences (étudiant)', () => {
     expect(reponse.body.presences.every((p) => p.id !== undefined)).toBe(true);
   });
 
-  test('la fenêtre de rectification est calculée par le SERVEUR, pas par le client', async () => {
+  test('la fenêtre de rectification est calculée par le SERVEUR, avec DEUX bornes', async () => {
     const reponse = await request(app).get('/api/mes-presences').set('Cookie', cookieAmara);
     const notre = reponse.body.presences.find((p) => p.seance_id === seanceId);
 
-    // La séance de test se termine le 01/09/2026 à 12:00. Le drapeau doit
-    // donc refléter la position de l'horloge SERVEUR par rapport à cette
-    // date plus 24 h, et être un vrai booléen.
     expect(typeof notre.rectification_ouverte).toBe('boolean');
 
+    // La règle a deux bornes et non une : la fenêtre s'ouvre à la FIN de la
+    // séance et se referme 24 h plus tard. Signaler une erreur sur des heures
+    // encore en train de se constituer n'aurait aucun sens. La séance de test
+    // se terminant le 01/09/2026 à 12:00, le drapeau doit refléter la
+    // position de l'horloge SERVEUR entre ces deux bornes.
     const [[{ ouverte }]] = await pool.query(
-      "SELECT CASE WHEN NOW() <= DATE_ADD('2026-09-01 12:00:00', INTERVAL 24 HOUR) THEN 1 ELSE 0 END AS ouverte"
+      `SELECT CASE
+                WHEN NOW() <= '2026-09-01 12:00:00' THEN 0
+                WHEN NOW() <= DATE_ADD('2026-09-01 12:00:00', INTERVAL 24 HOUR) THEN 1
+                ELSE 0
+              END AS ouverte`
     );
     expect(notre.rectification_ouverte).toBe(ouverte === 1);
   });
