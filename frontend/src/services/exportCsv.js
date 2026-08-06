@@ -60,7 +60,7 @@ export function formaterInstantCsv(instant) {
 }
 
 const COLONNES = [
-  'Nom', 'Email', 'Statut', 'Arrivee', 'Depart', 'Depart deduit',
+  'Nom', 'Email', 'Statut', 'Inscrit', 'Arrivee', 'Depart', 'Depart deduit',
   'Temps valide', 'Minutes validees', 'Position', 'Contestation',
 ];
 
@@ -78,6 +78,9 @@ export function construireCsv(rapport) {
       etudiant.nom,
       etudiant.email,
       etudiant.present ? 'Present' : 'Absent',
+      // Colonne distincte du statut : un present non inscrit reste present.
+      // Fusionner les deux obligerait a relire le libelle pour trier.
+      etudiant.inscrit === false ? 'Non' : 'Oui',
       formaterInstantCsv(etudiant.heure_arrivee),
       // L'API calcule `heure_fin_retenue` a partir de la seance, elle est donc
       // renseignee MEME pour un absent. L'ecrire telle quelle donnerait a un
@@ -104,6 +107,9 @@ export function construireCsv(rapport) {
   lignes.push([`Attendus${SEPARATEUR}${s.attendus}`]);
   lignes.push([`Presents${SEPARATEUR}${s.presents}`]);
   lignes.push([`Absents${SEPARATEUR}${s.absents}`]);
+  if (s.presents_non_inscrits > 0) {
+    lignes.push([`Presents non inscrits${SEPARATEUR}${s.presents_non_inscrits}`]);
+  }
   lignes.push([`Total valide${SEPARATEUR}${echapperCsv(formaterDureeCsv(s.minutes_validees_total))}`]);
   lignes.push([`Statut${SEPARATEUR}${s.provisoire || s.demandes_en_attente > 0 ? 'PROVISOIRE' : 'OFFICIEL'}`]);
 

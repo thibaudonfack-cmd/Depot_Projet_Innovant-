@@ -22,12 +22,12 @@ function rapport(surcharges = {}) {
       heure_fin_prevue: '2026-09-01T12:00:00.000Z',
     },
     synthese: {
-      attendus: 2, presents: 1, absents: 1,
+      attendus: 2, presents: 1, absents: 1, presents_non_inscrits: 0,
       minutes_validees_total: 180, provisoire: false, demandes_en_attente: 0,
     },
     etudiants: [
       {
-        etudiant_id: 1, nom: 'Amara Diallo', email: 'amara@example.be', present: true,
+        etudiant_id: 1, nom: 'Amara Diallo', email: 'amara@example.be', present: true, inscrit: true,
         heure_arrivee: '2026-09-01T09:05:00.000Z',
         heure_depart_saisie: null,
         heure_fin_retenue: '2026-09-01T12:00:00.000Z',
@@ -35,7 +35,7 @@ function rapport(surcharges = {}) {
         position_coherente: true, demande_en_attente: false,
       },
       {
-        etudiant_id: 2, nom: 'Bruno Mertens', email: 'bruno@example.be', present: false,
+        etudiant_id: 2, nom: 'Bruno Mertens', email: 'bruno@example.be', present: false, inscrit: true,
         heure_arrivee: null,
         heure_depart_saisie: null,
         // Le serveur renseigne cette valeur meme pour un absent : elle vient
@@ -119,8 +119,9 @@ describe('construction du fichier', () => {
     const [, premier] = lignes(construireCsv(rapport()));
     const colonnes = premier.split(';');
     expect(colonnes[2]).toBe('Present');
-    expect(colonnes[5]).toBe('Oui');   // Depart deduit
-    expect(colonnes[6]).toBe('2h55');  // Temps valide
+    expect(colonnes[3]).toBe('Oui');   // Inscrit
+    expect(colonnes[6]).toBe('Oui');   // Depart deduit
+    expect(colonnes[7]).toBe('2h55');  // Temps valide
   });
 
   test('un absent n\'hérite PAS de l\'heure de fin de séance comme départ', () => {
@@ -130,9 +131,9 @@ describe('construction du fichier', () => {
     const [, , second] = lignes(construireCsv(rapport()));
     const colonnes = second.split(';');
     expect(colonnes[2]).toBe('Absent');
-    expect(colonnes[3]).toBe(''); // Arrivee
-    expect(colonnes[4]).toBe(''); // Depart
-    expect(colonnes[6]).toBe(''); // Temps valide
+    expect(colonnes[4]).toBe(''); // Arrivee
+    expect(colonnes[5]).toBe(''); // Depart
+    expect(colonnes[7]).toBe(''); // Temps valide
   });
 
   test('la synthèse porte la mention OFFICIEL quand rien n\'est en attente', () => {
@@ -144,6 +145,18 @@ describe('construction du fichier', () => {
     r.synthese.demandes_en_attente = 1;
     r.etudiants[0].demande_en_attente = true;
     expect(construireCsv(r)).toContain('Statut;PROVISOIRE');
+  });
+
+  test('un present NON INSCRIT est marque dans une colonne dediee', () => {
+    // Colonne distincte du statut : un present non inscrit reste present.
+    // Fusionner les deux obligerait a relire le libelle pour trier.
+    const r = rapport();
+    r.etudiants[0].inscrit = false;
+    r.synthese.presents_non_inscrits = 1;
+    const csv = construireCsv(r);
+    const [, premier] = lignes(csv);
+    expect(premier.split(';')[3]).toBe('Non');
+    expect(csv).toContain('Presents non inscrits;1');
   });
 
   test('les fins de ligne sont en CRLF', () => {

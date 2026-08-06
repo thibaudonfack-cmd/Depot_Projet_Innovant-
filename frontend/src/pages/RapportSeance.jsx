@@ -43,7 +43,7 @@ function CelluleDepart({ etudiant }) {
   return (
     <span
       className="inline-flex flex-wrap items-baseline gap-x-1.5"
-      title="Départ non pointé : l'heure de fin prévue de la séance a été retenue pour le calcul."
+      title="Départ automatique : l'heure de fin prévue a été appliquée par défaut, faute d'un second scan à la sortie."
     >
       <span className="text-sable-900">{heure(etudiant.heure_fin_retenue)}</span>
       <span className="text-xs font-medium text-sable-600">déduit</span>
@@ -58,6 +58,9 @@ function StatutEtudiant({ etudiant }) {
   // secondaire.
   if (etudiant.demande_en_attente) return <Badge ton="attention">Contestation en cours</Badge>;
   if (!etudiant.present) return <Badge ton="neutre">Absent</Badge>;
+  // Present ET non inscrit : le fait est reel, le cadre administratif ne
+  // l'est pas. Le dire plutot que de le ranger parmi les presences validees.
+  if (!etudiant.inscrit) return <Badge ton="attention">Présent (non inscrit)</Badge>;
   return <Badge ton="actif">Présent (validé)</Badge>;
 }
 
@@ -232,10 +235,26 @@ function RapportSeance({ seanceId, onRetour }) {
 
           {donnees.etudiants.some((e) => e.depart_deduit) && (
             <p className="mt-4 text-xs leading-relaxed text-sable-600">
-              <span className="font-medium">Départ déduit</span> : l&apos;étudiant
-              n&apos;a pas pointé sa sortie. L&apos;heure de fin prévue de la séance
-              a été retenue pour le calcul, ce qui correspond à une présence
-              jusqu&apos;au terme. Corrigez la présence si ce n&apos;était pas le cas.
+              <span className="font-medium">Départ automatique</span> :
+              l&apos;heure de fin prévue a été appliquée par défaut, ce qui
+              correspond à une présence jusqu&apos;au terme de la séance. Pour un
+              suivi du temps exact, les étudiants scannent le QR code une
+              seconde fois en quittant la salle. Corrigez la présence si la
+              valeur retenue ne correspond pas.
+            </p>
+          )}
+
+          {/* Un présent non inscrit sort du cadre administratif prévu : il ne
+              doit ni être masqué, ni être compté parmi les attendus. */}
+          {donnees.synthese.presents_non_inscrits > 0 && (
+            <p className="mt-3 text-xs leading-relaxed text-sable-600">
+              <span className="font-medium">Non inscrit</span> :{' '}
+              {donnees.synthese.presents_non_inscrits === 1
+                ? 'un étudiant a scanné sans être inscrit'
+                : `${donnees.synthese.presents_non_inscrits} étudiants ont scanné sans être inscrits`}
+              {' '}à cette unité de formation. Leur présence est réelle et
+              conservée, mais elle ne compte pas dans l&apos;effectif attendu.
+              Vérifiez l&apos;inscription auprès du secrétariat.
             </p>
           )}
 

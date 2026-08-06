@@ -287,29 +287,36 @@ CREATE TABLE seances (
 -- -----------------------------------------------------------------------------
 -- scans
 --
--- DEUX contraintes UNIQUE, DEUX vecteurs distincts fermes au niveau base de
--- donnees (jamais en pre-verification applicative -- cf. ANALYSE_CODE.md,
--- section Etape 3, pour la justification complete de ce choix dans les deux
--- cas : un SELECT prealable ouvrirait une fenetre de course, seul le moteur
--- InnoDB peut garantir l'atomicite de la verification au moment de l'ecriture) :
+-- UNE contrainte UNIQUE, appliquee au niveau base de donnees (jamais en
+-- pre-verification applicative -- cf. ANALYSE_CODE.md, section Etape 3 : un
+-- SELECT prealable ouvrirait une fenetre de course, seul le moteur InnoDB
+-- peut garantir l'atomicite de la verification au moment de l'ecriture) :
 --
 --   - uq_scan_nonce (jti, etudiant_id) : fermeture du vecteur V4 (REJEU
 --     cryptographique). Protege le JETON : un meme jeton (meme jti), deja
 --     consomme par cet etudiant, ne peut plus l'etre une seconde fois.
 --
---   - uq_scan_presence (seance_id, etudiant_id) : regle METIER de presence
---     (pas un vecteur d'attaque a proprement parler). Protege le FAIT
---     enregistre : un etudiant ne peut avoir qu'UNE seule ligne de presence
---     par seance, meme s'il scanne successivement PLUSIEURS jetons tous
---     individuellement valides et jamais rejoues (jti differents a chaque
---     rotation, cf. tokenService.js) -- ce que uq_scan_nonce seule ne peut
---     pas empecher, puisqu'elle ne compare jamais deux jti differents entre eux.
+-- REVISION (double scan entree/sortie). Cette table portait auparavant une
+-- SECONDE contrainte, uq_scan_presence (seance_id, etudiant_id), destinee a
+-- garantir qu'un etudiant n'ait qu'une seule presence par seance.
 --
--- Les deux constantes sont deliberement conservees ensemble (pas seulement
--- la seconde a la place de la premiere) : elles repondent a deux questions
--- differentes ("ce jeton precis a-t-il deja servi ?" vs "cet etudiant a-t-il
--- deja une presence pour cette seance, quel que soit le jeton ?"), utiles
--- independamment l'une de l'autre si la logique metier venait a evoluer.
+-- La regle etait juste, son emplacement ne l'etait pas. scans est le JOURNAL
+-- BRUT des evenements : chaque presentation de jeton valide doit pouvoir y
+-- laisser une trace. Interdire une seconde ligne revenait a interdire
+-- d'enregistrer le scan de SORTIE -- et rendait donc le pointage du depart,
+-- qui est la seule facon d'obtenir un temps de participation exact,
+-- structurellement impossible. Le symptome etait un 409 DOUBLE_SCAN sur un
+-- geste parfaitement legitime.
+--
+-- La regle metier est desormais portee par uq_presence sur la table
+-- presences, qui est l'endroit correct : c'est l'ETAT qui doit etre unique,
+-- pas l'EVENEMENT. Un etudiant a toujours au plus une presence par seance ;
+-- cette presence est simplement alimentee par deux scans successifs.
+--
+-- Lecon generalisable : une contrainte d'unicite posee sur une table de
+-- journal contraint l'HISTOIRE, pas l'ETAT. Les deux se confondent tant
+-- qu'un fait ne peut survenir qu'une fois -- et divergent des qu'il peut
+-- survenir deux fois pour un meme resultat.
 -- -----------------------------------------------------------------------------
 CREATE TABLE scans (
   id           CHAR(36)     NOT NULL DEFAULT (UUID()) PRIMARY KEY,
@@ -322,7 +329,24 @@ CREATE TABLE scans (
   CONSTRAINT fk_scan_seance FOREIGN KEY (seance_id) REFERENCES seances(id),
   CONSTRAINT fk_scan_etudiant FOREIGN KEY (etudiant_id) REFERENCES etudiants(id),
   UNIQUE KEY uq_scan_nonce (jti, etudiant_id),
-  UNIQUE KEY uq_scan_presence (seance_id, etudiant_id),
+  -- uq_scan_presence (seance_id, etudiant_id) A ETE RETIREE ICI.
+  --
+  -- Elle exprimait la bonne regle metier -- une seule presence par etudiant
+  -- et par seance -- mais sur la MAUVAISE TABLE. scans est le journal brut
+  -- des evenements : interdire une deuxieme ligne revenait a interdire
+  -- d'ENREGISTRER le scan de sortie, et rendait donc le pointage du depart
+  -- structurellement impossible.
+  --
+  -- La regle metier n'est pas perdue pour autant : elle est portee par
+  -- uq_presence sur la table presences, qui est l'endroit correct. Un
+  -- etudiant ne peut toujours avoir qu'une seule presence par seance -- mais
+  -- cette presence peut desormais etre alimentee par DEUX scans, celui de
+  -- l'arrivee et celui du depart.
+  --
+  -- La protection anti-rejeu (V4) est inchangee : elle repose sur
+  -- uq_scan_nonce (jti, etudiant_id), ci-dessus. Un meme jeton ne peut
+  -- toujours pas etre presente deux fois ; c'est un jeton DIFFERENT, emis
+  -- plus tard dans la meme seance, qui porte le depart.
   KEY idx_scan_seance (seance_id),
   KEY idx_scan_etudiant (etudiant_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -366,6 +390,14 @@ CREATE TABLE presences (
   seance_id       CHAR(36)  NOT NULL,
   etudiant_id     CHAR(36)  NOT NULL,
   scan_arrivee_id CHAR(36)  NULL,
+  -- Symetrique de scan_arrivee_id : le depart pointe par l'etudiant est
+  -- rattache au scan qui l'a produit. Sans ce lien, une heure de depart
+  -- serait indistinguable d'une saisie manuelle du formateur, alors que les
+  -- deux n'ont pas du tout la meme valeur probante -- l'une est adossee a un
+  -- jeton signe et a un appareil enrole, l'autre a la parole d'une personne.
+  -- Reste NULL quand le depart n'a pas ete scanne (correction manuelle,
+  -- rectification acceptee, ou depart deduit de l'heure de fin prevue).
+  scan_depart_id  CHAR(36)  NULL,
   heure_arrivee   DATETIME  NOT NULL,
   heure_depart    DATETIME  NULL,
   source          ENUM('scan', 'correction_formateur', 'rectification_validee')
@@ -390,12 +422,17 @@ CREATE TABLE presences (
   CONSTRAINT fk_presence_seance FOREIGN KEY (seance_id) REFERENCES seances(id),
   CONSTRAINT fk_presence_etudiant FOREIGN KEY (etudiant_id) REFERENCES etudiants(id),
   CONSTRAINT fk_presence_scan FOREIGN KEY (scan_arrivee_id) REFERENCES scans(id),
+  CONSTRAINT fk_presence_scan_depart FOREIGN KEY (scan_depart_id) REFERENCES scans(id),
   -- Coherence des bornes portee par le SCHEMA et non par le seul code : une
   -- duree negative fausserait les cumuls d'heures sans qu'aucune erreur ne
   -- soit levee. Le NULL est accepte (presence en cours).
   CONSTRAINT chk_presence_bornes CHECK (heure_depart IS NULL OR heure_depart > heure_arrivee),
-  -- Une seule presence par etudiant et par seance, coherent avec
-  -- uq_scan_presence sur la table scans.
+  -- Une seule presence par etudiant et par seance. Depuis le retrait de
+  -- uq_scan_presence sur la table scans (voir son en-tete), cette contrainte
+  -- est la SEULE a porter cette regle metier -- et c'est bien ici sa place :
+  -- elle contraint l'etat, la ou scans ne doit contraindre que l'unicite des
+  -- jetons. Un second scan ne cree donc jamais de ligne supplementaire : il
+  -- met a jour celle-ci en y inscrivant heure_depart.
   UNIQUE KEY uq_presence (seance_id, etudiant_id),
   KEY idx_presence_etudiant (etudiant_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

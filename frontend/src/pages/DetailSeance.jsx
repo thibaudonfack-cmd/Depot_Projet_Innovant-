@@ -92,7 +92,7 @@ function CelluleDepart({ presence, seanceTerminee, heureFinPrevue }) {
   return (
     <span
       className="inline-flex flex-wrap items-baseline gap-x-1.5"
-      title="Départ automatique : la sortie n'a pas été pointée, l'heure de fin prévue de la séance a été retenue."
+      title="Départ automatique : l'heure de fin prévue a été appliquée par défaut. Pour un temps exact, l'étudiant scanne le QR code une seconde fois en quittant la salle."
     >
       <span className="text-sable-700">{heure(heureFinPrevue)}</span>
       <span className="text-xs font-medium text-sable-600">déduit</span>
@@ -411,13 +411,18 @@ function DetailSeance({ seanceId, onRetour }) {
             </table>
           </div>
         )}
+        {/* Formulation PROCEDURALE et non accusatrice : un départ déduit est
+            le fonctionnement normal, pas une faute. Le texte décrit ce qu'il
+            faut faire pour obtenir mieux, plutôt que de constater ce qui n'a
+            pas été fait. */}
         {donnees && seanceTerminee
           && donnees.presences.some((p) => !p.heure_depart) && donnees.seance.heure_fin_prevue && (
           <p className="mt-4 text-xs leading-relaxed text-sable-600">
-            <span className="font-medium">Départ déduit</span> : ces étudiants
-            n&apos;ont pas pointé leur sortie. L&apos;heure de fin prévue de la
-            séance a été retenue pour calculer leur temps. Modifiez la présence
-            si l&apos;un d&apos;eux est parti plus tôt.
+            <span className="font-medium">Départ automatique</span> :
+            l&apos;heure de fin prévue a été appliquée par défaut. Pour un suivi
+            du temps exact — départ anticipé, par exemple — les étudiants
+            scannent le QR code une seconde fois en quittant la salle. Vous
+            pouvez aussi corriger une présence manuellement.
           </p>
         )}
         {donnees && donnees.presences.some((p) => p.position_coherente === 0) && (

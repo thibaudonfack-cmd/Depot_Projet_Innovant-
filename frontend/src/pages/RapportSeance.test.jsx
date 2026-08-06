@@ -24,24 +24,24 @@ function corps(surcharges = {}) {
       heure_debut_prevue: DEBUT, heure_fin_prevue: FIN, terminee: true,
     },
     synthese: {
-      attendus: 3, presents: 2, absents: 1,
+      attendus: 3, presents: 2, absents: 1, presents_non_inscrits: 0,
       minutes_validees_total: 235, provisoire: false, demandes_en_attente: 0,
     },
     etudiants: [
       {
-        etudiant_id: 'e1', nom: 'Amara Diallo', email: 'amara@example.be', present: true,
+        etudiant_id: 'e1', nom: 'Amara Diallo', email: 'amara@example.be', present: true, inscrit: true,
         heure_arrivee: DEBUT, heure_depart_saisie: null, heure_fin_retenue: FIN,
         depart_deduit: true, minutes_validees: 120,
         position_coherente: true, demande_en_attente: false,
       },
       {
-        etudiant_id: 'e2', nom: 'Bruno Mertens', email: 'bruno@example.be', present: true,
+        etudiant_id: 'e2', nom: 'Bruno Mertens', email: 'bruno@example.be', present: true, inscrit: true,
         heure_arrivee: DEBUT, heure_depart_saisie: FIN, heure_fin_retenue: FIN,
         depart_deduit: false, minutes_validees: 115,
         position_coherente: null, demande_en_attente: false,
       },
       {
-        etudiant_id: 'e3', nom: 'Chiara Rossi', email: 'chiara@example.be', present: false,
+        etudiant_id: 'e3', nom: 'Chiara Rossi', email: 'chiara@example.be', present: false, inscrit: true,
         heure_arrivee: null, heure_depart_saisie: null, heure_fin_retenue: FIN,
         depart_deduit: false, minutes_validees: null,
         position_coherente: null, demande_en_attente: false,
@@ -139,6 +139,23 @@ describe('tableau', () => {
     expect(cellules[2]).toBe('—');
     expect(cellules[3]).toBe('—');
     expect(cellules[4]).toBe('—');
+  });
+
+  test('un PRESENT NON INSCRIT est affiché et signalé, jamais effacé', async () => {
+    // Le pire défaut possible pour un relevé d'assiduité : un absent
+    // improprement compté se remarque, l'intéressé proteste. Un présent
+    // effacé ne se remarque pas.
+    reponse.etudiants.push({
+      etudiant_id: 'e4', nom: 'Driss El Amrani', email: 'driss@example.be',
+      present: true, inscrit: false, heure_arrivee: DEBUT,
+      heure_depart_saisie: null, heure_fin_retenue: FIN, depart_deduit: true,
+      minutes_validees: 120, position_coherente: null, demande_en_attente: false,
+    });
+    reponse.synthese.presents_non_inscrits = 1;
+    const c = await monter();
+    expect(texte(c)).toContain('Driss El Amrani');
+    expect(texte(c)).toContain('Présent (non inscrit)');
+    expect(texte(c)).toContain('sans être inscrit');
   });
 
   test('le temps validé est affiché en heures et minutes', async () => {

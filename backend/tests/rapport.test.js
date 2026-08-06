@@ -11,17 +11,21 @@ const UF_ID = '11111111-1111-1111-1111-111111111111';
 const SALLE_ID = '22222222-2222-2222-2222-222222222222';
 const AMARA = '33333333-3333-3333-3333-333333333331';
 const BILAL = '33333333-3333-3333-3333-333333333332';
+const DRISS = '33333333-3333-3333-3333-333333333334';
+// UF a laquelle Driss n'est PAS inscrit (cf. 02-seed.sql) : sert a verifier
+// qu'un present non inscrit n'est pas efface du rapport.
+const UF_BUREAUTIQUE = '11111111-1111-1111-1111-111111111112';
 
 let cookieFormateur, cookieAmara;
-let seanceTerminee, seanceEnCours;
+let seanceTerminee, seanceEnCours, seanceAutreUf;
 
 /** Cree une seance dont la fin prevue est decalee de `heures` (negatif = passe). */
-async function creerSeance(decalageFinHeures) {
+async function creerSeance(decalageFinHeures, ufId = UF_ID) {
   const id = crypto.randomUUID();
   await pool.query(
     `INSERT INTO seances (id, uf_id, salle_id, heure_debut_prevue, heure_fin_prevue)
      VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL ? HOUR), DATE_ADD(NOW(), INTERVAL ? HOUR))`,
-    [id, UF_ID, SALLE_ID, decalageFinHeures - 3, decalageFinHeures]
+    [id, ufId, SALLE_ID, decalageFinHeures - 3, decalageFinHeures]
   );
   return id;
 }
@@ -34,6 +38,14 @@ beforeAll(async () => {
   seanceTerminee = await creerSeance(-2);
   // En cours : se termine dans 2 h.
   seanceEnCours = await creerSeance(2);
+
+  // Une seance sur une AUTRE UF, ou Driss n'est pas inscrit mais se presente.
+  seanceAutreUf = await creerSeance(-2, UF_BUREAUTIQUE);
+  await pool.query(
+    `INSERT INTO presences (id, seance_id, etudiant_id, heure_arrivee)
+     VALUES (?, ?, ?, DATE_SUB(NOW(), INTERVAL 4 HOUR))`,
+    [crypto.randomUUID(), seanceAutreUf, DRISS]
+  );
 
   // Amara a scanne dans les deux, sans que son depart soit saisi.
   for (const seanceId of [seanceTerminee, seanceEnCours]) {
@@ -120,9 +132,77 @@ describe('Fenetre de rectification', () => {
 });
 
 describe('GET /api/seances/:id/rapport', () => {
-  test('le rapport part des INSCRIPTIONS et fait donc apparaitre les ABSENTS', async () => {
-    // Point central : lister les presences ne montrerait que ceux qui sont
-    // venus, alors que l'information administrative decisive est l'inverse.
+  // ------------------------------------------------------------------
+  // NON-REGRESSION : LE RAPPEL NE DOIT JAMAIS ETRE VIDE
+  //
+  // Defaut constate en test de bout en bout : "Attendus 0, Presents 0,
+  // Absents 0" et tableau vide, alors qu'un etudiant avait reellement scanne.
+  // Deux causes cumulees -- un seed n'inscrivant personne aux deux autres UF,
+  // et une requete partant des seules inscriptions, qui effacait donc un
+  // present non inscrit. Ces tests verrouillent les deux.
+  // ------------------------------------------------------------------
+  test('le tableau CONTIENT des etudiants : un rapport vide est toujours un defaut', async () => {
+    const reponse = await request(app)
+      .get(`/api/seances/${seanceTerminee}/rapport`).set('Cookie', cookieFormateur);
+
+    expect(reponse.status).toBe(200);
+    expect(Array.isArray(reponse.body.etudiants)).toBe(true);
+    expect(reponse.body.etudiants.length).toBeGreaterThan(0);
+    // Les trois compteurs ne peuvent pas etre simultanement nuls : ce triplet
+    // est la signature exacte du defaut observe.
+    expect(
+      reponse.body.synthese.attendus
+      + reponse.body.synthese.presents
+      + reponse.body.synthese.absents
+    ).toBeGreaterThan(0);
+  });
+
+  test('AUCUNE des trois UF du seed n\'est sans inscrit', async () => {
+    // La cause premiere du rapport vide etait la : le formulaire de creation
+    // propose les trois UF, une seule avait des inscrits.
+    const [lignes] = await pool.query(
+      `SELECT u.id, u.intitule, COUNT(i.id) AS nb
+         FROM uf u LEFT JOIN inscriptions i ON i.uf_id = u.id
+        GROUP BY u.id, u.intitule`
+    );
+    expect(lignes.length).toBeGreaterThanOrEqual(3);
+    for (const ligne of lignes) {
+      expect(ligne.nb).toBeGreaterThan(0);
+    }
+  });
+
+  test('un etudiant PRESENT mais NON INSCRIT figure au rapport, signale', async () => {
+    // Le pire defaut possible pour un releve d'assiduite : un absent
+    // improprement compte se remarque -- l'interesse proteste. Un present
+    // efface ne se remarque pas.
+    const reponse = await request(app)
+      .get(`/api/seances/${seanceAutreUf}/rapport`).set('Cookie', cookieFormateur);
+
+    expect(reponse.status).toBe(200);
+    const driss = reponse.body.etudiants.find((e) => e.etudiant_id === DRISS);
+    expect(driss).toBeDefined();
+    expect(driss.present).toBe(true);
+    expect(driss.inscrit).toBe(false);
+    expect(driss.minutes_validees).toBeGreaterThan(0);
+    expect(reponse.body.synthese.presents_non_inscrits).toBe(1);
+  });
+
+  test('un present non inscrit ne gonfle PAS l\'effectif attendu', async () => {
+    // "Attendus" compte les inscrits, pas les lignes du tableau -- sans quoi
+    // l'effectif theorique de l'UF serait fausse par toute presence hors
+    // cadre, et "absents" pourrait meme devenir negatif.
+    const reponse = await request(app)
+      .get(`/api/seances/${seanceAutreUf}/rapport`).set('Cookie', cookieFormateur);
+
+    expect(reponse.body.synthese.attendus).toBe(3); // 3 inscrits a Bureautique
+    expect(reponse.body.etudiants.length).toBe(4);  // + Driss, present hors cadre
+    expect(reponse.body.synthese.absents).toBe(3);  // les 3 inscrits absents
+    expect(reponse.body.synthese.absents).toBeGreaterThanOrEqual(0);
+  });
+
+  test('le rapport fait apparaitre les ABSENTS, pas seulement ceux qui sont venus', async () => {
+    // Lister les presences ne montrerait que ceux qui sont venus, alors que
+    // l'information administrative decisive est l'inverse.
     const reponse = await request(app)
       .get(`/api/seances/${seanceTerminee}/rapport`).set('Cookie', cookieFormateur);
 
@@ -130,10 +210,12 @@ describe('GET /api/seances/:id/rapport', () => {
     expect(reponse.body.synthese.attendus).toBe(4); // 4 inscrits au seed
     expect(reponse.body.synthese.presents).toBe(1);
     expect(reponse.body.synthese.absents).toBe(3);
+    expect(reponse.body.synthese.presents_non_inscrits).toBe(0);
 
     const bilal = reponse.body.etudiants.find((e) => e.etudiant_id === BILAL);
     expect(bilal).toBeDefined();
     expect(bilal.present).toBe(false);
+    expect(bilal.inscrit).toBe(true);
     expect(bilal.minutes_validees).toBeNull();
   });
 

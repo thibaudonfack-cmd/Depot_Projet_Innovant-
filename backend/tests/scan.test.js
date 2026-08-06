@@ -79,6 +79,7 @@ let seanceId;
 // reutiliser donnerait un 409 DOUBLE_SCAN parfaitement legitime, qui
 // masquerait ce que le test cherche reellement a verifier.
 let seanceUsurpation;
+let seanceInstantanee;
 // Cles ECDSA des appareils "enroles" par cette suite, indexees par etudiant.
 const appareils = new Map();
 
@@ -124,9 +125,16 @@ beforeAll(async () => {
   // d'un autre endpoint pour etre lisible et executable isolement.
   seanceId = crypto.randomUUID();
   seanceUsurpation = crypto.randomUUID();
+  // Une TROISIEME seance, pour le scenario "deux scans dans la meme
+  // seconde". uq_presence porte sur (seance_id, etudiant_id) : une seance
+  // neuve redonne une ardoise vierge a un etudiant deja utilise ailleurs,
+  // sans avoir a supprimer des lignes (ce que les privileges interdisent de
+  // toute facon sur presences).
+  seanceInstantanee = crypto.randomUUID();
   await pool.query(
-    'INSERT INTO seances (id, uf_id, salle_id) VALUES (?, ?, ?), (?, ?, ?)',
-    [seanceId, UF_ID, SALLE_ID, seanceUsurpation, UF_ID, SALLE_ID]
+    'INSERT INTO seances (id, uf_id, salle_id) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)',
+    [seanceId, UF_ID, SALLE_ID, seanceUsurpation, UF_ID, SALLE_ID,
+     seanceInstantanee, UF_ID, SALLE_ID]
   );
 
   // Trois des quatre etudiants ont un appareil enrole. ETUDIANT_SANS_APPAREIL
@@ -313,31 +321,117 @@ describe('POST /api/scans -- cascade de validation (RF-12, Etapes 3 et 5)', () =
     expect(deuxieme.body.code).toBe('REJEU_DETECTE');
   });
 
-  test('regle metier de presence (double scan) : un etudiant ne peut valider sa presence qu\'une fois par seance, MEME avec deux jetons DIFFERENTS correctement signes (409, DOUBLE_SCAN)', async () => {
+  // --------------------------------------------------------------------
+  // DOUBLE SCAN : entree puis sortie
+  //
+  // Ce comportement a CHANGE. Le second scan renvoyait auparavant 409
+  // DOUBLE_SCAN : la contrainte uq_scan_presence, posee sur la table scans,
+  // interdisait d'enregistrer un second evenement pour un meme couple
+  // (seance, etudiant) -- et donc de journaliser le scan de sortie. La regle
+  // metier est desormais portee par uq_presence sur la table presences, qui
+  // contraint l'etat et non l'histoire.
+  // --------------------------------------------------------------------
+  test('un SECOND scan avec un jeton different pointe le DEPART : il complete la presence au lieu de la rejeter', async () => {
     const jetonA = generateSessionToken(seanceId, SALLE_ID);
     const jetonB = generateSessionToken(seanceId, SALLE_ID);
 
     // Verifie la premisse : ce n'est PAS un cas de rejeu (V4). Si ces deux
     // jti etaient identiques, ce test testerait accidentellement la meme
-    // chose que le test V4 au lieu de la regle metier.
+    // chose que le test V4 au lieu du cycle entree/sortie.
     expect(jwt.decode(jetonA).jti).not.toBe(jwt.decode(jetonB).jti);
 
     const signatureA = await signerAvecAppareilDe(ETUDIANT_DOUBLE_SCAN, jetonA);
     const signatureB = await signerAvecAppareilDe(ETUDIANT_DOUBLE_SCAN, jetonB);
 
-    const premier = await request(app)
-      .post('/api/scans')
-      .set('Cookie', cookies.chiara)
+    const arrivee = await request(app)
+      .post('/api/scans').set('Cookie', cookies.chiara)
       .send({ jeton: jetonA, signature_appareil: signatureA });
-    expect(premier.status).toBe(201);
+    expect(arrivee.status).toBe(201);
+    expect(arrivee.body.sens).toBe('arrivee');
 
-    const second = await request(app)
-      .post('/api/scans')
-      .set('Cookie', cookies.chiara)
+    // chk_presence_bornes exige heure_depart > heure_arrivee. Les deux scans
+    // s'enchainent en quelques millisecondes dans un test ; on recule
+    // l'arrivee d'une heure pour reproduire une seance reelle. Sans cela, le
+    // controleur repondrait DEPART_TROP_TOT -- ce qui est le comportement
+    // voulu, teste separement ci-dessous.
+    await pool.query(
+      'UPDATE presences SET heure_arrivee = DATE_SUB(NOW(), INTERVAL 1 HOUR) WHERE id = ?',
+      [arrivee.body.presence_id]
+    );
+
+    const depart = await request(app)
+      .post('/api/scans').set('Cookie', cookies.chiara)
       .send({ jeton: jetonB, signature_appareil: signatureB });
 
-    expect(second.status).toBe(409);
-    expect(second.body.code).toBe('DOUBLE_SCAN');
+    expect(depart.status).toBe(200);
+    expect(depart.body.sens).toBe('depart');
+    // MEME presence : le second scan complete, il ne duplique pas.
+    expect(depart.body.presence_id).toBe(arrivee.body.presence_id);
+
+    // L'etat en base est ce qui compte reellement.
+    const [presences] = await pool.query(
+      'SELECT heure_depart, scan_depart_id FROM presences WHERE id = ?',
+      [arrivee.body.presence_id]
+    );
+    expect(presences).toHaveLength(1);
+    expect(presences[0].heure_depart).not.toBeNull();
+    // Le depart est rattache a SON scan : une heure pointee par l'etudiant
+    // ne doit pas etre confondue avec une saisie manuelle du formateur.
+    expect(presences[0].scan_depart_id).toBe(depart.body.scan_id);
+
+    // Une seule ligne de presence, deux lignes de scan : l'etat reste
+    // unique, l'histoire est complete.
+    const [lignesPresence] = await pool.query(
+      'SELECT COUNT(*) AS n FROM presences WHERE seance_id = ? AND etudiant_id = ?',
+      [seanceId, ETUDIANT_DOUBLE_SCAN]
+    );
+    expect(lignesPresence[0].n).toBe(1);
+    const [lignesScan] = await pool.query(
+      'SELECT COUNT(*) AS n FROM scans WHERE seance_id = ? AND etudiant_id = ?',
+      [seanceId, ETUDIANT_DOUBLE_SCAN]
+    );
+    expect(lignesScan[0].n).toBe(2);
+  });
+
+  test('un TROISIEME scan est refuse : le cycle est complet (409, DEPART_DEJA_POINTE)', async () => {
+    // Reecrire heure_depart a chaque nouveau scan permettrait a un etudiant
+    // de gonfler son temps en repassant devant l'ecran en fin de journee.
+    // Une correction reste possible, mais par la voie tracee (rectification
+    // ou modification par le formateur, toutes deux journalisees).
+    const jeton = generateSessionToken(seanceId, SALLE_ID);
+    const signature = await signerAvecAppareilDe(ETUDIANT_DOUBLE_SCAN, jeton);
+
+    const troisieme = await request(app)
+      .post('/api/scans').set('Cookie', cookies.chiara)
+      .send({ jeton, signature_appareil: signature });
+
+    expect(troisieme.status).toBe(409);
+    expect(troisieme.body.code).toBe('DEPART_DEJA_POINTE');
+  });
+
+  test('deux scans dans la meme seconde : refus explicite plutot qu\'une erreur 500 sur chk_presence_bornes', async () => {
+    // La contrainte de schema exige heure_depart > heure_arrivee. Sans garde
+    // applicative, un etudiant qui rescanne par megarde recevrait une erreur
+    // serveur incomprehensible au lieu d'une consigne utile.
+    const jetonA = generateSessionToken(seanceInstantanee, SALLE_ID);
+    const jetonB = generateSessionToken(seanceInstantanee, SALLE_ID);
+    const signatureA = await signerAvecAppareilDe(ETUDIANT_NOMINAL, jetonA);
+    const signatureB = await signerAvecAppareilDe(ETUDIANT_NOMINAL, jetonB);
+
+    const arrivee = await request(app)
+      .post('/api/scans').set('Cookie', cookies.amara)
+      .send({ jeton: jetonA, signature_appareil: signatureA });
+    expect(arrivee.status).toBe(201);
+
+    // Aucun decalage applique : l'arrivee date de quelques millisecondes.
+    const aussitot = await request(app)
+      .post('/api/scans').set('Cookie', cookies.amara)
+      .send({ jeton: jetonB, signature_appareil: signatureB });
+
+    expect(aussitot.status).toBe(409);
+    expect(aussitot.body.code).toBe('DEPART_TROP_TOT');
+    // Le message dit QUOI FAIRE, pas seulement ce qui a echoue.
+    expect(aussitot.body.message).toMatch(/rescannez/i);
   });
 
   test('champs obligatoires manquants (jeton ou signature_appareil) : 400 explicite, avant toute verification cryptographique', async () => {

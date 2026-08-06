@@ -61,13 +61,40 @@ INSERT INTO etudiants (id, nom, email) VALUES
   ('33333333-3333-3333-3333-333333333334', 'Driss El Amrani',   'driss.elamrani@example.org');
 
 -- -----------------------------------------------------------------------------
--- Inscriptions : les 4 etudiants suivent l'UF de demonstration
+-- Inscriptions
+--
+-- REVISION. Ce bloc n'inscrivait les 4 etudiants qu'a la SEULE UF
+-- "Anglais - Niveau 2". Les deux autres UF du jeu de demonstration
+-- ("Bureautique - Initiation", "Comptabilite generale") n'avaient donc aucun
+-- inscrit -- alors que le formulaire de creation de seance les propose
+-- toutes les trois.
+--
+-- Consequence observee en test de bout en bout : une seance creee sur
+-- "Bureautique" produisait un rapport d'assiduite entierement vide
+-- (Attendus 0, Presents 0, Absents 0) alors qu'un etudiant y avait
+-- reellement scanne et figurait bien dans la table presences. Rien
+-- n'echouait, aucune erreur n'etait levee : le rapport etait simplement
+-- faux. Un jeu de donnees incoherent produit exactement ce genre de defaut,
+-- qu'on impute d'abord au code.
+--
+-- Les trois UF ont desormais des inscrits, avec des effectifs DIFFERENTS --
+-- une repartition uniforme masquerait une erreur d'aiguillage entre UF, tous
+-- les rapports se ressemblant.
 -- -----------------------------------------------------------------------------
 INSERT INTO inscriptions (etudiant_id, uf_id) VALUES
+  -- Anglais - Niveau 2 : les 4 etudiants.
   ('33333333-3333-3333-3333-333333333331', '11111111-1111-1111-1111-111111111111'),
   ('33333333-3333-3333-3333-333333333332', '11111111-1111-1111-1111-111111111111'),
   ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111'),
-  ('33333333-3333-3333-3333-333333333334', '11111111-1111-1111-1111-111111111111');
+  ('33333333-3333-3333-3333-333333333334', '11111111-1111-1111-1111-111111111111'),
+  -- Bureautique - Initiation : 3 etudiants. Driss n'y est PAS inscrit, ce qui
+  -- permet de verifier a l'oeil que le rapport distingue bien les UF.
+  ('33333333-3333-3333-3333-333333333331', '11111111-1111-1111-1111-111111111112'),
+  ('33333333-3333-3333-3333-333333333332', '11111111-1111-1111-1111-111111111112'),
+  ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111112'),
+  -- Comptabilite generale : 2 etudiants seulement.
+  ('33333333-3333-3333-3333-333333333331', '11111111-1111-1111-1111-111111111113'),
+  ('33333333-3333-3333-3333-333333333334', '11111111-1111-1111-1111-111111111113');
 
 -- -----------------------------------------------------------------------------
 -- Comptes de connexion (Etape 7a)

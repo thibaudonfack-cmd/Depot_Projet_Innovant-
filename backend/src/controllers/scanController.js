@@ -40,27 +40,46 @@
 // aucun effet de bord persistant tant que toutes les validations ne sont
 // pas franchies.
 //
-// c) ET d) sont TOUTES DEUX implementees en laissant l'INSERT echouer sur
-// la contrainte UNIQUE correspondante de la table scans (01-schema.sql),
-// jamais par un SELECT prealable ("ce jti/cette presence existe-t-il deja ?")
-// suivi d'un INSERT conditionnel. Un SELECT-puis-INSERT applicatif ouvrirait
-// une fenetre de course dans les DEUX cas : deux requetes HTTP concurrentes
-// (deux onglets, un rejeu quasi simultane, ou deux jetons differents scannes
-// coup sur coup) pourraient toutes deux lire "absent" avant qu'aucune des
-// deux n'ait encore ecrit, et donc toutes deux inserer. Seul le moteur
-// InnoDB, au moment precis de l'ecriture, peut garantir l'atomicite de
-// cette verification -- exactement ce que documentent les commentaires de
-// la table scans dans 01-schema.sql.
+// c) est implementee en laissant l'INSERT echouer sur uq_scan_nonce
+// (01-schema.sql), jamais par un SELECT prealable ("ce jti existe-t-il
+// deja ?") suivi d'un INSERT conditionnel. Un SELECT-puis-INSERT applicatif
+// ouvrirait une fenetre de course : deux requetes HTTP concurrentes (deux
+// onglets, un rejeu quasi simultane) pourraient toutes deux lire "absent"
+// avant qu'aucune n'ait encore ecrit, et donc toutes deux inserer. Seul le
+// moteur InnoDB, au moment precis de l'ecriture, peut garantir l'atomicite
+// de cette verification.
 //
-// Une meme erreur MySQL (code ER_DUP_ENTRY, 1062) est levee que ce soit
-// uq_scan_nonce OU uq_scan_presence qui soit violee -- MySQL ne distingue
-// PAS nativement laquelle des deux dans le code d'erreur. La distinction
-// (necessaire pour choisir entre REJEU_DETECTE et DOUBLE_SCAN dans la
-// reponse HTTP) est faite ci-dessous par une lecture ciblee APRES l'echec
-// de l'INSERT, jamais par une analyse du texte libre de error.message
-// (dont le format exact varie selon la version/locale du serveur MySQL,
-// donc fragile) ni par une verification AVANT l'INSERT (qui reintroduirait
-// la meme fenetre de course que ci-dessus).
+// --- DOUBLE SCAN : ENTREE PUIS SORTIE -------------------------------------
+//
+// Un etudiant scanne DEUX fois : en arrivant, puis en quittant la salle. Le
+// second scan ne cree pas une seconde presence -- il complete la premiere en
+// y inscrivant heure_depart. C'est la seule facon d'obtenir un temps de
+// participation EXACT ; a defaut, le systeme retient l'heure de fin prevue
+// de la seance (cf. presenceController.js, SQL_FIN_RETENUE), ce qui est une
+// approximation acceptable mais une approximation tout de meme.
+//
+// Ce comportement exigeait de RETIRER la contrainte uq_scan_presence
+// (seance_id, etudiant_id) de la table scans. Elle exprimait la bonne regle
+// -- une seule presence par etudiant et par seance -- mais sur la mauvaise
+// table : scans est le journal brut des evenements, et lui interdire une
+// deuxieme ligne interdisait d'enregistrer le scan de sortie. Un geste
+// legitime recevait un 409 DOUBLE_SCAN. La regle metier est desormais portee
+// par uq_presence sur la table presences, qui contraint l'ETAT et non
+// l'HISTOIRE (justification complete dans 01-schema.sql, en-tete de scans).
+//
+// L'aiguillage arrivee/depart est IMPLICITE : rien n'est demande a
+// l'etudiant, qui scanne simplement le meme QR code. C'est l'existence d'une
+// presence ouverte qui determine le sens. Un choix explicite ("j'arrive" /
+// "je pars") ajouterait une decision a un geste qui doit rester
+// instantane -- et une decision offerte est une decision qui sera parfois
+// mal prise, produisant des donnees fausses qu'aucun controle ne pourrait
+// ensuite distinguer des vraies.
+//
+// La lecture prealable de la presence se fait SELECT ... FOR UPDATE, a
+// l'interieur de la transaction : deux scans simultanes ne peuvent pas lire
+// tous deux "presence ouverte" et tenter tous deux d'ecrire le depart. Ce
+// n'est pas la meme situation que le SELECT-puis-INSERT proscrit plus haut,
+// precisement PARCE QUE le verrou de ligne est pose par le moteur.
 
 const crypto = require('crypto');
 const pool = require('../config/db');
@@ -293,11 +312,90 @@ async function scannerJeton(req, res) {
   try {
     await connexion.beginTransaction();
 
+    // Le scan est TOUJOURS journalise, qu'il porte une arrivee ou un depart.
+    // scans est le registre des evenements : il doit refleter ce qui s'est
+    // produit, independamment de l'effet que cela produit sur l'etat.
     await connexion.query(
       'INSERT INTO scans (id, seance_id, etudiant_id, jti, resultat) VALUES (?, ?, ?, ?, ?)',
       [scanId, sessionId, etudiantId, jti, 'valide']
     );
 
+    // FOR UPDATE : verrouille la ligne de presence (ou constate son absence)
+    // pour la duree de la transaction. Sans ce verrou, deux scans emis a
+    // quelques millisecondes d'intervalle pourraient lire tous deux
+    // "presence ouverte" et tenter tous deux d'ecrire le depart.
+    const [presencesExistantes] = await connexion.query(
+      `SELECT id, heure_arrivee, heure_depart,
+              (NOW() <= heure_arrivee) AS depart_trop_tot
+         FROM presences
+        WHERE seance_id = ? AND etudiant_id = ?
+        FOR UPDATE`,
+      [sessionId, etudiantId]
+    );
+    const presenceOuverte = presencesExistantes[0];
+
+    // ---------------------------------------------------------------------
+    // CAS 2 : le depart. Une presence existe deja, sans heure de sortie.
+    // ---------------------------------------------------------------------
+    if (presenceOuverte && presenceOuverte.heure_depart === null) {
+      // Garde-fou contre chk_presence_bornes (heure_depart > heure_arrivee).
+      // Un etudiant qui scanne deux fois par megarde dans la meme seconde
+      // violerait la contrainte et recevrait une erreur 500 incomprehensible.
+      // Le cas est traite explicitement, avec un message qui dit quoi faire.
+      if (presenceOuverte.depart_trop_tot === 1) {
+        await connexion.rollback();
+        return res.status(409).json({
+          status: 'error',
+          code: 'DEPART_TROP_TOT',
+          message: 'Votre arrivee vient d\'etre enregistree. Rescannez en quittant la salle pour pointer votre depart.',
+        });
+      }
+
+      await connexion.query(
+        'UPDATE presences SET heure_depart = NOW(), scan_depart_id = ? WHERE id = ?',
+        [scanId, presenceOuverte.id]
+      );
+      await connexion.commit();
+
+      return res.status(200).json({
+        status: 'ok',
+        sens: 'depart',
+        scan_id: scanId,
+        presence_id: presenceOuverte.id,
+        seance_id: sessionId,
+        etudiant_id: etudiantId,
+        resultat: 'valide',
+        position: { coherente: geo.coherente, distance_m: geo.distanceM, motif: geo.motif },
+      });
+    }
+
+    // ---------------------------------------------------------------------
+    // CAS 3 : le cycle est deja complet. Arrivee ET depart sont pointes.
+    // ---------------------------------------------------------------------
+    if (presenceOuverte) {
+      // Le scan reste journalise (l'INSERT ci-dessus est valide et sera
+      // conserve) : une tentative refusee fait partie de l'histoire de la
+      // seance. Mais l'etat n'est pas modifie -- reecrire heure_depart a
+      // chaque nouveau scan permettrait a un etudiant de gonfler son temps
+      // en repassant devant l'ecran en fin de journee.
+      //
+      // Une correction reste possible, mais par la voie tracee : demande de
+      // rectification par l'etudiant, ou modification par le formateur avec
+      // motif consigne au journal d'audit. Ce qui est refuse ici, c'est la
+      // modification SILENCIEUSE.
+      await connexion.commit();
+      return res.status(409).json({
+        status: 'error',
+        code: 'DEPART_DEJA_POINTE',
+        message: 'Votre arrivee et votre depart sont deja enregistres pour cette seance. '
+               + 'Si une heure est inexacte, signalez-le a votre formateur.',
+      });
+    }
+
+    // ---------------------------------------------------------------------
+    // CAS 1 : l'arrivee. Aucune presence pour cet etudiant sur cette seance.
+    // ---------------------------------------------------------------------
+    //
     // heure_arrivee = NOW() de la BASE, jamais une heure fournie par le
     // client : c'est l'horloge du serveur qui fait foi pour tout ce qui
     // servira a justifier des quotas.
@@ -323,6 +421,7 @@ async function scannerJeton(req, res) {
 
     return res.status(201).json({
       status: 'ok',
+      sens: 'arrivee',
       scan_id: scanId,
       presence_id: presenceId,
       seance_id: sessionId,
@@ -333,20 +432,16 @@ async function scannerJeton(req, res) {
   } catch (error) {
     await connexion.rollback();
     if (error.code === 'ER_DUP_ENTRY') {
-      // La contrainte UNIQUE (l'une des deux -- MySQL ne dit pas laquelle
-      // via error.code, toujours 1062 dans les deux cas) vient de rejeter
-      // l'insertion. Disambiguation deterministe : est-ce EXACTEMENT ce
-      // (jti, etudiant_id) qui existe deja ? Si oui, c'est un rejeu litteral
-      // du meme jeton (uq_scan_nonce, V4). Si non, l'INSERT n'a pu echouer
-      // que sur l'autre contrainte possible (uq_scan_presence) : un jeton
-      // DIFFERENT (jti different), mais la meme paire (seance_id,
-      // etudiant_id) existe deja -- double scan (regle metier).
+      // Depuis le retrait de uq_scan_presence, l'INSERT dans scans ne peut
+      // plus violer qu'UNE seule contrainte : uq_scan_nonce. La
+      // desambiguisation reste neanmoins explicite plutot que presumee --
+      // MySQL renvoie le meme code 1062 pour toute violation d'unicite, et
+      // une contrainte ajoutee plus tard ne doit pas etre silencieusement
+      // interpretee comme un rejeu.
       //
       // Cette lecture ne sert JAMAIS a decider s'il faut inserer (l'INSERT
       // a deja ete tente et a deja echoue de maniere atomique au moment ou
-      // ce code s'execute) -- uniquement a choisir le bon message d'erreur
-      // pour le client. L'atomicite du rejet reste entierement garantie par
-      // les contraintes UNIQUE elles-memes, pas par cette lecture.
+      // ce code s'execute) -- uniquement a choisir le bon message d'erreur.
       const [dejaRejoue] = await pool.query(
         'SELECT 1 FROM scans WHERE jti = ? AND etudiant_id = ? LIMIT 1',
         [jti, etudiantId]
@@ -354,8 +449,13 @@ async function scannerJeton(req, res) {
 
       if (dejaRejoue.length > 0) {
         // uq_scan_nonce : rejeu (V4). 409 (et non 400) : la requete est
-        // valide en soi, c'est son EFFET (creer un doublon) que l'etat
-        // actuel du serveur refuse.
+        // valide en soi, c'est son EFFET (rejouer un jeton deja consomme)
+        // que l'etat actuel du serveur refuse.
+        //
+        // A NE PAS CONFONDRE avec le double scan legitime : ici c'est le
+        // MEME jeton qui est represente. Un depart normal utilise un jeton
+        // DIFFERENT, emis par une rotation ulterieure -- il ne passe donc
+        // jamais par cette branche.
         return res.status(409).json({
           status: 'error',
           code: 'REJEU_DETECTE',
@@ -363,12 +463,14 @@ async function scannerJeton(req, res) {
         });
       }
 
-      // uq_scan_presence : un AUTRE jeton (jti different), valide et non
-      // rejoue, a deja ete scanne par cet etudiant pour cette meme seance.
+      // uq_presence : deux scans d'arrivee reellement simultanes, dont le
+      // second a franchi la lecture FOR UPDATE avant que le premier ne
+      // commite. Le filet de securite du moteur a joue son role -- il n'y a
+      // pas de doublon en base, et le client peut simplement rescanner.
       return res.status(409).json({
         status: 'error',
-        code: 'DOUBLE_SCAN',
-        message: 'Presence deja validee pour cette seance.',
+        code: 'SCAN_CONCURRENT',
+        message: 'Un autre scan est en cours de traitement pour cette seance. Reessayez.',
       });
     }
 

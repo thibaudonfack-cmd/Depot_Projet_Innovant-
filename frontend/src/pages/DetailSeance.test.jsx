@@ -136,8 +136,13 @@ describe('séance TERMINÉE', () => {
     expect(texte(await monter())).toContain('2 h');
   });
 
-  test('une légende explique la déduction sous le tableau', async () => {
-    expect(texte(await monter())).toContain('Départ déduit');
+  test('la légende décrit la PROCÉDURE du second scan, sans accuser', async () => {
+    // Un départ déduit est le fonctionnement normal, pas une faute. Le texte
+    // doit dire quoi faire pour obtenir mieux.
+    const t = texte(await monter());
+    expect(t).toContain('Départ automatique');
+    expect(t).toContain('scannent le QR code une seconde fois');
+    expect(t).not.toContain("n'ont pas pointé");
   });
 
   test('la mention "Actualisation automatique" disparaît : plus rien ne bouge', async () => {

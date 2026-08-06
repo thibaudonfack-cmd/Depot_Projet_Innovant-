@@ -2829,6 +2829,191 @@ bouton et affiche le pied de document (section 5) ; et les deux suites passent
 
 ---
 
+# Rapport non vide et double scan entrée/sortie
+
+**`docker compose down -v` OBLIGATOIRE.** Le schéma et le seed changent tous
+les deux : une contrainte est retirée de `scans`, une colonne est ajoutée à
+`presences`, et les inscriptions sont étendues aux trois UF. Sans purge des
+volumes, MySQL conserve l'ancienne base et le défaut persiste.
+
+```bash
+docker compose down -v && docker compose up -d --build
+```
+
+## 1. Le rapport n'est plus vide, quelle que soit l'UF
+
+### Vérifier le seed
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT u.intitule, COUNT(i.id) AS inscrits
+    FROM uf u LEFT JOIN inscriptions i ON i.uf_id = u.id
+   GROUP BY u.id, u.intitule;"
+```
+
+Attendu — **aucune UF à zéro** :
+
+| UF | inscrits |
+| --- | --- |
+| Anglais - Niveau 2 | 4 |
+| Bureautique - Initiation | 3 |
+| Comptabilite generale | 2 |
+
+Les effectifs sont volontairement **différents** : une répartition uniforme
+masquerait une erreur d'aiguillage entre UF, tous les rapports se ressemblant.
+
+### Le test qui reproduisait le défaut
+
+Créez une séance sur **« Bureautique - Initiation »** (l'UF qui n'avait aucun
+inscrit auparavant), faites scanner Amara, puis terminez la séance :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  UPDATE seances SET heure_debut_prevue = DATE_SUB(NOW(), INTERVAL 3 HOUR),
+                     heure_fin_prevue   = DATE_SUB(NOW(), INTERVAL 1 HOUR)
+   WHERE id = '<SEANCE_ID>';"
+```
+
+Ouvrez le rapport d'assiduité. Attendu : **3 attendus, 1 présent, 2 absents**,
+et Amara Diallo visible dans le tableau. Avant correction, cet écran affichait
+« Attendus 0, Présents 0, Absents 0 » avec un tableau vide.
+
+### Le cas du présent NON INSCRIT
+
+C'est le défaut structurel, indépendant du seed. Faites scanner **Driss El
+Amrani**, qui n'est pas inscrit à « Bureautique » :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT e.nom FROM presences p JOIN etudiants e ON e.id = p.etudiant_id
+   WHERE p.seance_id = '<SEANCE_ID>';"
+```
+
+Driss doit apparaître dans cette requête **et** dans le rapport, avec le badge
+**« Présent (non inscrit) »** et une note explicative sous le tableau.
+
+Vérifiez que les compteurs restent cohérents :
+
+- `Attendus` reste à **3** (les inscrits), pas 4 — un présent non inscrit
+  n'était pas attendu.
+- `Absents` n'est **jamais négatif**.
+
+Dans le CSV, une colonne **`Inscrit`** vaut `Non` sur sa ligne, et le pied de
+fichier porte `Presents non inscrits;1`.
+
+> Pourquoi ce cas compte : un absent improprement compté se remarque —
+> l'intéressé proteste. Un **présent effacé ne se remarque pas**.
+
+## 2. Le double scan entrée/sortie
+
+### Le cycle nominal
+
+1. Connectez-vous en étudiant sur un téléphone, scannez le QR code d'une
+   séance **en cours**. Attendu : présence enregistrée, réponse `201`.
+2. **Attendez au moins une minute** (voir le point suivant), puis scannez à
+   nouveau le même QR code affiché.
+3. Attendu : le scan est **accepté**, pas rejeté.
+
+Vérifiez l'effet en base :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT heure_arrivee, heure_depart, scan_arrivee_id IS NOT NULL AS a_scan_arrivee,
+         scan_depart_id  IS NOT NULL AS a_scan_depart
+    FROM presences WHERE seance_id='<SEANCE_ID>' AND etudiant_id='<ETUDIANT_ID>';
+  SELECT COUNT(*) AS nb_scans FROM scans
+   WHERE seance_id='<SEANCE_ID>' AND etudiant_id='<ETUDIANT_ID>';"
+```
+
+Attendu :
+
+- **UNE seule** ligne dans `presences`, avec `heure_depart` renseignée et
+  `scan_depart_id` non nul.
+- **DEUX** lignes dans `scans`.
+
+L'état reste unique, l'histoire est complète. C'est exactement la distinction
+qui avait été mal posée : la contrainte d'unicité était sur `scans` (le
+journal) au lieu de `presences` (l'état).
+
+Côté formateur, la colonne *Départ* affiche désormais l'heure **réelle**, sans
+la mention « déduit ».
+
+### Les trois refus
+
+| Test | Attendu |
+| --- | --- |
+| Scanner **une troisième fois** | `409 DEPART_DEJA_POINTE` — le cycle est complet |
+| Scanner deux fois **dans la même seconde** | `409 DEPART_TROP_TOT`, message « Rescannez en quittant la salle » |
+| Rescanner **le même jeton** (capture d'écran) | `409 REJEU_DETECTE` — inchangé |
+
+Le troisième cas mérite attention : un départ légitime utilise un jeton
+**différent**, émis par une rotation ultérieure. Le double scan n'affaiblit
+donc en rien la protection anti-rejeu.
+
+Vérifiez que le troisième scan est tout de même **journalisé** — une tentative
+refusée fait partie de l'histoire de la séance :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT COUNT(*) FROM scans WHERE seance_id='<SEANCE_ID>' AND etudiant_id='<ETUDIANT_ID>';"
+```
+
+Attendu : **3**, alors que `presences` en compte toujours **1**.
+
+## 3. Le vocabulaire du départ automatique
+
+Sur une séance terminée avec un départ non pointé, la légende sous le tableau
+doit décrire une **procédure**, jamais un manquement :
+
+> **Départ automatique** : l'heure de fin prévue a été appliquée par défaut.
+> Pour un suivi du temps exact — départ anticipé, par exemple — les étudiants
+> scannent le QR code une seconde fois en quittant la salle.
+
+Le texte « n'ont pas pointé leur sortie » ne doit plus apparaître nulle part.
+
+## 4. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+
+Attendu : **`118 passed`** (10 suites) côté backend et **`82 passed`**
+(8 fichiers) côté frontend.
+
+### Vérifier que ces tests détectent le défaut
+
+Réintroduisez la cause structurelle à la main, dans
+`backend/src/controllers/rapportController.js` :
+
+```sql
+-- Retirer les deux lignes UNION du IN (...) :
+--     UNION
+--     SELECT p2.etudiant_id FROM presences p2 WHERE p2.seance_id = s.id
+```
+
+```bash
+docker compose exec backend npx jest tests/rapport.test.js
+```
+
+Attendu : **échec** sur « un etudiant PRESENT mais NON INSCRIT figure au
+rapport ». Rétablissez ensuite les lignes.
+
+Sept mutations de ce type ont été appliquées pendant le développement, et les
+sept ont été détectées (détail dans `ANALYSE_CODE.md`).
+
+## Critère de succès global
+
+Validée si et seulement si : les trois UF ont des inscrits et aucun rapport
+n'est vide (section 1) ; un présent non inscrit apparaît, signalé, sans gonfler
+l'effectif attendu (section 1) ; un second scan renseigne `heure_depart` sur la
+**même** ligne de présence, avec deux lignes dans `scans` (section 2) ; les
+trois refus renvoient les codes attendus (section 2) ; le texte du départ
+automatique est procédural (section 3) ; et les deux suites passent
+(section 4).
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

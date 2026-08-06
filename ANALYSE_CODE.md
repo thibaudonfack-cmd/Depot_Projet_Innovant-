@@ -3846,6 +3846,308 @@ vérification passant par le DOM.
 
 ---
 
+# Le rapport vide : deux causes, dont une bien plus grave que l'autre
+
+Un test de bout en bout a produit ce symptôme : une séance où un étudiant
+avait **réellement scanné** affichait « Attendus 0, Présents 0, Absents 0 » et
+un tableau entièrement vide. Rien n'échouait, aucune erreur n'était levée. Le
+rapport était simplement faux.
+
+Le diagnostic a été **reproduit avant d'être corrigé** — en créant en base une
+séance sur une UF sans inscrits, puis une présence pour Amara Diallo, et en
+rejouant la requête telle quelle. Résultat : 0 ligne, alors que la présence
+existait bel et bien.
+
+## Cause 1 — le jeu de données (la cause immédiate)
+
+`02-seed.sql` créait **trois** unités de formation mais n'inscrivait les
+quatre étudiants qu'à **une seule** d'entre elles. Le formulaire de création de
+séance, lui, propose les trois. Une séance créée sur « Bureautique » ou
+« Comptabilité » n'avait donc, par construction, aucun étudiant attendu.
+
+Les trois UF ont désormais des inscrits, avec des effectifs **délibérément
+différents** (4, 3 et 2) : une répartition uniforme masquerait une erreur
+d'aiguillage entre UF, puisque tous les rapports se ressembleraient.
+
+C'est un rappel utile : **un jeu de données de démonstration incohérent produit
+des défauts qu'on impute d'abord au code.** Le temps de diagnostic part alors
+au mauvais endroit.
+
+## Cause 2 — la requête (la cause structurelle)
+
+Corriger le seed aurait suffi à faire disparaître le symptôme. Ç'aurait été une
+erreur, parce que la requête avait un défaut propre, que le seed ne faisait que
+révéler.
+
+La version initiale partait des **seules inscriptions** :
+
+```sql
+FROM inscriptions i
+JOIN etudiants e ON e.id = i.etudiant_id
+LEFT JOIN presences p ON ...
+WHERE i.uf_id = ?
+```
+
+Conséquence : un étudiant **réellement présent mais non inscrit** à l'UF de la
+séance disparaissait purement et simplement du rapport.
+
+**C'est le pire défaut possible pour un relevé d'assiduité**, et il vaut la
+peine de dire pourquoi. Un absent improprement compté **se remarque** :
+l'intéressé proteste. Un **présent effacé ne se remarque pas**. Ni l'étudiant,
+qui a scanné et croit son temps enregistré ; ni le formateur, qui ne peut pas
+remarquer l'absence de quelqu'un dont il ignore qu'il devrait figurer. Le
+défaut ne se manifeste qu'au moment où l'étudiant conteste ses heures en fin de
+semestre — quand plus personne ne peut reconstituer la séance.
+
+### L'union des deux populations
+
+Le rapport part maintenant de la séance, et joint **l'union** de ceux qu'on
+attendait et de ceux qui sont venus :
+
+```sql
+FROM seances s
+JOIN etudiants e ON e.id IN (
+       SELECT i2.etudiant_id FROM inscriptions i2 WHERE i2.uf_id = s.uf_id
+       UNION
+       SELECT p2.etudiant_id FROM presences  p2 WHERE p2.seance_id = s.id
+     )
+LEFT JOIN inscriptions i ON i.etudiant_id = e.id AND i.uf_id = s.uf_id
+LEFT JOIN presences    p ON p.seance_id  = s.id AND p.etudiant_id = e.id
+WHERE s.id = ?
+```
+
+Trois points de conception :
+
+- **`UNION` et non `UNION ALL`** : le dédoublonnage est précisément
+  l'objectif — un étudiant à la fois inscrit et présent ne doit apparaître
+  qu'une fois.
+- **`LEFT JOIN inscriptions`** sert à *savoir* si l'étudiant était attendu, pas
+  à filtrer. Une jointure interne ici réintroduirait exactement le défaut
+  corrigé.
+- **On part de `seances`**, dont on sait qu'elle existe : ses horaires restent
+  ainsi disponibles pour calculer la fin retenue, même quand l'étudiant n'a
+  aucune présence.
+
+Un présent non inscrit apparaît désormais avec le drapeau `inscrit: false`,
+signalé à l'écran (« Présent (non inscrit) ») et dans le CSV (colonne
+*Inscrit*). Ce n'est pas une anomalie à taire : c'est une information
+administrative utile — changement de groupe, inscription non enregistrée,
+erreur d'UF à la création de la séance. **Le rapport ne cache rien de ce que la
+base sait.**
+
+### Le comptage a dû être revu en conséquence
+
+`attendus` compte désormais les **inscrits**, pas les lignes du tableau : un
+présent non inscrit n'était, par définition, pas attendu. De même, `absents` se
+calcule comme « inscrits qui ne sont pas venus » et non par soustraction —
+sans quoi le nombre deviendrait **négatif** dès qu'un non-inscrit se présente.
+
+---
+
+# Le double scan : entrée puis sortie
+
+## Une contrainte posée sur la mauvaise table
+
+Le second scan renvoyait `409 DOUBLE_SCAN`. Le pointage de sortie était donc
+structurellement impossible, alors que c'est la seule façon d'obtenir un temps
+de participation exact.
+
+La cause tient en une ligne de schéma. La table `scans` portait :
+
+```sql
+UNIQUE KEY uq_scan_presence (seance_id, etudiant_id)
+```
+
+La règle exprimée était juste — un étudiant n'a qu'une présence par séance —
+mais **son emplacement ne l'était pas**. `scans` est le **journal brut des
+événements** : chaque présentation de jeton valide doit pouvoir y laisser une
+trace. Interdire une seconde ligne revenait à interdire d'*enregistrer* le
+scan de sortie.
+
+La contrainte a été retirée de `scans`. La règle métier n'est pas perdue : elle
+est portée par `uq_presence` sur la table `presences`, qui est l'endroit
+correct.
+
+> **C'est l'ÉTAT qui doit être unique, pas l'ÉVÉNEMENT.**
+
+Leçon généralisable, et le point que je retiens de ce défaut : une contrainte
+d'unicité posée sur une table de journal contraint **l'histoire**, pas
+**l'état**. Les deux se confondent tant qu'un fait ne peut survenir qu'une
+fois — et divergent dès qu'il peut survenir deux fois pour un même résultat.
+
+## L'aiguillage est implicite
+
+Rien n'est demandé à l'étudiant : il scanne le même QR code, et c'est
+l'existence d'une présence ouverte qui détermine le sens.
+
+Un choix explicite (« j'arrive » / « je pars ») ajouterait une décision à un
+geste qui doit rester instantané. Et **une décision offerte est une décision
+qui sera parfois mal prise**, produisant des données fausses qu'aucun contrôle
+ultérieur ne pourrait distinguer des vraies — un étudiant qui clique « je pars »
+en arrivant créerait une incohérence indétectable.
+
+| Situation | Effet | Réponse |
+| --- | --- | --- |
+| Aucune présence | INSERT : arrivée | `201`, `sens: "arrivee"` |
+| Présence ouverte | UPDATE `heure_depart` | `200`, `sens: "depart"` |
+| Départ déjà pointé | aucun | `409 DEPART_DEJA_POINTE` |
+| Départ < arrivée | aucun | `409 DEPART_TROP_TOT` |
+
+## Trois précautions
+
+**Le verrou de ligne.** La lecture préalable de la présence se fait
+`SELECT ... FOR UPDATE`, à l'intérieur de la transaction. Ce n'est pas une
+entorse à la règle « jamais de SELECT-puis-INSERT » posée à l'Étape 3 :
+c'en est le contraire, précisément **parce que** le verrou est posé par le
+moteur. Deux scans simultanés ne peuvent pas lire tous deux « présence
+ouverte ».
+
+**Le troisième scan est refusé.** Réécrire `heure_depart` à chaque nouveau scan
+permettrait à un étudiant de gonfler son temps en repassant devant l'écran en
+fin de journée. Le scan reste **journalisé** — une tentative refusée fait
+partie de l'histoire de la séance — mais l'état n'est pas modifié. Une
+correction reste possible par la voie tracée : demande de rectification, ou
+modification par le formateur avec motif consigné au journal d'audit. Ce qui
+est refusé ici, c'est la modification **silencieuse**.
+
+**Le garde-fou de schéma.** `chk_presence_bornes` exige
+`heure_depart > heure_arrivee`. Un étudiant qui rescanne par mégarde dans la
+même seconde violerait la contrainte et recevrait une erreur 500
+incompréhensible. Le cas est intercepté explicitement, avec un message qui dit
+**quoi faire** : « Rescannez en quittant la salle pour pointer votre départ. »
+
+**Le départ est rattaché à son scan.** `presences.scan_depart_id` est le
+symétrique de `scan_arrivee_id`. Sans ce lien, une heure de départ serait
+indistinguable d'une saisie manuelle du formateur — alors que les deux n'ont
+pas du tout la même valeur probante : l'une est adossée à un jeton signé et à
+un appareil enrôlé, l'autre à la parole d'une personne.
+
+## Le vocabulaire de l'interface a suivi
+
+« Ces étudiants n'ont pas pointé leur sortie » décrivait un manquement. Un
+départ déduit est pourtant le **fonctionnement normal** du système, pas une
+faute. Le texte est désormais procédural : il décrit ce qu'il faut faire pour
+obtenir mieux, plutôt que de constater ce qui n'a pas été fait.
+
+> **Départ automatique** : l'heure de fin prévue a été appliquée par défaut.
+> Pour un suivi du temps exact — départ anticipé, par exemple — les étudiants
+> scannent le QR code une seconde fois en quittant la salle.
+
+---
+
+# Preuve légale et valeur des exports administratifs
+
+Question à laquelle il faut pouvoir répondre en soutenance : **quelle valeur
+probante a un fichier CSV ou un PDF que n'importe qui peut modifier ?**
+
+## Un export est falsifiable, et ce n'est pas le problème
+
+Il faut le concéder d'emblée, sans détour : **un fichier exporté n'a aucune
+valeur probante intrinsèque.** Un CSV s'ouvre dans un tableur, une cellule se
+retouche, le fichier se réenregistre. Un PDF se réimprime. Aucune signature
+n'est apposée sur ces fichiers, et en apposer une ne changerait pas
+grand-chose : elle prouverait l'intégrité du fichier depuis sa génération, pas
+l'exactitude de son contenu au moment de la génération.
+
+Prétendre le contraire serait la faiblesse d'une défense, pas sa force.
+
+## Ce qui fait foi, c'est la base — pas le fichier
+
+La sécurité ne repose pas sur le document mais sur ce dont il est la
+**photographie instantanée** : une base de données dont l'altération est
+contrainte par plusieurs mécanismes indépendants.
+
+**a) Chaque présence est adossée à un scan cryptographiquement vérifié.** Le
+jeton du QR code est signé RS256 par le serveur (TTL 25 s), et la preuve de
+possession est signée **ECDSA P-256 par l'appareil enrôlé de l'étudiant**, dont
+la clé privée est non extractible. Fabriquer une présence de toutes pièces
+suppose donc de disposer de la clé privée du serveur *et* de celle de
+l'appareil d'un étudiant.
+
+**b) Le rejeu est fermé par le moteur.** `uq_scan_nonce (jti, etudiant_id)`
+interdit qu'un même jeton serve deux fois. La garantie est posée par InnoDB au
+moment de l'écriture, pas par une vérification applicative qui laisserait une
+fenêtre de course.
+
+**c) Les privilèges SQL rendent l'effacement impossible à l'application
+elle-même.** L'utilisateur `app_logs` ne dispose **ni de `UPDATE` ni de
+`DELETE`** sur `scans`. Une faille applicative — injection SQL, endpoint mal
+protégé, dépendance compromise — ne permettrait pas de réécrire l'historique :
+le refus vient du moteur, pas du code. C'est le point le plus solide de
+l'architecture, parce qu'il **ne dépend pas de la correction du code
+applicatif**.
+
+**d) Toute modification humaine est tracée et justifiée.** Une correction par
+le formateur ou une rectification acceptée exige un **motif obligatoire**,
+écrit dans `db_attestations.journal_modifications` — base séparée, sur laquelle
+l'application n'a que `SELECT` et `INSERT`, **jamais `UPDATE` ni `DELETE`**.
+Conservation cinq ans. Une correction ne peut donc pas être effacée après coup,
+même par celui qui l'a faite.
+
+## En cas de litige, c'est la régénération qui tranche
+
+D'où la position à défendre :
+
+> Le fichier exporté est un **document de travail**. En cas de contestation, il
+> ne sert pas de preuve — c'est **la régénération du rapport depuis le
+> serveur** qui fait foi, et la comparaison des deux versions qui révèle une
+> éventuelle falsification.
+
+Cette régénération est possible parce que le rapport est **calculé, jamais
+stocké** : durées, statut de séance et fin retenue sont dérivés à la
+milliseconde où la requête s'exécute. Il n'existe aucune copie figée que
+quelqu'un pourrait avoir modifiée entre-temps.
+
+C'est aussi pourquoi l'export porte `PROVISOIRE` ou `OFFICIEL` **dans son nom
+de fichier**, et pourquoi la version imprimée mentionne sa date
+d'établissement : un document détaché de son contexte doit porter de quoi être
+recoupé avec la source.
+
+Le parallèle est celui du relevé bancaire : le PDF téléchargé se retouche
+trivialement, et personne n'en conclut que le système bancaire n'a pas de
+valeur probante. **La preuve n'est pas le relevé, c'est le registre dont il est
+extrait.**
+
+## Ce que cette architecture ne garantit pas
+
+Un travail honnête doit aussi énoncer ses limites — elles seront demandées.
+
+- **La possession de l'appareil ne prouve pas la présence de la personne.** Un
+  étudiant peut confier son téléphone déverrouillé à un camarade. Le géofencing
+  restreint ce vecteur sans le fermer, et il ne bloque jamais — c'est un
+  signalement (cf. « Étape 7e »).
+- **Un administrateur de la base conserve tous les droits.** Les privilèges
+  restreints s'appliquent à l'application, pas au compte `root` MySQL. La
+  protection est architecturale, pas absolue.
+- **Aucun horodatage n'est certifié par un tiers.** Les heures sont celles de
+  l'horloge du serveur. Une contestation portant sur l'heure exacte du serveur
+  ne pourrait pas être tranchée par le système lui-même.
+
+## Évolution : le bilan global par unité de formation
+
+Le rapport actuel porte sur **une séance**. La validation administrative d'un
+cursus s'apprécie pourtant sur **un semestre entier** : un étudiant valide son
+UF s'il a suivi une proportion suffisante du volume horaire prévu.
+
+L'agrégation est directe — la colonne `uf.quota_minutes` existe déjà, et les
+minutes validées se somment sur toutes les séances de l'UF. Un
+`GET /api/uf/:id/bilan` produirait, par étudiant inscrit : total des minutes
+validées, quota requis, taux d'assiduité, et le drapeau
+« quota atteint / non atteint ».
+
+Deux points appelleraient une décision **pédagogique et non technique**, à ne
+pas trancher dans le code sans arbitrage de l'école :
+
+- Les minutes **déduites** (départ non scanné) comptent-elles au même titre que
+  les minutes constatées dans un bilan qui conditionne une certification ?
+- Une demande de rectification encore en attente sur une seule séance
+  rend-elle **tout le bilan** provisoire ?
+
+C'est l'extension la plus naturelle du travail réalisé, et la seule qui manque
+pour couvrir le cycle administratif complet.
+
+---
+
 ## Prochaine étape suggérée
 
 Le prototype couvre désormais l'ensemble de la chaîne. Les compléments
