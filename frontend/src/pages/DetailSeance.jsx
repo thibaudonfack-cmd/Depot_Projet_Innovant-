@@ -16,6 +16,8 @@ import {
 import { duree, heure } from '../components/format';
 import { appelerApi } from '../services/api';
 import { useRessource } from '../services/useRessource';
+import { useSeanceTerminee } from '../services/useSeanceTerminee';
+import RapportSeance from './RapportSeance';
 
 function versChampLocal(instant) {
   if (!instant) return '';
@@ -62,6 +64,69 @@ function IndicateurPosition({ presence }) {
       Position incertaine
     </span>
   );
+}
+
+/**
+ * Cellule "Depart" du tableau des presences.
+ *
+ * Le defaut corrige ici : tant que la seance etait en cours, afficher un tiret
+ * pour un depart non pointe etait juste. Une fois la seance terminee, ce meme
+ * tiret devenait faux -- le serveur retient alors l'heure de fin prevue pour
+ * calculer le temps, et l'interface montrait donc autre chose que ce qui etait
+ * compte. Un formateur pouvait en conclure que l'etudiant n'avait pas de temps
+ * valide, alors qu'il en avait un.
+ *
+ * L'heure deduite est donc affichee, mais JAMAIS confondue avec une heure
+ * relevee : la mention "déduit" l'accompagne, doublee d'une infobulle. La
+ * distinction ne repose pas sur la couleur seule (WCAG 1.4.1).
+ */
+function CelluleDepart({ presence, seanceTerminee, heureFinPrevue }) {
+  if (presence.heure_depart) {
+    return <span className="text-sable-700">{heure(presence.heure_depart)}</span>;
+  }
+
+  // Sans heure de fin prevue, le serveur ne deduit rien non plus : le tiret
+  // reste alors la representation honnete.
+  if (!seanceTerminee || !heureFinPrevue) return <span className="text-sable-500">—</span>;
+
+  return (
+    <span
+      className="inline-flex flex-wrap items-baseline gap-x-1.5"
+      title="Départ automatique : la sortie n'a pas été pointée, l'heure de fin prévue de la séance a été retenue."
+    >
+      <span className="text-sable-700">{heure(heureFinPrevue)}</span>
+      <span className="text-xs font-medium text-sable-600">déduit</span>
+    </span>
+  );
+}
+
+/**
+ * Cellule "Duree".
+ *
+ * `duree_minutes` ne vaut que pour un depart reellement pointe ;
+ * `duree_validee_minutes` est celle que retient l'administration. Les deux
+ * coincident des qu'un depart existe, et seule la seconde a un sens une fois
+ * la seance terminee sans pointage de sortie.
+ */
+function CelluleDuree({ presence, seanceTerminee }) {
+  if (presence.heure_depart) {
+    return <span className="text-sable-900">{duree(presence.duree_minutes)}</span>;
+  }
+
+  if (seanceTerminee) {
+    // Badge NEUTRE et non vert : la seance appartient au passe, un indicateur
+    // d'activite y serait trompeur. C'est le "En cours" eternel signale.
+    return presence.duree_validee_minutes === null || presence.duree_validee_minutes === undefined
+      ? <Badge ton="neutre">Terminé</Badge>
+      : (
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <span className="text-sable-900">{duree(presence.duree_validee_minutes)}</span>
+          <Badge ton="neutre">Terminé</Badge>
+        </span>
+      );
+  }
+
+  return <Badge ton="actif">En cours</Badge>;
 }
 
 /** Champ de motif, partage par les deux actions tracees. */
@@ -189,6 +254,7 @@ function ModaleDecision({ demande, decision, onFermer, onTraite }) {
 const INTERVALLE_ACTUALISATION_MS = 5000;
 
 function DetailSeance({ seanceId, onRetour }) {
+  const [rapportOuvert, setRapportOuvert] = useState(false);
   const [presenceModifiee, setPresenceModifiee] = useState(null);
   const [demandeTraitee, setDemandeTraitee] = useState(null);
   const [decision, setDecision] = useState(null);
@@ -199,11 +265,13 @@ function DetailSeance({ seanceId, onRetour }) {
   // formulaire pourrait porter sur une ligne qui vient de changer.
   const modaleOuverte = Boolean(presenceModifiee || demandeTraitee);
 
+  // L'actualisation est aussi suspendue pendant la lecture du rapport : la vue
+  // n'est plus a l'ecran, la solliciter ne servirait qu'a consommer du reseau.
   const presencesRes = useRessource(`/api/seances/${seanceId}/presences`, {
-    intervalleMs: INTERVALLE_ACTUALISATION_MS, suspendu: modaleOuverte,
+    intervalleMs: INTERVALLE_ACTUALISATION_MS, suspendu: modaleOuverte || rapportOuvert,
   });
   const rectificationsRes = useRessource(`/api/seances/${seanceId}/rectifications`, {
-    intervalleMs: INTERVALLE_ACTUALISATION_MS, suspendu: modaleOuverte,
+    intervalleMs: INTERVALLE_ACTUALISATION_MS, suspendu: modaleOuverte || rapportOuvert,
   });
 
   const donnees = presencesRes.donnees;
@@ -220,15 +288,33 @@ function DetailSeance({ seanceId, onRetour }) {
     rectificationsRes.recharger();
   }, [presencesRes, rectificationsRes]);
 
+  // Meme regle asymetrique qu'ailleurs : le serveur d'abord, l'horloge locale
+  // seulement s'il n'a pas encore bascule.
+  const seanceTerminee = useSeanceTerminee(
+    donnees?.seance?.terminee ?? false,
+    donnees?.seance?.heure_fin_prevue ?? null
+  );
+
   const enAttente = rectifications?.filter((r) => r.statut === 'en_attente') ?? [];
   const traitees = rectifications?.filter((r) => r.statut !== 'en_attente') ?? [];
+
+  if (rapportOuvert) {
+    return <RapportSeance seanceId={seanceId} onRetour={() => setRapportOuvert(false)} />;
+  }
 
   return (
     <div className="space-y-4">
       <Carte>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-sm font-semibold text-sable-900">Présences</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold text-sable-900">Présences</h2>
+              {donnees && (
+                <Badge ton={seanceTerminee ? 'neutre' : 'actif'}>
+                  {seanceTerminee ? 'Séance terminée' : 'Séance en cours'}
+                </Badge>
+              )}
+            </div>
             {donnees && (
               <p className="mt-1 text-sm text-sable-600">
                 {donnees.seance.uf_intitule} · {donnees.seance.salle_nom}
@@ -236,18 +322,37 @@ function DetailSeance({ seanceId, onRetour }) {
             )}
           </div>
           <div className="flex shrink-0 items-center gap-3">
-            {/* Signale que la vue se met a jour seule. Sans cette mention, un
-                formateur rafraichirait la page par reflexe, sans savoir que
-                c'est inutile. */}
-            <span className="hidden items-center gap-1.5 text-xs text-sable-600 sm:flex">
-              <span aria-hidden="true" className="size-1.5 rounded-full bg-emerald-600" />
-              Actualisation automatique
-            </span>
+            {/* Mention retiree une fois la seance terminee : plus rien ne
+                bouge, l'annoncer serait faux. */}
+            {!seanceTerminee && (
+              <span className="hidden items-center gap-1.5 text-xs text-sable-600 sm:flex">
+                <span aria-hidden="true" className="size-1.5 rounded-full bg-emerald-600" />
+                Actualisation automatique
+              </span>
+            )}
             <Bouton variante="secondaire" onClick={onRetour} className="w-auto px-3 py-2 text-xs">
               Retour
             </Bouton>
           </div>
         </div>
+
+        {/* Action principale du rapport : proposee UNIQUEMENT sur une seance
+            terminee. Sur une seance en cours, le document serait par
+            construction incomplet, et l'offrir inviterait a valider des
+            credits sur des chiffres encore mouvants. */}
+        {donnees && seanceTerminee && (
+          <div className="mt-4">
+            <Bouton onClick={() => setRapportOuvert(true)} className="sm:w-auto sm:px-5">
+              <svg viewBox="0 0 24 24" aria-hidden="true" className="size-4 shrink-0"
+                   fill="none" stroke="currentColor" strokeWidth="2"
+                   strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6M8 13h8M8 17h5" />
+              </svg>
+              Voir le rapport d&apos;assiduité
+            </Bouton>
+          </div>
+        )}
 
         <div aria-live="polite">
           {confirmation && <div className="mt-4"><Message ton="succes">{confirmation}</Message></div>}
@@ -287,11 +392,12 @@ function DetailSeance({ seanceId, onRetour }) {
                       </div>
                     </td>
                     <td className="py-3 pr-3 text-sable-700">{heure(p.heure_arrivee)}</td>
-                    <td className="py-3 pr-3 text-sable-700">{heure(p.heure_depart)}</td>
                     <td className="py-3 pr-3">
-                      {p.heure_depart
-                        ? <span className="text-sable-900">{duree(p.duree_minutes)}</span>
-                        : <Badge ton="actif">En cours</Badge>}
+                      <CelluleDepart presence={p} seanceTerminee={seanceTerminee}
+                                     heureFinPrevue={donnees.seance.heure_fin_prevue} />
+                    </td>
+                    <td className="py-3 pr-3">
+                      <CelluleDuree presence={p} seanceTerminee={seanceTerminee} />
                     </td>
                     <td className="py-3 text-right">
                       <Bouton variante="secondaire" onClick={() => setPresenceModifiee(p)}
@@ -304,6 +410,15 @@ function DetailSeance({ seanceId, onRetour }) {
               </tbody>
             </table>
           </div>
+        )}
+        {donnees && seanceTerminee
+          && donnees.presences.some((p) => !p.heure_depart) && donnees.seance.heure_fin_prevue && (
+          <p className="mt-4 text-xs leading-relaxed text-sable-600">
+            <span className="font-medium">Départ déduit</span> : ces étudiants
+            n&apos;ont pas pointé leur sortie. L&apos;heure de fin prévue de la
+            séance a été retenue pour calculer leur temps. Modifiez la présence
+            si l&apos;un d&apos;eux est parti plus tôt.
+          </p>
         )}
         {donnees && donnees.presences.some((p) => p.position_coherente === 0) && (
           <p className="mt-4 text-xs leading-relaxed text-sable-600">

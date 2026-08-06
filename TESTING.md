@@ -2561,6 +2561,274 @@ attente (section 4) ; et les deux suites passent (section 5).
 
 ---
 
+# Étape 8 (interface) — Rapport d'assiduité, export CSV et impression
+
+Protocole manuel après `docker compose up -d --build`. **Aucune migration de
+base n'est nécessaire** : cette itération ne touche ni le schéma SQL ni la
+logique backend. Un simple redémarrage suffit.
+
+Connectez-vous en formateur (`formateur@example.be` / `Formateur2026!`).
+
+## 1. Le badge « En cours » disparaît sur une séance terminée
+
+### Préparer une séance déjà terminée
+
+Le plus simple est de créer une séance dont l'heure de fin est **déjà
+passée**. Depuis l'interface formateur, créez une séance, puis avancez sa fin
+en base :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" presence_db -e "
+  UPDATE seances
+     SET heure_debut_prevue = DATE_SUB(NOW(), INTERVAL 3 HOUR),
+         heure_fin_prevue   = DATE_SUB(NOW(), INTERVAL 1 HOUR)
+   WHERE id = '<SEANCE_ID>';
+  SELECT id, statut, heure_fin_prevue FROM seances WHERE id = '<SEANCE_ID>';"
+```
+
+Notez que `statut` vaut toujours `ouverte` : c'est voulu. Le statut est
+**déduit** de l'horloge, jamais stocké.
+
+Faites scanner un étudiant **avant** cette manipulation, pour disposer d'une
+présence sans heure de départ.
+
+### Vérifier à l'écran
+
+Ouvrez le détail de cette séance. Attendu :
+
+| Élément | Attendu |
+| --- | --- |
+| Badge en tête de carte | **« Séance terminée »**, gris ardoise |
+| Colonne *Départ* | l'heure de fin prévue, suivie de la mention **« déduit »** |
+| Colonne *Durée* | la durée validée (ex. `2 h`) + badge gris **« Terminé »** |
+| Badge vert « En cours » | **absent partout** |
+| Mention « Actualisation automatique » | **absente** (plus rien ne bouge) |
+| Sous le tableau | légende « Départ déduit : ces étudiants n'ont pas pointé leur sortie… » |
+| Bouton QR | **absent** |
+| Bouton bleu | **« Voir le rapport d'assiduité »**, présent |
+
+Survolez la mention « déduit » : l'infobulle doit indiquer « Départ
+automatique : la sortie n'a pas été pointée, l'heure de fin prévue de la
+séance a été retenue. »
+
+### Contrôle négatif — la séance en cours
+
+Sur une séance dont l'heure de fin est encore à venir, tout doit être
+l'inverse : tiret dans la colonne *Départ*, badge vert « En cours », mention
+« Actualisation automatique » présente, et **aucun bouton de rapport** — le
+document serait par construction incomplet.
+
+### La bascule sans rechargement
+
+Créez une séance se terminant dans deux minutes, ouvrez son détail et
+**attendez sans rien toucher**. Au passage de l'heure, le badge doit basculer
+de vert à gris et la mention « déduit » apparaître, **sans rechargement de
+page**. La réévaluation est locale (période de 10 s), le serveur confirme
+ensuite.
+
+### Contrôle du cas limite
+
+Sur une séance terminée **sans** `heure_fin_prevue` (colonne à `NULL`, comme
+les séances créées avant l'introduction des horaires prévus), la colonne
+*Départ* doit rester un **tiret**. Aucune heure n'est inventée : le serveur ne
+déduit rien non plus dans ce cas.
+
+## 2. Le rapport d'assiduité
+
+Cliquez sur **« Voir le rapport d'assiduité »**.
+
+### En-tête officiel
+
+Doivent figurer : l'intitulé de l'UF, le local, la date, les horaires, et
+quatre compteurs — *Attendus*, *Présents*, *Absents*, *Temps validé*.
+
+En haut à droite, un badge **« Officiel »** ou **« Provisoire »**.
+
+### Les absents figurent au rapport
+
+**C'est le point à vérifier en priorité.** Le jeu de démonstration compte
+quatre inscrits ; si un seul a scanné, le tableau doit afficher **quatre
+lignes**, dont trois marquées « Absent » sur fond légèrement teinté.
+
+Un rapport qui n'afficherait que les présents ne répondrait pas à la question
+administrative, qui est de savoir **qui manquait**.
+
+Pour un absent, les colonnes *Arrivée*, *Départ* et *Temps validé* doivent
+toutes afficher un tiret — et surtout **pas** l'heure de fin de séance.
+
+### Les trois statuts
+
+Faites soumettre une demande de rectification par un étudiant présent
+(espace étudiant, dans les 24 h suivant la fin de la séance), puis rouvrez le
+rapport. Les trois libellés doivent coexister :
+
+- **Présent (validé)** — badge vert
+- **Absent** — badge gris
+- **Contestation en cours** — badge ambre
+
+L'étudiant qui a contesté doit afficher **« Contestation en cours »** et non
+« Présent (validé) » : la contestation prime, c'est le seul état qui doit
+interrompre une validation.
+
+### Départ déduit
+
+Un étudiant sans départ pointé affiche l'heure de fin de séance suivie de
+« déduit ». Celui dont le départ a réellement été pointé (ou corrigé par le
+formateur) l'affiche **sans aucune mention**.
+
+## 3. La bannière de conformité
+
+Tant qu'une demande de rectification est en attente, une **bannière ambre**
+doit s'afficher **au-dessus du tableau** :
+
+> **Ce rapport est provisoire.** Une demande de rectification est en attente.
+> Les temps concernés peuvent encore être modifiés : ne validez pas de crédits
+> sur cette base.
+
+Vérifiez le **pluriel** avec deux demandes en attente : « 2 demandes de
+rectification **sont** en attente ».
+
+Traitez la demande (accepter ou refuser). Rouvrez le rapport : la bannière doit
+avoir **disparu** et le badge être repassé à **« Officiel »**.
+
+**Contrôle sur une séance en cours** : un message d'information discret
+(« La séance n'est pas terminée… ») doit apparaître à la place de la bannière
+ambre. Les deux causes de provisoire n'ont pas la même gravité, et les
+confondre banaliserait l'avertissement le plus important.
+
+## 4. Export CSV — le test décisif des accents
+
+Cliquez sur **« Exporter en CSV »**. Survolez d'abord le bouton : l'infobulle
+annonce le nom du fichier.
+
+### Nom du fichier
+
+| Situation | Nom attendu |
+| --- | --- |
+| Aucune demande en attente, séance terminée | `assiduite-OFFICIEL-<uf>-<date>.csv` |
+| Une demande en attente | `assiduite-PROVISOIRE-<uf>-<date>.csv` |
+| Séance en cours | `assiduite-PROVISOIRE-<uf>-<date>.csv` |
+
+Le mot figure dans le **nom**, pas seulement dans le contenu : un fichier
+transféré par courriel arrive souvent détaché de son contexte.
+
+### Ouvrir dans Excel — la vérification qui compte
+
+**Double-cliquez** sur le fichier téléchargé (ne passez pas par l'assistant
+d'importation, qui masquerait le défaut recherché).
+
+Attendu :
+
+- Les colonnes sont **séparées** (le point-virgule est reconnu).
+- Les accents sont **corrects** : `Français langue étrangère`, et non
+  `FranÃ§ais langue Ã©trangÃ¨re`.
+
+Si les accents se disloquent, le BOM UTF-8 a disparu de `construireCsv`.
+
+### Vérifier le BOM en ligne de commande
+
+```bash
+head -c 3 ~/Téléchargements/assiduite-*.csv | xxd
+```
+
+Attendu : `efbbbf` — les trois octets de la marque d'ordre.
+
+### Contrôle de l'échappement
+
+Faites soumettre par un étudiant une demande dont le motif contient un
+point-virgule et un guillemet, par exemple :
+
+```
+Rendez-vous médical ; certificat "urgent" fourni
+```
+
+Le CSV ne doit pas s'en trouver décalé : la valeur apparaît entre guillemets,
+les guillemets internes doublés, et **le nombre de colonnes reste constant sur
+toutes les lignes**.
+
+### Contenu attendu
+
+- Une ligne par **inscrit**, absents compris.
+- Colonne `Depart deduit` à `Oui` / `Non`.
+- Un absent : `Arrivee`, `Depart` et `Temps valide` **vides** — pas `0h00`, qui
+  fausserait toute somme faite sur la colonne.
+- En pied, après une ligne vide : `Attendus`, `Presents`, `Absents`,
+  `Total valide`, et `Statut;OFFICIEL` ou `Statut;PROVISOIRE`.
+
+## 5. Aperçu avant impression
+
+Depuis le rapport, faites **Ctrl+P** (ou Cmd+P).
+
+| Doit avoir disparu | Doit être apparu |
+| --- | --- |
+| En-tête de l'application (marque, déconnexion) | Pied : « Document établi le … » |
+| Boutons *Retour*, *Imprimer*, *Exporter en CSV* | Mention `PROVISOIRE` si applicable |
+| Ombres et fond de page | — |
+
+Vérifiez également :
+
+- Les **badges de statut conservent leur fond coloré** (`print-color-adjust`).
+  Même sans couleur le document reste lisible — le libellé est écrit — mais la
+  lecture en diagonale en pâtirait.
+- Sur un rapport de plus d'une page, **l'en-tête du tableau se répète en tête
+  de chaque page**, et aucune ligne d'étudiant n'est coupée par un saut de
+  page.
+- Marges de 1,5 cm, fond blanc.
+
+Enregistrez en PDF : le document doit être présentable tel quel dans un
+dossier administratif.
+
+## 6. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+
+Attendu : `112 passed` (10 suites) côté backend — inchangé, cette itération ne
+touche pas au serveur — et **`80 passed`** (8 fichiers) côté frontend, dont
+55 ajoutés ici.
+
+Pour n'exécuter que les nouveaux :
+
+```bash
+docker compose exec frontend npx vitest run src/services/exportCsv.test.js
+docker compose exec frontend npx vitest run src/pages/DetailSeance.test.jsx
+docker compose exec frontend npx vitest run src/pages/RapportSeance.test.jsx
+```
+
+### Vérifier que ces tests détectent vraiment quelque chose
+
+Un test qui ne peut pas échouer ne prouve rien. Réintroduisez le défaut
+d'origine à la main :
+
+```bash
+# Dans frontend/src/pages/DetailSeance.jsx, fonction CelluleDuree,
+# remplacer :  if (seanceTerminee) {
+# par        :  if (false) {
+docker compose exec frontend npx vitest run src/pages/DetailSeance.test.jsx
+```
+
+Attendu : **3 tests en échec**. Rétablissez ensuite la ligne.
+
+Onze mutations de ce type ont été appliquées lors du développement, et les
+onze ont été détectées (tableau détaillé dans `ANALYSE_CODE.md`, section
+« Étape 8 (volet interface) »).
+
+## Critère de succès global
+
+Validée si et seulement si : aucune séance passée n'affiche « En cours » et sa
+colonne *Départ* porte l'heure déduite avec sa mention (section 1) ; le rapport
+fait apparaître **tous les inscrits**, absents compris, avec les trois statuts
+distincts (section 2) ; la bannière ambre apparaît puis disparaît selon les
+demandes en attente (section 3) ; le CSV s'ouvre dans Excel **avec les accents
+intacts**, porte `PROVISOIRE` ou `OFFICIEL` dans son nom, et résiste à un motif
+contenant un point-virgule (section 4) ; l'aperçu d'impression ne montre aucun
+bouton et affiche le pied de document (section 5) ; et les deux suites passent
+(section 6).
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

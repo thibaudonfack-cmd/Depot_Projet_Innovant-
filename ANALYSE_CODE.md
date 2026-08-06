@@ -3521,7 +3521,7 @@ accepte.
 # Étape 8 — Le rapport administratif
 
 `GET /api/seances/:id/rapport` prépare l'export destiné à la validation des
-crédits. L'interface d'export n'est pas encore réalisée.
+crédits, et `RapportSeance.jsx` le restitue à l'écran, en CSV et sur papier.
 
 **Le rapport part des inscriptions, pas des présences.** C'est le choix de
 conception central. Lister les présences ne montrerait que ceux qui sont
@@ -3538,6 +3538,311 @@ fondée :
 - `demande_en_attente` signale une contestation pendante. Valider des crédits
   sur un temps encore susceptible d'être corrigé exposerait à devoir revenir
   sur la décision.
+
+---
+
+# Étape 8 (volet interface) — Rendre lisible ce qui a été calculé
+
+Le backend produisait déjà les bons chiffres. Trois problèmes distincts
+restaient, tous du côté de l'affichage, et tous partageant la même nature :
+**l'interface montrait autre chose que ce que le serveur comptait.** C'est la
+catégorie de défaut la plus insidieuse d'un système administratif, parce que
+rien ne plante et que rien n'apparaît dans les journaux.
+
+## 1. Le calcul visuel des « départs déduits »
+
+### Le défaut, et pourquoi il n'était pas visible plus tôt
+
+Tant qu'une séance est en cours, afficher un tiret dans la colonne *Départ*
+pour un étudiant qui n'a pas pointé sa sortie est **juste** : rien n'est
+encore décidé, et inventer une heure serait mentir.
+
+Le même tiret devient **faux** à l'instant où la séance se termine. Le serveur
+retient alors `heure_fin_prevue` pour calculer le temps
+(`SQL_FIN_RETENUE = COALESCE(p.heure_depart, CASE WHEN <terminée> THEN s.heure_fin_prevue END)`),
+et l'écran continuait d'afficher un vide accompagné d'un badge vert
+« En cours ». Un formateur lisant ce tableau à 17 h pour une séance close à
+16 h en concluait raisonnablement que ces étudiants n'avaient **aucun temps
+validé** — alors qu'ils en avaient un, calculé, correct, et déjà utilisable
+pour la validation de crédits.
+
+Le défaut ne pouvait apparaître qu'après coup : pendant tout le développement,
+les séances de test étaient en cours, et l'affichage était alors exact.
+
+### Le remède, et sa limite volontaire
+
+`CelluleDepart` affiche désormais l'heure retenue, **avec la mention
+« déduit »** et une infobulle : « Départ automatique : la sortie n'a pas été
+pointée, l'heure de fin prévue de la séance a été retenue. »
+
+Le principe qui gouverne tout cet écran :
+
+> **Une valeur déduite reste une valeur affichée — mais elle n'est jamais
+> présentée comme constatée.**
+
+Les deux erreurs symétriques seraient également graves :
+
+| Choix | Conséquence |
+| --- | --- |
+| Masquer l'heure déduite | Le formateur croit l'étudiant sans temps validé, alors que l'administration en compte un. |
+| Afficher l'heure sans marque | Le formateur croit la sortie relevée. Il ne songera pas à corriger un étudiant réellement parti plus tôt. |
+| **Afficher avec marque** | Il voit le temps compté **et** sait qu'il repose sur une hypothèse. |
+
+La marque est **textuelle**, pas seulement colorée : le mot « déduit » est
+écrit. Une information portée par la seule couleur serait invisible à une
+personne daltonienne (WCAG 1.4.1), et disparaîtrait purement et simplement à
+l'impression noir et blanc — exactement le support où le rapport sera lu.
+
+**Un cas est délibérément laissé au tiret** : une séance terminée sans
+`heure_fin_prevue`. Le serveur ne déduit rien non plus dans ce cas — le
+`COALESCE` porte alors sur une valeur absente. Afficher une heure quelconque
+serait à nouveau montrer autre chose que ce qui est compté.
+
+### Le badge « En cours » éternel
+
+Même racine, symptôme plus voyant : le badge de durée était choisi sur le seul
+critère `heure_depart === null`, sans considérer l'état de la séance. Une
+séance de septembre affichait encore « En cours » en décembre.
+
+`CelluleDuree` distingue maintenant trois situations :
+
+| Situation | Affichage |
+| --- | --- |
+| Départ pointé | `duree_minutes`, la durée constatée |
+| Séance terminée, pas de départ | `duree_validee_minutes` + badge neutre « Terminé » |
+| Séance en cours | badge vert « En cours » |
+
+Le badge est **neutre (ardoise) et non vert** : le vert signale une activité,
+et une séance passée n'en a plus. C'est aussi la raison pour laquelle la
+mention « Actualisation automatique » disparaît une fois la séance close —
+elle annoncerait un mouvement qui n'a plus lieu.
+
+Les deux durées coexistent parce qu'elles répondent à deux questions
+différentes : `duree_minutes` est ce qui a été **relevé**,
+`duree_validee_minutes` est ce que l'administration **retient**. Elles
+coïncident dès qu'un départ existe, et seule la seconde a un sens quand il
+manque.
+
+### La bascule ne dépend pas d'un appel réseau
+
+L'écran réutilise `useSeanceTerminee`, avec sa règle asymétrique : le drapeau
+serveur d'abord, l'horloge locale seulement s'il n'a pas encore basculé. Une
+horloge locale en retard ne peut donc pas faire réapparaître une séance
+terminée ; une horloge en avance ne fait qu'anticiper de quelques secondes un
+état que le serveur confirmera. **L'erreur possible est toujours du côté
+inoffensif.**
+
+## 2. L'encodage de l'export CSV
+
+### Le BOM UTF-8, ou pourquoi « Français » devient « FranÃ§ais »
+
+Un fichier CSV ne transporte aucune indication d'encodage. Excel sous Windows,
+faute d'information, suppose l'encodage hérité de la machine (Windows-1252) et
+non UTF-8. Les caractères ASCII passent ; tout le reste se disloque, un
+caractère accentué UTF-8 occupant deux octets qui sont alors affichés comme
+deux caractères distincts.
+
+Le résultat est particulièrement pernicieux : le fichier **s'ouvre**, la
+plupart des noms sont **corrects**, et seuls ceux qui portent un accent sont
+abîmés. L'utilisateur en conclut que l'application est fautive, alors que le
+fichier est parfaitement valide — c'est le tableur qui devine mal.
+
+La **marque d'ordre des octets** (`\uFEFF`, sérialisée en `EF BB BF`) placée en
+tête lève l'ambiguïté : Excel y reconnaît explicitement de l'UTF-8. Le
+compromis est sans contrepartie — LibreOffice et les tableurs en ligne n'en
+ont pas besoin, mais sa présence ne les gêne pas.
+
+Deux mécanismes se cumulent, visant des consommateurs différents : le BOM pour
+le tableur qui lit le fichier après téléchargement, et
+`type: 'text/csv;charset=utf-8'` sur le `Blob` pour le navigateur qui le
+manipule.
+
+### Le point-virgule, et l'échappement qui va avec
+
+Séparateur `;` plutôt que `,` : en configuration francophone, la virgule est
+le **séparateur décimal**, et Excel attend donc le point-virgule comme
+séparateur de colonnes.
+
+Choisir un séparateur oblige à traiter le cas où une valeur le contient. Ce
+n'est pas théorique ici : un motif de rectification est saisi **librement par
+un étudiant**, et peut parfaitement contenir un point-virgule, un guillemet ou
+un retour à la ligne. Sans échappement, une seule ponctuation mal placée
+décalerait toutes les colonnes suivantes de la ligne — et le rapport
+présenterait des heures attribuées au mauvais champ.
+
+`echapperCsv` applique la RFC 4180 : mise entre guillemets dès que la valeur
+contient le séparateur, un guillemet ou un saut de ligne ; guillemets internes
+doublés. Les fins de ligne sont en CRLF, comme le prévoit la même RFC.
+
+### Trois pièges évités
+
+- **`null` ne devient jamais la chaîne `"null"`.** Une cellule vide se
+  comprend ; le mot « null » dans un document administratif ne se comprend
+  pas.
+- **Une durée absente n'est pas `0h00`.** Un absent n'a pas fait zéro minute :
+  il n'a pas de durée du tout. Confondre les deux fausserait toute somme faite
+  sur la colonne.
+- **Un absent n'hérite pas de l'heure de fin de séance.** L'API renseigne
+  `heure_fin_retenue` à partir de la séance ; elle est donc non nulle **même
+  pour un étudiant qui n'est jamais venu**. L'écrire telle quelle lui
+  donnerait une heure de sortie, relue en aval comme une preuve de présence.
+  La colonne reste vide en l'absence de présence.
+
+Ces fonctions sont **pures et testées unitairement**, délibérément sorties du
+composant. Un CSV se casse silencieusement : le fichier se télécharge, le
+tableur l'ouvre, et le défaut n'apparaît qu'à la lecture d'une ligne
+particulière — souvent chez le destinataire.
+
+## 3. Provisoire ou officiel : une distinction portée jusque dans le nom du fichier
+
+Deux causes rendent un rapport provisoire, de gravité inégale :
+
+| Cause | Gravité | Signalement |
+| --- | --- | --- |
+| Une demande de rectification est en attente | **Élevée** : les temps peuvent encore changer | Bannière ambre, avant le tableau |
+| La séance n'est pas terminée | Modérée : les temps continuent d'évoluer normalement | Message d'information discret |
+
+Les deux ne sont pas confondus. Traiter la séance en cours avec la même
+emphase que la contestation banaliserait l'avertissement le plus important —
+et un avertissement banalisé cesse d'être lu.
+
+**La bannière précède le tableau.** Une mention placée en pied serait lue
+après la décision qu'elle devait empêcher.
+
+**Le caractère provisoire figure dans le NOM du fichier**, pas seulement dans
+son contenu :
+
+```
+assiduite-PROVISOIRE-francais-langue-etrangere-2026-09-01.csv
+assiduite-OFFICIEL-francais-langue-etrangere-2026-09-01.csv
+```
+
+Un fichier téléchargé est renommé, transféré, imprimé, joint à un courriel. Il
+finit presque toujours détaché du contexte où il a été produit. Un secrétariat
+qui reçoit un fichier marqué `PROVISOIRE` sait qu'il ne doit pas valider de
+crédits sur cette base **sans même l'ouvrir**. L'intitulé est normalisé
+(accents retirés, espaces remplacés) parce qu'un nom de fichier contenant
+« é » survit mal aux transferts entre systèmes.
+
+Le bouton d'export porte le nom du fichier en infobulle : l'utilisateur sait
+ce qu'il va obtenir avant de cliquer.
+
+## 4. La feuille d'impression
+
+Un `Ctrl+P` sur le rapport doit produire un **document administratif**, pas la
+capture d'une application. `@media print` applique trois principes :
+
+1. **Retirer ce qui n'existe pas sur papier.** En-tête collant, boutons
+   d'action, indicateur d'actualisation : imprimés, ils donneraient une feuille
+   manifestement issue d'un écran, que personne ne classerait dans un dossier
+   d'inspection.
+2. **Rendre visible ce qui manque à l'écran.** La date d'établissement et la
+   mention « PROVISOIRE » n'ont aucune utilité à l'écran, où le contexte est
+   présent. Sur une feuille détachée, ce sont les **seules** informations
+   permettant de savoir ce qu'on lit. Le pied `.mention-impression` est masqué
+   à l'écran et révélé à l'impression.
+3. **Forcer l'encre.** Les navigateurs suppriment les fonds à l'impression :
+   sans `print-color-adjust: exact`, les badges d'état perdraient leur fond. Le
+   libellé resterait lisible — la couleur ne porte jamais l'information seule —
+   mais la lecture en diagonale d'un tableau de vingt lignes en pâtirait.
+
+S'y ajoutent `break-inside: avoid` sur les lignes (une ligne d'étudiant coupée
+en deux par un saut de page se relit mal) et `display: table-header-group` sur
+`thead`, qui fait **reparaître l'en-tête du tableau en tête de chaque page** —
+sans quoi la page 2 d'un rapport de trente étudiants serait une grille de
+chiffres sans intitulé de colonne.
+
+### Vue dédiée plutôt que modale
+
+Le cahier des charges laissait le choix. Une modale `<dialog>` **s'imprime
+mal** : selon le moteur, le navigateur imprime la page sous-jacente, ou la
+seule boîte tronquée à la hauteur de la fenêtre. Un document destiné à être
+imprimé ne peut pas dépendre de ce comportement. Le rapport est donc une vue
+qui remplace le contenu, et l'actualisation périodique de la vue séance est
+suspendue pendant sa lecture — elle n'est plus à l'écran, la solliciter ne
+consommerait que du réseau.
+
+### Le rapport n'est proposé que sur une séance terminée
+
+Le bouton « Voir le rapport d'assiduité » n'apparaît pas tant que la séance
+dure. L'API répondrait pourtant très bien — mais le document serait par
+construction incomplet, et l'offrir inviterait à valider des crédits sur des
+chiffres encore mouvants.
+
+## 5. Ce que l'interface se garde de faire
+
+L'écran **ne refiltre pas** la liste reçue. Le contrôleur part des
+inscriptions précisément pour que les absents figurent ; un `.filter()` bien
+intentionné côté React annulerait tout ce travail, et le ferait
+silencieusement. Un test de non-régression couvre ce point.
+
+L'ordre des statuts est également significatif : **la contestation prime sur
+la présence**. Un étudiant à la fois présent et contesté s'affiche comme
+contesté — c'est le seul état qui doit interrompre une validation, et le
+montrer en second le rendrait secondaire.
+
+## 6. Contrastes vérifiés
+
+| Élément | Ratio | Seuil |
+| --- | --- | --- |
+| Libellé de compteur `sable-600` sur `sable-50` | 6,33:1 | 4,5:1 |
+| Valeur de compteur `sable-900` sur `sable-50` | 15,04:1 | 4,5:1 |
+| Ligne d'absent `sable-900` sur `sable-50` | 15,04:1 | 4,5:1 |
+| Bannière `amber-900` sur `amber-50` | 8,75:1 | 4,5:1 |
+| Badge « Terminé » `sable-700` sur `sable-200` | 7,47:1 | 4,5:1 |
+| Mention « déduit » `sable-600` sur blanc | 6,56:1 | 4,5:1 |
+| Tiret d'absence `sable-500` sur `sable-50` | 4,70:1 | 4,5:1 |
+| Pastille de badge `amber-600` sur `amber-50` | 3,07:1 | 3:1 (1.4.11) |
+
+**Une nuance sur le seuil de 3:1.** Un premier passage de l'audit a signalé
+deux « échecs » : la bordure de carte (`sable-300`, 1,53:1) et celle de la
+bannière (`amber-300`, 1,44:1). Vérification faite, le critère 1.4.11 ne
+s'applique ni à l'une ni à l'autre : il vise les **composants d'interface** et
+les **objets graphiques nécessaires à la compréhension**. Une bordure
+décorative n'est ni l'un ni l'autre — l'information est portée par le texte
+qu'elle entoure, et la retirer ne ferait rien perdre. Le même seuil s'applique
+en revanche pleinement à la bordure d'un champ de saisie (`sable-400`,
+3,12:1), seul indice visuel de la présence d'une zone interactive. C'est
+exactement pourquoi cette nuance de la palette est plus sombre que la
+convention Tailwind habituelle.
+
+## 7. Tests
+
+**80 tests frontend** (contre 25 précédemment), dont 55 ajoutés ici :
+23 sur l'export CSV, 13 sur les états du tableau, 19 sur le rapport.
+
+Onze mutations ont été appliquées au code pour vérifier que ces tests
+détectent réellement les régressions qu'ils prétendent couvrir — un test qui
+ne peut pas échouer ne prouve rien. **Les onze ont été détectées :**
+
+| Mutation | Tests en échec |
+| --- | --- |
+| BOM UTF-8 retiré | 1 |
+| Nom de fichier toujours `OFFICIEL` | 2 |
+| Absent héritant de l'heure de fin de séance | 1 |
+| Échappement du séparateur supprimé | 2 |
+| Retour du badge « En cours » inconditionnel | 3 |
+| Retour du tiret sur un départ déduit | 2 |
+| Heure inventée quand aucune fin n'est prévue | 1 |
+| Rapport proposé sur une séance en cours | 1 |
+| Rapport filtré sur les seuls présents | 2 |
+| Statut de présence primant sur la contestation | 2 |
+| Bannière de conformité retirée | 2 |
+
+## 8. Note sur l'outillage de test
+
+Le cahier des charges mentionnait « Jest / React Testing Library ». Le projet
+utilise **Vitest**, choisi à l'Étape 6 parce qu'il partage la chaîne de
+transformation de Vite — Jest exigerait une configuration Babel parallèle pour
+le JSX, qu'il faudrait maintenir en phase avec `vite.config.js`. L'API est
+celle de Jest (`describe`, `test`, `expect`, `vi.fn`), les tests se lisent donc
+à l'identique.
+
+React Testing Library n'a pas été ajoutée : les tests montent les composants
+avec `createRoot` et `act` de React, ce qui suffit ici et évite une dépendance
+supplémentaire. La logique la plus fragile — l'échappement CSV — est de toute
+façon testée comme **fonction pure**, ce qui est plus robuste qu'une
+vérification passant par le DOM.
 
 ---
 

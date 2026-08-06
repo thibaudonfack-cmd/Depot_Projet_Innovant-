@@ -177,3 +177,70 @@ body {
     transform: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Feuille d'impression
+ *
+ * Un formateur qui fait Ctrl+P sur le rapport d'assiduité doit obtenir un
+ * document administratif, pas une capture de l'application. Trois principes :
+ *
+ * 1. RETIRER CE QUI N'EXISTE PAS SUR PAPIER. Un en-tête collant, un bouton
+ *    « Exporter en CSV » ou une bannière de navigation imprimés donneraient un
+ *    document manifestement issu d'un écran, que personne ne classerait dans
+ *    un dossier d'inspection.
+ * 2. RENDRE VISIBLE CE QUI MANQUE À L'ÉCRAN. La date d'établissement et la
+ *    mention « PROVISOIRE » n'ont pas d'utilité à l'écran, où le contexte est
+ *    présent ; sur une feuille détachée, ce sont les seules informations
+ *    permettant de savoir ce qu'on lit.
+ * 3. FORCER L'ENCRE. Les navigateurs suppriment par défaut les fonds à
+ *    l'impression : sans `print-color-adjust`, les badges d'état perdraient
+ *    leur fond et deviendraient du texte gris sur blanc. Le libellé resterait
+ *    lisible — la couleur ne porte jamais l'information seule — mais la
+ *    lecture en diagonale d'un tableau de vingt lignes en pâtirait.
+ * ------------------------------------------------------------------------ */
+@media print {
+  /* Le fond de page et les ombres consomment de l'encre sans rien apporter. */
+  html,
+  body {
+    background: #fff;
+  }
+
+  .zone-rapport {
+    border: none;
+    box-shadow: none;
+    padding: 0;
+  }
+
+  /* En-tête applicatif, boutons d'action, indicateurs d'actualisation. */
+  header[class*="sticky"],
+  .zone-actions,
+  button {
+    display: none !important;
+  }
+
+  /* Pied de document, masqué à l'écran par `hidden`. */
+  .mention-impression {
+    display: block !important;
+  }
+
+  /* Une ligne d'étudiant coupée en deux par un saut de page se relit mal, et
+   * un tableau dont l'en-tête ne reparaît pas en page 2 devient illisible. */
+  tr,
+  td,
+  th {
+    break-inside: avoid;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  * {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  @page {
+    margin: 1.5cm;
+  }
+}
