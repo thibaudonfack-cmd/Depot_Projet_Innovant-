@@ -7,6 +7,7 @@
 
 const crypto = require('crypto');
 const pool = require('../config/db');
+const { formateurGereUf, refuserHorsPerimetre } = require('../services/perimetreFormateur');
 const { coordonneeValide, RAYON_TOLERANCE_DEFAUT_M } = require('../services/geofencingService');
 
 /**
@@ -95,6 +96,19 @@ async function creerSeance(req, res) {
   const referenceUtilisable = coordonneeValide(latRef, lonRef);
 
   const seanceId = crypto.randomUUID();
+
+  // CLOISONNEMENT : on ne peut ouvrir une seance que sur une UF confiee.
+  // Le formulaire ne propose deja que celles-la, mais un identifiant peut
+  // toujours etre poste a la main -- et creer une seance sur l'UF d'un
+  // collegue lui ferait apparaitre un evenement qu'il n'a pas programme.
+  try {
+    if (!(await formateurGereUf(pool, req.utilisateur.id, ufId))) {
+      return refuserHorsPerimetre(res, 'Unite de formation');
+    }
+  } catch (error) {
+    console.error('[seanceController] Erreur verification perimetre :', error.message);
+    return res.status(500).json({ status: 'error', message: 'Erreur serveur.' });
+  }
 
   try {
     await pool.query(

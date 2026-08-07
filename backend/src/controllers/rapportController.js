@@ -33,6 +33,7 @@
 
 const pool = require('../config/db');
 const { SQL_SEANCE_TERMINEE, SQL_FIN_RETENUE } = require('./presenceController');
+const { formateurGereSeance, refuserHorsPerimetre } = require('../services/perimetreFormateur');
 
 /**
  * GET /api/seances/:id/rapport
@@ -42,10 +43,18 @@ async function genererRapport(req, res) {
   const { id: seanceId } = req.params;
 
   try {
+    const { existe, autorise } = await formateurGereSeance(pool, req.utilisateur.id, seanceId);
+    if (!existe || !autorise) return refuserHorsPerimetre(res, 'Seance');
+
     const [seances] = await pool.query(
       `SELECT s.id, s.uf_id, s.statut, s.date_ouverture,
               s.heure_debut_prevue, s.heure_fin_prevue, s.quota_minutes,
               u.intitule AS uf_intitule, sa.nom AS salle_nom,
+              -- Duree THEORIQUE de la seance : la reference contre laquelle
+              -- le temps de chaque etudiant s'apprecie. Calculee et non
+              -- stockee, comme toutes les durees du projet.
+              TIMESTAMPDIFF(MINUTE, s.heure_debut_prevue, s.heure_fin_prevue)
+                AS duree_theorique_minutes,
               ${SQL_SEANCE_TERMINEE} AS terminee
        FROM seances s
        JOIN uf u ON u.id = s.uf_id
@@ -92,6 +101,8 @@ async function genererRapport(req, res) {
       [seanceId]
     );
 
+    const dureeTheorique = seance.duree_theorique_minutes;
+
     const etudiants = lignes.map((ligne) => ({
       etudiant_id: ligne.etudiant_id,
       nom: ligne.etudiant_nom,
@@ -109,6 +120,18 @@ async function genererRapport(req, res) {
       heure_fin_retenue: ligne.fin_retenue,
       depart_deduit: ligne.presence_id !== null && ligne.heure_depart === null,
       minutes_validees: ligne.minutes_validees,
+      // KPI (Etape 10) : le temps seul ne dit rien sans sa reference.
+      // "2 h 30" est illisible ; "2 h 30 sur 3 h, soit 83 %" se lit d'un
+      // coup d'oeil et se compare d'une ligne a l'autre.
+      duree_theorique_minutes: dureeTheorique,
+      // null plutot que 0 quand la reference manque : un pourcentage calcule
+      // sur une duree inconnue serait faux, et 0 % se lirait comme une
+      // absence totale.
+      taux_presence: dureeTheorique && ligne.minutes_validees !== null
+        // Plafonne a 100 : un etudiant arrive en avance et reparti en retard
+        // afficherait sinon 104 %, ce qui ferait douter de tout le tableau.
+        ? Math.min(100, Math.round((ligne.minutes_validees / dureeTheorique) * 1000) / 10)
+        : null,
       source: ligne.source,
       position_coherente: ligne.position_coherente === null ? null : ligne.position_coherente === 1,
       distance_m: ligne.distance_m,
@@ -140,6 +163,14 @@ async function genererRapport(req, res) {
         // administratif prevu. Zero dans le cas normal.
         presents_non_inscrits: presents.filter((e) => !e.inscrit).length,
         minutes_validees_total: minutesTotal,
+        duree_theorique_minutes: dureeTheorique,
+        // Taux MOYEN sur les seuls presents : le diluer sur les absents
+        // melangerait deux questions distinctes ("les presents sont-ils
+        // restes ?" et "combien sont venus ?"), dont la seconde est deja
+        // repondue par presents/attendus.
+        taux_moyen_presents: dureeTheorique && presents.length > 0
+          ? Math.round((minutesTotal / (dureeTheorique * presents.length)) * 1000) / 10
+          : null,
         // Un rapport etabli sur une seance en cours est par nature provisoire.
         // Le dire explicitement evite qu'il soit archive comme definitif.
         provisoire: seance.terminee !== 1,

@@ -65,6 +65,7 @@
 
 const poolRgpd = require('../config/dbRgpd');
 const { consigner } = require('../services/journalService');
+const { refuserHorsPerimetre } = require('../services/perimetreFormateur');
 
 /**
  * POST /api/uf/:id/cloture-rgpd
@@ -96,14 +97,25 @@ async function cloturerUf(req, res) {
     // ce qui produirait deux entrees au journal d'audit pour une seule
     // destruction reelle.
     const [ufs] = await connexion.query(
-      'SELECT id, intitule, date_cloture_rgpd FROM uf WHERE id = ? FOR UPDATE',
-      [ufId]
+      `SELECT u.id, u.intitule, u.date_cloture_rgpd,
+              EXISTS (SELECT 1 FROM formateur_uf fu
+                       WHERE fu.uf_id = u.id AND fu.formateur_id = ?) AS autorise
+         FROM uf u WHERE u.id = ? FOR UPDATE`,
+      [req.utilisateur.id, ufId]
     );
     const uf = ufs[0];
 
     if (!uf) {
       await connexion.rollback();
       return res.status(404).json({ status: 'error', message: 'Unite de formation introuvable.' });
+    }
+
+    // CLOISONNEMENT. Detruire irreversiblement les donnees d'une UF qu'on
+    // n'encadre pas serait la pire consequence possible d'une faille de
+    // cloisonnement : elle ne se repare pas.
+    if (uf.autorise !== 1) {
+      await connexion.rollback();
+      return refuserHorsPerimetre(res, 'Unite de formation');
     }
 
     // Idempotence : une UF deja cloturee n'est pas re-purgee. 409 et non 200,

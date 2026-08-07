@@ -18,6 +18,7 @@
 //    quelqu'un venu une seule fois sur douze seances.
 
 const pool = require('../config/db');
+const { formateurGereUf, refuserHorsPerimetre } = require('../services/perimetreFormateur');
 
 /** Expression SQL : une seance est terminee (meme regle que partout ailleurs). */
 const SQL_TERMINEE = `
@@ -38,8 +39,16 @@ async function rapportGlobal(req, res) {
   const { id: ufId } = req.params;
 
   try {
+    // CLOISONNEMENT. Un bilan expose les heures de TOUS les inscrits : c'est
+    // la route la plus sensible du role formateur, et donc celle ou le
+    // mandat doit etre verifie en premier.
+    if (!(await formateurGereUf(pool, req.utilisateur.id, ufId))) {
+      return refuserHorsPerimetre(res, 'Unite de formation');
+    }
+
     const [ufs] = await pool.query(
-      'SELECT id, intitule, date_cloture, date_cloture_rgpd FROM uf WHERE id = ?',
+      `SELECT id, intitule, date_cloture, date_cloture_rgpd, volume_horaire_minutes
+         FROM uf WHERE id = ?`,
       [ufId]
     );
     const uf = ufs[0];
@@ -52,6 +61,14 @@ async function rapportGlobal(req, res) {
     const [compteurs] = await pool.query(
       `SELECT COUNT(*) AS total,
               SUM(${SQL_TERMINEE}) AS terminees,
+              -- Volume horaire REELLEMENT programme et deja ecoule. C'est le
+              -- denominateur honnete du taux : rapporter le temps de
+              -- presence au volume officiel de l'UF donnerait 20 % a un
+              -- etudiant assidu en milieu de semestre, ce qui affolerait
+              -- inutilement le secretariat.
+              COALESCE(SUM(CASE WHEN ${SQL_TERMINEE}
+                THEN TIMESTAMPDIFF(MINUTE, s.heure_debut_prevue, s.heure_fin_prevue)
+                END), 0) AS minutes_prevues,
               MIN(s.heure_debut_prevue) AS premiere,
               MAX(s.heure_fin_prevue) AS derniere
        FROM seances s WHERE s.uf_id = ?`,
@@ -59,6 +76,7 @@ async function rapportGlobal(req, res) {
     );
     const seancesTerminees = Number(compteurs[0].terminees ?? 0);
     const seancesTotal = Number(compteurs[0].total ?? 0);
+    const minutesPrevues = Number(compteurs[0].minutes_prevues ?? 0);
 
     // Une seance non terminee rend le bilan provisoire, exactement comme au
     // niveau de la seance : le total peut encore augmenter.
@@ -107,6 +125,12 @@ async function rapportGlobal(req, res) {
         presences,
         absences: seancesTerminees - presences,
         minutes_validees: minutes,
+        // KPI (Etape 10) : le ratio temps effectif / temps prevu. C'est la
+        // grandeur sur laquelle une validation d'UF se decide, et elle ne se
+        // deduit pas du nombre de seances -- un etudiant present a toutes
+        // les seances mais reparti au bout d'une heure a 100 % de presences
+        // et bien moins de 100 % de temps.
+        minutes_prevues: minutesPrevues,
         heures_validees: Math.floor(minutes / 60),
         departs_deduits: Number(ligne.departs_deduits),
         demandes_en_attente: Number(ligne.demandes_en_attente),
@@ -116,9 +140,20 @@ async function rapportGlobal(req, res) {
         // lecture. Division par zero evitee explicitement -- une UF dont
         // aucune seance n'est encore terminee produirait sinon NaN, qui
         // s'afficherait tel quel dans le tableau.
+        // DEUX taux, qui repondent a deux questions differentes et qu'il
+        // serait trompeur de confondre :
+        //   - taux_presence  : "a combien de seances est-il venu ?"
+        //   - taux_temps     : "quelle part du volume horaire a-t-il suivi ?"
+        // Le second est celui qui conditionne la certification ; le premier
+        // reste utile pour reperer un decrochage.
         taux_presence: seancesTerminees === 0
           ? null
           : Math.round((presences / seancesTerminees) * 100),
+        taux_temps: minutesPrevues === 0
+          ? null
+          // Plafonne a 100 et arrondi au dixieme : un depassement afficherait
+          // sinon 104 %, ce qui ferait douter de tout le tableau.
+          : Math.min(100, Math.round((minutes / minutesPrevues) * 1000) / 10),
       };
     });
 
@@ -140,6 +175,15 @@ async function rapportGlobal(req, res) {
         premiere_seance: compteurs[0].premiere,
         derniere_seance: compteurs[0].derniere,
         minutes_validees_total: totalMinutes,
+        minutes_prevues: minutesPrevues,
+        // Volume officiel inscrit au dossier pedagogique, distinct de ce qui
+        // a ete programme. Affiche a titre de reference, jamais utilise comme
+        // denominateur en cours de semestre.
+        volume_horaire_minutes: uf.volume_horaire_minutes,
+        taux_temps_moyen: minutesPrevues === 0 || etudiants.length === 0
+          ? null
+          : Math.min(100, Math.round(
+            (totalMinutes / (minutesPrevues * etudiants.length)) * 1000) / 10),
         provisoire,
         demandes_en_attente: etudiants.filter((e) => e.demandes_en_attente > 0).length,
       },

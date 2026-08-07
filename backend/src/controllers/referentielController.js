@@ -9,6 +9,7 @@
 // peut plus proposer que ce qui existe reellement.
 
 const pool = require('../config/db');
+const { clauseUfDuFormateur } = require('../services/perimetreFormateur');
 
 /** GET /api/uf - route protegee (toute session authentifiee). */
 async function listerUf(req, res) {
@@ -22,11 +23,26 @@ async function listerUf(req, res) {
     // en fin de semestre). D'ou le parametre `toutes`, plutot qu'une seconde
     // route qui dupliquerait la meme requete a un filtre pres.
     const toutes = req.query.toutes === '1';
+
+    // CLOISONNEMENT (Etape 10). Un formateur ne recoit que les UF qui lui
+    // sont confiees ; un etudiant continue de recevoir la liste complete,
+    // dont il a besoin pour lire l'intitule de ses propres seances et qui ne
+    // contient aucune donnee personnelle.
+    const filtres = [];
+    const parametres = [];
+    if (!toutes) filtres.push('u.date_cloture IS NULL');
+    if (req.utilisateur.role === 'formateur') {
+      filtres.push(clauseUfDuFormateur('u.id'));
+      parametres.push(req.utilisateur.id);
+    }
+
     const [lignes] = await pool.query(
-      `SELECT id, intitule, date_cloture, date_cloture_rgpd
-         FROM uf
-        ${toutes ? '' : 'WHERE date_cloture IS NULL'}
-        ORDER BY intitule`
+      `SELECT u.id, u.intitule, u.date_cloture, u.date_cloture_rgpd,
+              u.volume_horaire_minutes
+         FROM uf u
+        ${filtres.length > 0 ? `WHERE ${filtres.join(' AND ')}` : ''}
+        ORDER BY u.intitule`,
+      parametres
     );
     return res.status(200).json({
       status: 'ok',

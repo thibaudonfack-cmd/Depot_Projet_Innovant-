@@ -46,6 +46,6 @@ describe('GET /api/db-health', () => {
     // une valeur differente signalerait soit un seed non charge, soit un
     // seed modifie sans mise a jour de ce test (dans les deux cas, un signal
     // utile plutot qu'une assertion permissive qui masquerait le probleme).
-    expect(response.body.etudiants_count).toBe(4);
+    expect(response.body.etudiants_count).toBe(8);
   });
 });

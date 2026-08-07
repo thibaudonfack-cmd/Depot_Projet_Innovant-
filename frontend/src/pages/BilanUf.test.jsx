@@ -22,18 +22,21 @@ function bilan(surcharges = {}) {
     synthese: {
       inscrits: 2, seances_total: 3, seances_terminees: 2,
       premiere_seance: '2026-02-01T09:00:00.000Z', derniere_seance: '2026-05-30T12:00:00.000Z',
-      minutes_validees_total: 540, provisoire: true, demandes_en_attente: 0,
+      minutes_validees_total: 540, minutes_prevues: 360, volume_horaire_minutes: 1200,
+      taux_temps_moyen: 75, provisoire: true, demandes_en_attente: 0,
     },
     etudiants: [
       {
         etudiant_id: 'e1', nom: 'Amara Diallo', email: 'amara@example.be',
         seances_prevues: 2, presences: 2, absences: 0, minutes_validees: 360,
-        departs_deduits: 1, demandes_en_attente: 0, taux_presence: 100,
+        minutes_prevues: 360, departs_deduits: 1, demandes_en_attente: 0,
+        taux_presence: 100, taux_temps: 100,
       },
       {
         etudiant_id: 'e2', nom: 'Bilal Ozturk', email: 'bilal@example.be',
         seances_prevues: 2, presences: 1, absences: 1, minutes_validees: 180,
-        departs_deduits: 0, demandes_en_attente: 0, taux_presence: 50,
+        minutes_prevues: 360, departs_deduits: 0, demandes_en_attente: 0,
+        taux_presence: 50, taux_temps: 50,
       },
     ],
     ...surcharges,
@@ -122,12 +125,30 @@ describe('tableau du bilan', () => {
     expect(texte(c)).toContain('50 %');
   });
 
+  test('le RATIO horaire accompagne le pourcentage', async () => {
+    // « 92,5 % » seul ne dit pas sur quoi il porte. Le ratio donne la
+    // grandeur absolue, sur laquelle une validation se décide.
+    const c = await monter();
+    expect(texte(c)).toContain('6 h 00 / 6 h 00');
+    expect(texte(c)).toContain('3 h 00 / 6 h 00');
+  });
+
+  test('la jauge annonce son sens administratif aux lecteurs d\'écran', async () => {
+    const c = await monter();
+    const jauges = [...c.querySelectorAll('[role="img"]')];
+    expect(jauges.length).toBeGreaterThan(0);
+    expect(jauges.some((j) => j.getAttribute('aria-label').includes('Quota atteint'))).toBe(true);
+  });
+
   test('les départs automatiques sont signalés sous le total', async () => {
     expect(texte(await monter())).toContain('1 départ(s) automatique(s)');
   });
 
   test('une UF dont aucune séance n\'est terminée n\'affiche pas NaN', async () => {
-    reponseBilan.etudiants.forEach((e) => { e.taux_presence = null; e.seances_prevues = 0; });
+    reponseBilan.etudiants.forEach((e) => {
+      e.taux_presence = null; e.taux_temps = null; e.seances_prevues = 0; e.minutes_prevues = 0;
+    });
+    reponseBilan.synthese.taux_temps_moyen = null;
     const c = await monter();
     expect(texte(c)).not.toContain('NaN');
   });

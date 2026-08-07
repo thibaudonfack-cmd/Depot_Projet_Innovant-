@@ -11,6 +11,18 @@ const { app } = require('../server');
 const pool = require('../src/config/db');
 const { connecter } = require('./aide-auth');
 
+// Etape 10 : le cloisonnement exige un mandat explicite. Les UF creees a la
+// volee par ces suites doivent donc etre affectees au formateur de test,
+// sans quoi toutes les routes repondent 404 -- ce qui serait le comportement
+// CORRECT, mais pas ce que ces suites cherchent a verifier.
+const FORMATEUR_TEST = '44444444-4444-4444-4444-444444444445';
+async function affecter(poolLocal, ufId) {
+  await poolLocal.query(
+    'INSERT IGNORE INTO formateur_uf (formateur_id, uf_id) VALUES (?, ?)',
+    [FORMATEUR_TEST, ufId]
+  );
+}
+
 const SALLE_ID = '22222222-2222-2222-2222-222222222222';
 const AMARA = '33333333-3333-3333-3333-333333333331';
 const BILAL = '33333333-3333-3333-3333-333333333332';
@@ -24,6 +36,7 @@ let presenceAmaraA;
 async function creerUf(intitule) {
   const id = crypto.randomUUID();
   await pool.query('INSERT INTO uf (id, intitule) VALUES (?, ?)', [id, intitule]);
+  await affecter(pool, id);
   return id;
 }
 

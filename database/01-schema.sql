@@ -194,6 +194,13 @@ CREATE TABLE uf (
   intitule     VARCHAR(255) NOT NULL,
   -- Fin pedagogique de l'unite de formation (date administrative).
   date_cloture DATE         NULL,
+  -- Volume horaire OFFICIEL de l'unite, tel qu'inscrit au dossier
+  -- pedagogique. A ne pas confondre avec la somme des durees des seances
+  -- reellement programmees : c'est la reference administrative contre
+  -- laquelle une certification s'apprecie, et elle peut differer de ce qui a
+  -- ete effectivement organise. Nullable : les UF creees avant l'Etape 10
+  -- n'en ont pas, et le bilan se rabat alors sur le total des seances.
+  volume_horaire_minutes INT NULL,
   -- Etape 9 : horodatage de la CLOTURE RGPD.
   --
   -- A ne pas confondre avec date_cloture ci-dessus, qui est une date de
@@ -237,6 +244,45 @@ CREATE TABLE inscriptions (
   CONSTRAINT fk_inscription_etudiant FOREIGN KEY (etudiant_id) REFERENCES etudiants(id),
   CONSTRAINT fk_inscription_uf FOREIGN KEY (uf_id) REFERENCES uf(id),
   UNIQUE KEY uq_inscription (etudiant_id, uf_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -----------------------------------------------------------------------------
+-- formateur_uf  (Etape 10 : cloisonnement multi-tenants)
+--
+-- Table de LIAISON entre un compte formateur et les unites de formation qu'il
+-- enseigne. Sans elle, tout formateur authentifie voyait toutes les UF, tous
+-- les bilans et toutes les seances de l'etablissement.
+--
+-- POURQUOI UNE TABLE DE LIAISON PLUTOT QUE `seances.createur_id`
+--
+-- Filtrer sur le createur de la seance aurait ete plus simple, mais aurait
+-- produit un cloisonnement FAUX pour le cas d'usage reel :
+--
+--   a) Un bilan d'UF porte sur TOUTES les seances de l'unite. Si un collegue
+--      remplace le titulaire une semaine, sa seance sortirait du bilan --
+--      alors que les heures des etudiants, elles, comptent bien.
+--   b) Deux formateurs co-encadrent frequemment une meme UF (theorie et
+--      laboratoire). Un modele "un createur = un proprietaire" ne sait pas
+--      representer cela sans dupliquer l'UF.
+--   c) Le droit a exercer porte sur l'UNITE DE FORMATION, pas sur l'evenement.
+--      C'est le mandat pedagogique qui fonde l'acces aux donnees des
+--      etudiants, et un mandat ne se deduit pas d'un clic passe.
+--
+-- La cle primaire composite interdit nativement le doublon d'affectation ;
+-- ON DELETE CASCADE fait qu'un compte supprime perd ses affectations sans
+-- laisser de ligne orpheline qui reapparaitrait si l'identifiant etait
+-- reattribue.
+-- -----------------------------------------------------------------------------
+CREATE TABLE formateur_uf (
+  formateur_id CHAR(36) NOT NULL,
+  uf_id        CHAR(36) NOT NULL,
+  date_affectation DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (formateur_id, uf_id),
+  CONSTRAINT fk_formateur_uf_utilisateur
+    FOREIGN KEY (formateur_id) REFERENCES utilisateurs(id) ON DELETE CASCADE,
+  CONSTRAINT fk_formateur_uf_uf
+    FOREIGN KEY (uf_id) REFERENCES uf(id) ON DELETE CASCADE,
+  KEY idx_formateur_uf_uf (uf_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------------------------------------------------------

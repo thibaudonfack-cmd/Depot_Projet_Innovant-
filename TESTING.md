@@ -1443,7 +1443,7 @@ docker compose ps
 | `bilal.ozturk@example.org` | `Etudiant123!` | étudiant |
 | `chiara.rossi@example.org` | `Etudiant123!` | étudiant |
 | `driss.elamrani@example.org` | `Etudiant123!` | étudiant |
-| `formateur@example.org` | `Formateur123!` | formateur |
+| `sophie.lambert@example.org` | `Formateur123!` | formateur |
 
 ## 1. Connexion et cookie de session
 
@@ -1508,7 +1508,7 @@ Attendu : `401` avec `"code":"SESSION_INVALIDE"`.
 ```bash
 curl -k -c form.txt -s -X POST https://localhost/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"formateur@example.org","mot_de_passe":"Formateur123!"}' > /dev/null
+  -d '{"email":"sophie.lambert@example.org","mot_de_passe":"Formateur123!"}' > /dev/null
 curl -k -b form.txt -s -X POST https://localhost/api/enrolements \
   -H "Content-Type: application/json" -d '{"public_key":"x"}'
 ```
@@ -1669,7 +1669,7 @@ générer un jeton en ligne de commande :
 ```bash
 curl -k -c form.txt -s -X POST https://localhost/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"formateur@example.org","mot_de_passe":"Formateur123!"}' > /dev/null
+  -d '{"email":"sophie.lambert@example.org","mot_de_passe":"Formateur123!"}' > /dev/null
 
 curl -k -b form.txt -s -X POST https://localhost/api/seances \
   -H "Content-Type: application/json" \
@@ -3263,6 +3263,203 @@ terminées avec un dénominateur commun (section 2) ; la clôture détruit les
 coordonnées, préserve les heures, anonymise sans supprimer les scans, et
 verrouille l'UF pour les deux rôles (section 3) ; `app_logs` reste sans droit
 d'écriture sur `scans` (section 4) ; et les deux suites passent (section 5).
+
+---
+
+# Étape 10 — Cloisonnement, KPI et refonte des rapports
+
+**`docker compose down -v` OBLIGATOIRE.** Le schéma gagne la table
+`formateur_uf` et la colonne `uf.volume_horaire_minutes`, et le jeu de données
+est entièrement renouvelé.
+
+```bash
+docker compose down -v && docker compose up -d --build
+```
+
+## 0. Le nouveau jeu de données
+
+| Compte | Mot de passe | UF couvertes |
+| --- | --- | --- |
+| `sophie.lambert@example.org` | `Formateur123!` | Architecture Logicielle, Développement Web |
+| `marc.dupont@example.org` | `Formateur123!` | Développement Web, Cybersécurité |
+| `nadia.cherif@example.org` | `Formateur123!` | **DevOps uniquement** |
+
+Huit étudiants (`Etudiant123!`), quatre UF informatiques, trois salles
+(`A301`, `B101`, `Amphi Turing`). Effectifs volontairement **inégaux** :
+5, 7, 3 et 4 inscrits.
+
+> Le compte de démonstration du cloisonnement est **Nadia Cherif** : elle ne
+> doit voir ni les séances, ni les bilans des trois autres UF.
+
+## 1. Le cloisonnement à l'écran
+
+Connectez-vous en **Nadia Cherif**. Attendu :
+
+- La liste déroulante d'ouverture de séance ne propose **que** « DevOps et
+  Conteneurisation ».
+- « Séances récentes » ne montre aucune séance des autres UF.
+- Le sélecteur du bilan ne propose **qu'une** UF.
+
+Connectez-vous ensuite en **Sophie** puis en **Marc** : « Développement Web »
+apparaît chez **les deux**, et **une seule fois** chez chacun. C'est le cas
+de co-encadrement qui a motivé la table de liaison plutôt qu'un simple champ
+`createur_id`, et le `EXISTS` plutôt qu'un `JOIN`.
+
+## 2. Le cloisonnement contourné (le test qui compte)
+
+Masquer une UF dans une liste ne protège de rien : il suffit de poster
+l'identifiant. Récupérez l'identifiant d'une séance de Sophie, puis appelez
+l'API **en tant que Nadia** :
+
+```bash
+# Session Nadia
+curl -k -c nadia.txt -X POST https://localhost/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"nadia.cherif@example.org","mot_de_passe":"Formateur123!"}' > /dev/null
+
+SEANCE=<id d'une seance de Sophie>
+UF_ARCHI=11111111-1111-1111-1111-111111111111
+
+curl -k -b nadia.txt -s -o /dev/null -w "presences        : %{http_code}\n" https://localhost/api/seances/$SEANCE/presences
+curl -k -b nadia.txt -s -o /dev/null -w "rapport seance   : %{http_code}\n" https://localhost/api/seances/$SEANCE/rapport
+curl -k -b nadia.txt -s -o /dev/null -w "rectifications   : %{http_code}\n" https://localhost/api/seances/$SEANCE/rectifications
+curl -k -b nadia.txt -s -o /dev/null -w "bilan UF         : %{http_code}\n" https://localhost/api/uf/$UF_ARCHI/rapport-global
+curl -k -b nadia.txt -s -o /dev/null -w "cloture RGPD     : %{http_code}\n" \
+  -X POST -H 'Content-Type: application/json' -d '{"confirmation":"CLOTURER"}' \
+  https://localhost/api/uf/$UF_ARCHI/cloture-rgpd
+```
+
+Attendu : **404 sur les cinq lignes**, avec le code `HORS_PERIMETRE`.
+
+**Pourquoi 404 et non 403** : répondre « interdit » confirmerait l'existence de
+la ressource. En énumérant des identifiants, un formateur curieux apprendrait
+quelles UF existent et combien de séances chacune compte.
+
+Vérifiez ensuite qu'aucune clôture n'a eu lieu :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs \
+  -e "SELECT intitule, date_cloture_rgpd FROM uf;"
+```
+
+### Contre-épreuve indispensable
+
+Rejouez **les mêmes requêtes en tant que Sophie** : elles doivent toutes
+répondre **200**. Un filtre qui bloquerait tout le monde passerait tous les
+tests négatifs sans rien protéger.
+
+### Créer une séance sur l'UF d'un collègue
+
+```bash
+curl -k -b nadia.txt -X POST https://localhost/api/seances \
+  -H 'Content-Type: application/json' \
+  -d "{\"uf_id\":\"$UF_ARCHI\",\"salle_id\":\"22222222-2222-2222-2222-222222222222\"}"
+```
+
+Attendu : **404** `HORS_PERIMETRE`. Sans ce contrôle, un formateur ferait
+apparaître chez un collègue un événement qu'il n'a pas programmé.
+
+## 3. Les KPI
+
+### Rapport de séance
+
+Sur une séance terminée, chaque ligne doit afficher :
+
+- le **ratio** `2 h 30 / 3 h 00`, jamais une durée seule ;
+- une **jauge** avec le pourcentage écrit à côté ;
+- en en-tête, l'assiduité moyenne des présents et la durée théorique.
+
+### Bilan d'UF
+
+| Colonne | Attendu |
+| --- | --- |
+| Présences | `11 / 12` |
+| Heures suivies | `18 h 30 / 20 h 00` |
+| Taux horaire | jauge + `92,5 %` (virgule décimale) |
+
+**Vérifiez la distinction des deux taux.** Faites pointer un étudiant présent à
+toutes les séances mais parti au bout d'une heure : la colonne *Présences*
+affiche 100 %, le *taux horaire* bien moins. Ce sont deux questions
+différentes, et c'est la seconde qui conditionne la certification.
+
+Contrôles de robustesse :
+
+- Aucun `NaN` sur une UF dont aucune séance n'est terminée : le taux vaut `—`.
+- Aucun taux au-dessus de **100 %**, même pour un étudiant arrivé en avance et
+  reparti en retard.
+- Le dénominateur est le **volume programmé écoulé**, pas le volume officiel de
+  l'UF — sinon un étudiant assidu afficherait 20 % en milieu de semestre. Le
+  volume officiel est affiché à part, comme référence.
+
+### Les paliers de couleur
+
+| Taux | Couleur | Libellé annoncé |
+| --- | --- | --- |
+| ≥ 80 % | vert | Quota atteint |
+| 50 – 79 % | ambre | Partiel |
+| < 50 % | rouge | Insuffisant |
+
+Ces seuils viennent du règlement de la promotion sociale, pas d'un choix
+graphique.
+
+**Contrôle d'accessibilité** : le pourcentage doit être écrit **à côté** de
+chaque barre. Une jauge seule serait invisible pour une personne daltonienne
+(WCAG 1.4.1) et disparaîtrait à l'impression noir et blanc.
+
+## 4. L'impression
+
+**Ctrl+P** sur les deux rapports. Attendu :
+
+- Filet noir épais au-dessus du titre, filets francs autour du tableau.
+- En-têtes de colonnes en capitales, sur fond marqué, **répétés en tête de
+  chaque page**.
+- Les jauges conservent un **contour visible** même sans fond imprimé.
+- Aucun bouton, aucun en-tête applicatif, aucune zone de clôture.
+- Pied « Document établi le… ».
+- Un tableau de vingt étudiants tient sur une page A4.
+
+Enregistrez en PDF : le document doit être classable tel quel dans un dossier
+administratif.
+
+## 5. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+
+Attendu : **`154 passed`** (12 suites) et **`95 passed`** (9 fichiers).
+
+La suite dédiée :
+
+```bash
+docker compose exec backend npx jest tests/cloisonnement.test.js
+```
+
+### Vérifier que ces tests détectent la faille
+
+Retirez le filtre dans `backend/src/controllers/ufController.js` :
+
+```js
+// Remplacer :  if (!(await formateurGereUf(pool, req.utilisateur.id, ufId))) {
+// par        :  if (false) {
+docker compose exec backend npx jest tests/cloisonnement.test.js
+```
+
+Attendu : **2 tests en échec**. Rétablissez ensuite la ligne.
+
+Trois mutations de ce type ont été appliquées et **toutes détectées** : filtre
+retiré de la liste des séances, mandat non vérifié sur les présences, bilan
+accessible sans mandat.
+
+## Critère de succès global
+
+Validée si et seulement si : Nadia ne voit qu'une UF à l'écran **et** reçoit
+404 sur les cinq routes appelées directement (sections 1 et 2) ; Sophie obtient
+200 sur les mêmes routes (section 2) ; les ratios et pourcentages s'affichent
+sans `NaN` ni dépassement de 100 % (section 3) ; l'impression produit un
+document administratif sans boutons (section 4) ; et les deux suites passent
+(section 5).
 
 ---
 

@@ -243,4 +243,65 @@ body {
   @page {
     margin: 1.5cm;
   }
+
+  /* -------------------------------------------------------------------------
+   * Rigueur documentaire (Étape 10)
+   *
+   * À l'écran, la hiérarchie passe par la couleur et l'espacement. Sur
+   * papier, les deux s'affaiblissent : l'encre couleur n'est pas garantie, et
+   * la densité augmente mécaniquement. La typographie doit donc reprendre le
+   * travail à sa charge.
+   * ---------------------------------------------------------------------- */
+
+  /* Corps légèrement réduit : un tableau de vingt étudiants doit tenir sur
+   * une page A4, sinon l'en-tête se répète et le document double de volume. */
+  .zone-rapport {
+    font-size: 10.5pt;
+    line-height: 1.35;
+  }
+
+  /* Filets francs autour du tableau. À l'écran, un séparateur discret suffit ;
+   * imprimé, il disparaît presque et les colonnes se confondent. */
+  .zone-rapport table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .zone-rapport thead tr {
+    border-top: 1.5pt solid #000;
+    border-bottom: 1.5pt solid #000;
+  }
+
+  .zone-rapport tbody tr {
+    border-bottom: 0.4pt solid #999;
+  }
+
+  .zone-rapport th,
+  .zone-rapport td {
+    padding: 4pt 6pt;
+  }
+
+  /* Le survol n'existe pas sur papier : la trame alternée le remplacerait
+   * inutilement en encre. On la neutralise. */
+  .zone-rapport tbody tr {
+    background: transparent !important;
+  }
+
+  /* Les jauges gardent un contour visible même sans fond imprimé : la piste
+   * seule deviendrait invisible et la barre flotterait sans référence. */
+  .zone-rapport [role="img"] {
+    border: 0.4pt solid #666;
+  }
+
+  /* Le filet d'en-tête reste, en noir : c'est la marque visuelle qui
+   * distingue un relevé engageant d'une simple impression d'écran. */
+  .zone-rapport header {
+    border-top-color: #000 !important;
+  }
+
+  /* Titre du document légèrement agrandi, à contre-courant de la réduction
+   * générale : sur une feuille détachée, c'est la première chose lue. */
+  .zone-rapport h2 {
+    font-size: 14pt;
+  }
 }

@@ -5,6 +5,7 @@
 const crypto = require('crypto');
 const pool = require('../config/db');
 const { consigner } = require('../services/journalService');
+const { formateurGereSeance, refuserHorsPerimetre } = require('../services/perimetreFormateur');
 
 /** Fenetre laissee a l'etudiant apres la fin prevue de la seance. */
 const FENETRE_HEURES = 24;
@@ -271,15 +272,18 @@ async function traiterRectification(req, res) {
     // interpretation.
     const [demandes] = await connexion.query(
       `SELECT d.id, d.statut, d.presence_id,
+              EXISTS (SELECT 1 FROM formateur_uf fu
+                       WHERE fu.uf_id = s.uf_id AND fu.formateur_id = ?) AS autorise,
               DATE_FORMAT(d.heure_arrivee_demandee, '%Y-%m-%d %H:%i:%s') AS arrivee_demandee,
               DATE_FORMAT(d.heure_depart_demandee, '%Y-%m-%d %H:%i:%s') AS depart_demande,
               DATE_FORMAT(p.heure_arrivee, '%Y-%m-%d %H:%i:%s') AS arrivee_actuelle,
               DATE_FORMAT(p.heure_depart, '%Y-%m-%d %H:%i:%s') AS depart_actuel
        FROM demandes_rectification d
        JOIN presences p ON p.id = d.presence_id
+       JOIN seances s ON s.id = p.seance_id
        WHERE d.id = ?
        FOR UPDATE`,
-      [demandeId]
+      [req.utilisateur.id, demandeId]
     );
 
     const demande = demandes[0];
@@ -287,6 +291,14 @@ async function traiterRectification(req, res) {
       await connexion.rollback();
       return res.status(404).json({ status: 'error', message: 'Demande introuvable.' });
     }
+    // Trancher la demande d'un etudiant qu'on n'encadre pas reviendrait a
+    // statuer sur un dossier dont on ignore le contexte -- et priverait le
+    // formateur responsable de sa decision.
+    if (demande.autorise !== 1) {
+      await connexion.rollback();
+      return refuserHorsPerimetre(res, 'Demande');
+    }
+
     if (demande.statut !== 'en_attente') {
       // FOR UPDATE plus haut : deux formateurs traitant la meme demande
       // simultanement, le second attend et constate qu'elle est deja tranchee.
@@ -391,7 +403,9 @@ async function modifierPresence(req, res) {
     // Meme precaution que ci-dessus : lecture en chaines, jamais en objets
     // Date, pour ne pas reintroduire de conversion de fuseau.
     const [presences] = await connexion.query(
-      `SELECT p.id,
+      `SELECT p.id, s.id AS seance_id,
+              EXISTS (SELECT 1 FROM formateur_uf fu
+                       WHERE fu.uf_id = s.uf_id AND fu.formateur_id = ?) AS autorise,
               DATE_FORMAT(p.heure_arrivee, '%Y-%m-%d %H:%i:%s') AS heure_arrivee,
               DATE_FORMAT(p.heure_depart, '%Y-%m-%d %H:%i:%s') AS heure_depart,
               -- Valeur demandee, ramenee dans l'horloge de la base pour le
@@ -403,12 +417,20 @@ async function modifierPresence(req, res) {
        JOIN seances s ON s.id = p.seance_id
        JOIN uf u ON u.id = s.uf_id
        WHERE p.id = ? FOR UPDATE`,
-      [nouveauDepart, nouveauDepart, presenceId]
+      [req.utilisateur.id, nouveauDepart, nouveauDepart, presenceId]
     );
     const presence = presences[0];
     if (!presence) {
       await connexion.rollback();
       return res.status(404).json({ status: 'error', message: 'Presence introuvable.' });
+    }
+
+    // Cloisonnement : modifier l'horaire d'un etudiant qu'on n'encadre pas
+    // n'a aucun fondement, et serait invisible du formateur reellement
+    // responsable.
+    if (presence.autorise !== 1) {
+      await connexion.rollback();
+      return refuserHorsPerimetre(res, 'Presence');
     }
 
     // Le verrou de cloture s'applique AUSSI au formateur, et c'est voulu.
@@ -467,7 +489,15 @@ async function modifierPresence(req, res) {
 
 /** GET /api/seances/:id/rectifications - role formateur. */
 async function listerRectificationsDeSeance(req, res) {
+  const { id: seanceId } = req.params;
+
   try {
+    // Meme mandat exige que pour les presences : ces demandes contiennent le
+    // motif redige librement par l'etudiant, souvent d'ordre personnel
+    // (rendez-vous medical, situation familiale).
+    const { existe, autorise } = await formateurGereSeance(pool, req.utilisateur.id, seanceId);
+    if (!existe || !autorise) return refuserHorsPerimetre(res, 'Seance');
+
     const [lignes] = await pool.query(
       `SELECT d.id, d.motif, d.statut, d.date_soumission, d.motif_decision,
               d.heure_arrivee_demandee, d.heure_depart_demandee,

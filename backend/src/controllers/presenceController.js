@@ -12,6 +12,9 @@
 // JavaScript, pour que le fuseau de la base fasse foi de bout en bout.
 
 const pool = require('../config/db');
+const {
+  clauseUfDuFormateur, formateurGereSeance, refuserHorsPerimetre,
+} = require('../services/perimetreFormateur');
 
 /** Fenetre de rectification ouverte a l'etudiant, en heures (regle D). */
 const FENETRE_RECTIFICATION_HEURES = 24;
@@ -63,8 +66,13 @@ async function listerSeances(req, res) {
        FROM seances s
        JOIN uf u ON u.id = s.uf_id
        JOIN salles sa ON sa.id = s.salle_id
+       -- Cloisonnement pose DANS la requete : les seances des collegues ne
+       -- sont jamais lues, donc jamais susceptibles de fuir par un champ
+       -- oublie ou un journal trop bavard.
+       WHERE ${clauseUfDuFormateur('s.uf_id')}
        ORDER BY s.date_ouverture DESC
-       LIMIT 50`
+       LIMIT 50`,
+      [req.utilisateur.id]
     );
     // MySQL renvoie 0/1 pour un booleen ; on normalise ici plutot que de
     // laisser chaque vue comparer une valeur numerique a un nom qui promet un
@@ -85,6 +93,12 @@ async function listerPresencesDeSeance(req, res) {
   const { id: seanceId } = req.params;
 
   try {
+    // Verification du mandat AVANT toute lecture de donnees d'etudiants.
+    // Masquer une seance dans une liste n'empeche personne d'en deviner
+    // l'identifiant et de l'appeler directement.
+    const { existe, autorise } = await formateurGereSeance(pool, req.utilisateur.id, seanceId);
+    if (!existe || !autorise) return refuserHorsPerimetre(res, 'Seance');
+
     const [seances] = await pool.query(
       `SELECT s.id, s.statut, s.heure_debut_prevue, s.heure_fin_prevue,
               u.intitule AS uf_intitule, sa.nom AS salle_nom,

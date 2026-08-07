@@ -94,7 +94,7 @@ describe('GET /api/seances (formateur)', () => {
     const notre = reponse.body.seances.find((s) => s.id === seanceId);
     expect(notre).toBeDefined();
     expect(notre.nb_presences).toBe(2);
-    expect(notre.uf_intitule).toBe('Anglais - Niveau 2');
+    expect(notre.uf_intitule).toBe('Architecture Logicielle');
   });
 
   test('un étudiant ne peut pas lister les séances (403)', async () => {

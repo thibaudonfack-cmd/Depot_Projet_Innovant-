@@ -22,6 +22,8 @@
 import { useMemo } from 'react';
 import { Badge, Bouton, Carte, ChargementEnLigne, Message } from '../components/ui';
 import { dateCourte, duree, heure } from '../components/format';
+import Jauge from '../components/Jauge';
+import { formaterRatio } from '../components/taux';
 import { useRessource } from '../services/useRessource';
 import { telechargerCsv, nommerFichier } from '../services/exportCsv';
 
@@ -128,13 +130,16 @@ function RapportSeance({ seanceId, onRetour }) {
               ces informations sont les seules permettant de savoir de quelle
               seance il s'agit.
               --------------------------------------------------------------- */}
-          <header className="border-b border-sable-300 pb-5">
+          {/* Filet superieur epais : marque visuelle des documents
+              administratifs officiels, qui distingue d'emblee un releve
+              engageant d'un simple ecran de consultation. */}
+          <header className="border-t-4 border-accent-600 pt-5 pb-6">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0">
-                <p className="text-xs font-medium tracking-wide text-sable-600 uppercase">
+                <p className="text-xs font-semibold tracking-[0.12em] text-accent-900 uppercase">
                   Rapport d&apos;assiduité
                 </p>
-                <h2 className="mt-1 text-lg font-semibold text-sable-900">
+                <h2 className="mt-1 text-xl font-semibold tracking-tight text-sable-900">
                   {donnees.seance.uf_intitule}
                 </h2>
                 <p className="mt-1 text-sm text-sable-700">
@@ -155,6 +160,35 @@ function RapportSeance({ seanceId, onRetour }) {
               <Compteur libelle="Absents" valeur={donnees.synthese.absents} />
               <Compteur libelle="Temps validé" valeur={duree(donnees.synthese.minutes_validees_total)} />
             </div>
+
+            {/* KPI de seance : le taux moyen des PRESENTS. Le diluer sur les
+                absents melangerait deux questions distinctes, dont l'une est
+                deja repondue par le compteur "Présents". */}
+            {donnees.synthese.taux_moyen_presents !== null
+              && donnees.synthese.taux_moyen_presents !== undefined && (
+              <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-sable-300 bg-white px-4 py-3">
+                <div className="min-w-40 flex-1">
+                  <p className="text-xs font-medium text-sable-600">
+                    Assiduité moyenne des présents
+                  </p>
+                  <div className="mt-1.5">
+                    <Jauge pourcentage={donnees.synthese.taux_moyen_presents}>
+                      {formaterRatio(
+                        donnees.synthese.minutes_validees_total,
+                        donnees.synthese.duree_theorique_minutes
+                          * Math.max(1, donnees.synthese.presents)
+                      )}
+                    </Jauge>
+                  </div>
+                </div>
+                <p className="text-xs leading-relaxed text-sable-600">
+                  Durée théorique de la séance :{' '}
+                  <span className="font-medium text-sable-900">
+                    {duree(donnees.synthese.duree_theorique_minutes)}
+                  </span>
+                </p>
+              </div>
+            )}
           </header>
 
           {/* ---------------------------------------------------------------
@@ -202,30 +236,41 @@ function RapportSeance({ seanceId, onRetour }) {
                 Assiduité de tous les étudiants inscrits à cette unité de formation
               </caption>
               <thead>
-                <tr className="border-b border-sable-300 text-left text-xs text-sable-600">
-                  <th scope="col" className="pb-2 font-medium">Étudiant</th>
-                  <th scope="col" className="pb-2 font-medium">Statut</th>
-                  <th scope="col" className="pb-2 font-medium">Arrivée</th>
-                  <th scope="col" className="pb-2 font-medium">Départ</th>
-                  <th scope="col" className="pb-2 font-medium">Temps validé</th>
+                <tr className="border-y-2 border-sable-400 bg-sable-100 text-left text-xs tracking-wide text-sable-700 uppercase">
+                  <th scope="col" className="px-3 py-3 font-semibold">Étudiant</th>
+                  <th scope="col" className="px-3 py-3 font-semibold">Statut</th>
+                  <th scope="col" className="px-3 py-3 font-semibold">Arrivée</th>
+                  <th scope="col" className="px-3 py-3 font-semibold">Départ</th>
+                  <th scope="col" className="px-3 py-3 font-semibold">Temps validé</th>
+                  <th scope="col" className="px-3 py-3 font-semibold">Assiduité</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-sable-200">
                 {donnees.etudiants.map((etudiant) => (
-                  <tr key={etudiant.etudiant_id} className={etudiant.present ? '' : 'bg-sable-50'}>
-                    <td className="py-3 pr-3">
+                  <tr key={etudiant.etudiant_id}
+                      className={etudiant.present ? 'hover:bg-sable-50' : 'bg-sable-50'}>
+                    <td className="px-3 py-4">
                       <span className="font-medium text-sable-900">{etudiant.nom}</span>
                       <span className="block text-xs text-sable-600">{etudiant.email}</span>
                     </td>
-                    <td className="py-3 pr-3"><StatutEtudiant etudiant={etudiant} /></td>
-                    <td className="py-3 pr-3 text-sable-700">
+                    <td className="px-3 py-4"><StatutEtudiant etudiant={etudiant} /></td>
+                    <td className="px-3 py-4 text-sable-700">
                       {etudiant.present ? heure(etudiant.heure_arrivee) : <span className="text-sable-500">—</span>}
                     </td>
-                    <td className="py-3 pr-3"><CelluleDepart etudiant={etudiant} /></td>
-                    <td className="py-3 tabular-nums">
+                    <td className="px-3 py-4"><CelluleDepart etudiant={etudiant} /></td>
+                    <td className="px-3 py-4 tabular-nums">
                       {etudiant.minutes_validees === null || etudiant.minutes_validees === undefined
                         ? <span className="text-sable-500">—</span>
-                        : <span className="font-medium text-sable-900">{duree(etudiant.minutes_validees)}</span>}
+                        : (
+                          <span className="font-medium text-sable-900">
+                            {formaterRatio(etudiant.minutes_validees, etudiant.duree_theorique_minutes)}
+                          </span>
+                        )}
+                    </td>
+                    <td className="w-40 px-3 py-4">
+                      {etudiant.present
+                        ? <Jauge pourcentage={etudiant.taux_presence} taille="compacte" />
+                        : <span className="text-sable-500">—</span>}
                     </td>
                   </tr>
                 ))}

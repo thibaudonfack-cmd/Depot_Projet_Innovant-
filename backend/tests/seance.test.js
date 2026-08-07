@@ -93,9 +93,14 @@ describe('POST /api/seances — creation de seance (RF-01)', () => {
     expect((await creer(cookieFormateur, { uf_id: UF_ID })).status).toBe(400);
   });
 
-  test('uf_id inconnu : 400 (violation de cle etrangere)', async () => {
+  test('uf_id inconnu : 404 HORS_PERIMETRE (le cloisonnement tranche avant la cle etrangere)', async () => {
+    // Etape 10. Ce test attendait 400 (violation de cle etrangere). Le
+    // cloisonnement repond desormais 404 EN AMONT, et c'est le comportement
+    // correct : distinguer "cette UF n'existe pas" de "cette UF ne vous est
+    // pas confiee" permettrait d'enumerer les UF de l'etablissement.
     const reponse = await creer(cookieFormateur, { uf_id: INEXISTANT, salle_id: SALLE_ID });
-    expect(reponse.status).toBe(400);
+    expect(reponse.status).toBe(404);
+    expect(reponse.body.code).toBe('HORS_PERIMETRE');
   });
 
   test('sans session : 401', async () => {

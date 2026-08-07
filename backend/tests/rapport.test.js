@@ -7,6 +7,18 @@ const { app } = require('../server');
 const pool = require('../src/config/db');
 const { connecter } = require('./aide-auth');
 
+// Etape 10 : le cloisonnement exige un mandat explicite. Les UF creees a la
+// volee par ces suites doivent donc etre affectees au formateur de test,
+// sans quoi toutes les routes repondent 404 -- ce qui serait le comportement
+// CORRECT, mais pas ce que ces suites cherchent a verifier.
+const FORMATEUR_TEST = '44444444-4444-4444-4444-444444444445';
+async function affecter(poolLocal, ufId) {
+  await poolLocal.query(
+    'INSERT IGNORE INTO formateur_uf (formateur_id, uf_id) VALUES (?, ?)',
+    [FORMATEUR_TEST, ufId]
+  );
+}
+
 const UF_ID = '11111111-1111-1111-1111-111111111111';
 const SALLE_ID = '22222222-2222-2222-2222-222222222222';
 const AMARA = '33333333-3333-3333-3333-333333333331';
@@ -31,6 +43,8 @@ async function creerSeance(decalageFinHeures, ufId = UF_ID) {
 }
 
 beforeAll(async () => {
+  await affecter(pool, UF_ID);
+  await affecter(pool, UF_BUREAUTIQUE);
   cookieFormateur = (await connecter('formateur')).cookie;
   cookieAmara = (await connecter('amara')).cookie;
 
@@ -194,9 +208,11 @@ describe('GET /api/seances/:id/rapport', () => {
     const reponse = await request(app)
       .get(`/api/seances/${seanceAutreUf}/rapport`).set('Cookie', cookieFormateur);
 
-    expect(reponse.body.synthese.attendus).toBe(3); // 3 inscrits a Bureautique
-    expect(reponse.body.etudiants.length).toBe(4);  // + Driss, present hors cadre
-    expect(reponse.body.synthese.absents).toBe(3);  // les 3 inscrits absents
+    // "Developpement Web" compte 7 inscrits au seed ; Driss n'en fait pas
+    // partie et se presente pourtant : il est PRESENT HORS CADRE.
+    expect(reponse.body.synthese.attendus).toBe(7);
+    expect(reponse.body.etudiants.length).toBe(8);  // + Driss
+    expect(reponse.body.synthese.absents).toBe(7);  // les 7 inscrits, absents
     expect(reponse.body.synthese.absents).toBeGreaterThanOrEqual(0);
   });
 
@@ -207,9 +223,9 @@ describe('GET /api/seances/:id/rapport', () => {
       .get(`/api/seances/${seanceTerminee}/rapport`).set('Cookie', cookieFormateur);
 
     expect(reponse.status).toBe(200);
-    expect(reponse.body.synthese.attendus).toBe(4); // 4 inscrits au seed
+    expect(reponse.body.synthese.attendus).toBe(5); // 5 inscrits au seed (Etape 10)
     expect(reponse.body.synthese.presents).toBe(1);
-    expect(reponse.body.synthese.absents).toBe(3);
+    expect(reponse.body.synthese.absents).toBe(4);
     expect(reponse.body.synthese.presents_non_inscrits).toBe(0);
 
     const bilal = reponse.body.etudiants.find((e) => e.etudiant_id === BILAL);

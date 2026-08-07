@@ -17,28 +17,10 @@ import {
   Badge, Bouton, Carte, Champ, ChargementEnLigne, EtatVide, Message, Selection,
 } from '../components/ui';
 import { dateCourte, duree } from '../components/format';
+import Jauge from '../components/Jauge';
+import { formaterRatio } from '../components/taux';
 import { appelerApi } from '../services/api';
 import { useRessource } from '../services/useRessource';
-
-/** Barre de proportion. Doublee du chiffre : jamais de couleur seule. */
-function Jauge({ pourcentage }) {
-  if (pourcentage === null || pourcentage === undefined) {
-    return <span className="text-sable-500">—</span>;
-  }
-  // Trois paliers, choisis sur la pratique administrative : 80 % est le seuil
-  // usuel de validation en promotion sociale, 50 % marque le decrochage.
-  const ton = pourcentage >= 80 ? 'bg-emerald-600'
-    : pourcentage >= 50 ? 'bg-amber-500'
-      : 'bg-red-500';
-  return (
-    <span className="flex items-center gap-2">
-      <span aria-hidden="true" className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-sable-200">
-        <span className={`block h-full rounded-full ${ton}`} style={{ width: `${pourcentage}%` }} />
-      </span>
-      <span className="tabular-nums text-sable-900">{pourcentage} %</span>
-    </span>
-  );
-}
 
 /** Chiffre de synthese de l'en-tete. */
 function Compteur({ libelle, valeur }) {
@@ -230,13 +212,13 @@ function BilanUf() {
 
         {bilan && (
           <Carte className="zone-rapport">
-            <header className="border-b border-sable-300 pb-5">
+            <header className="border-t-4 border-accent-600 pt-5 pb-6">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-xs font-medium tracking-wide text-sable-600 uppercase">
+                  <p className="text-xs font-semibold tracking-[0.12em] text-accent-900 uppercase">
                     Bilan d&apos;assiduité
                   </p>
-                  <h2 className="mt-1 text-lg font-semibold text-sable-900">
+                  <h2 className="mt-1 text-xl font-semibold tracking-tight text-sable-900">
                     {bilan.uf.intitule}
                   </h2>
                   <p className="mt-1 text-sm text-sable-700">
@@ -259,6 +241,39 @@ function BilanUf() {
                 <Compteur libelle="Heures cumulées"
                           valeur={duree(bilan.synthese.minutes_validees_total)} />
               </div>
+
+              {/* KPI central du bilan : la part du volume horaire suivie.
+                  C'est la grandeur sur laquelle une validation d'UF se
+                  decide, et elle ne se deduit PAS du nombre de seances. */}
+              {bilan.synthese.taux_temps_moyen !== null
+                && bilan.synthese.taux_temps_moyen !== undefined && (
+                <div className="mt-4 flex flex-wrap items-center gap-x-8 gap-y-3 rounded-xl border border-sable-300 bg-white px-4 py-3">
+                  <div className="min-w-48 flex-1">
+                    <p className="text-xs font-medium text-sable-600">
+                      Assiduité moyenne du groupe
+                    </p>
+                    <div className="mt-1.5">
+                      <Jauge pourcentage={bilan.synthese.taux_temps_moyen} />
+                    </div>
+                  </div>
+                  <dl className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-sable-600">
+                    <div>
+                      <dt className="inline">Volume programmé écoulé : </dt>
+                      <dd className="inline font-medium text-sable-900">
+                        {duree(bilan.synthese.minutes_prevues)}
+                      </dd>
+                    </div>
+                    {bilan.synthese.volume_horaire_minutes && (
+                      <div>
+                        <dt className="inline">Volume officiel de l&apos;UF : </dt>
+                        <dd className="inline font-medium text-sable-900">
+                          {duree(bilan.synthese.volume_horaire_minutes)}
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                </div>
+              )}
             </header>
 
             {cloturee && (
@@ -316,18 +331,18 @@ function BilanUf() {
                     Assiduité cumulée de chaque étudiant inscrit à cette unité de formation
                   </caption>
                   <thead>
-                    <tr className="border-b border-sable-300 text-left text-xs text-sable-600">
-                      <th scope="col" className="pb-2 font-medium">Étudiant</th>
-                      <th scope="col" className="pb-2 font-medium">Présences</th>
-                      <th scope="col" className="pb-2 font-medium">Absences</th>
-                      <th scope="col" className="pb-2 font-medium">Taux</th>
-                      <th scope="col" className="pb-2 font-medium">Heures validées</th>
+                    <tr className="border-y-2 border-sable-400 bg-sable-100 text-left text-xs tracking-wide text-sable-700 uppercase">
+                      <th scope="col" className="px-3 py-3 font-semibold">Étudiant</th>
+                      <th scope="col" className="px-3 py-3 font-semibold">Présences</th>
+                      <th scope="col" className="px-3 py-3 font-semibold">Absences</th>
+                      <th scope="col" className="px-3 py-3 font-semibold">Heures suivies</th>
+                      <th scope="col" className="px-3 py-3 font-semibold">Taux horaire</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-sable-200">
                     {bilan.etudiants.map((e) => (
-                      <tr key={e.etudiant_id}>
-                        <td className="py-3 pr-3">
+                      <tr key={e.etudiant_id} className="hover:bg-sable-50">
+                        <td className="px-3 py-4">
                           <span className="font-medium text-sable-900">{e.nom}</span>
                           <span className="block text-xs text-sable-600">{e.email}</span>
                           {e.demandes_en_attente > 0 && (
@@ -336,14 +351,13 @@ function BilanUf() {
                             </span>
                           )}
                         </td>
-                        <td className="py-3 pr-3 tabular-nums text-sable-900">
+                        <td className="px-3 py-4 tabular-nums text-sable-900">
                           {e.presences} / {e.seances_prevues}
                         </td>
-                        <td className="py-3 pr-3 tabular-nums text-sable-700">{e.absences}</td>
-                        <td className="py-3 pr-3"><Jauge pourcentage={e.taux_presence} /></td>
-                        <td className="py-3 tabular-nums">
+                        <td className="px-3 py-4 tabular-nums text-sable-700">{e.absences}</td>
+                        <td className="px-3 py-4 tabular-nums">
                           <span className="font-medium text-sable-900">
-                            {duree(e.minutes_validees)}
+                            {formaterRatio(e.minutes_validees, e.minutes_prevues)}
                           </span>
                           {e.departs_deduits > 0 && (
                             <span className="block text-xs text-sable-600">
@@ -351,6 +365,10 @@ function BilanUf() {
                             </span>
                           )}
                         </td>
+                        {/* Le taux HORAIRE est mis en avant : c'est lui qui
+                            conditionne la certification. Le taux de presence
+                            reste lisible dans la colonne "Présences". */}
+                        <td className="w-44 px-3 py-4"><Jauge pourcentage={e.taux_temps} /></td>
                       </tr>
                     ))}
                   </tbody>

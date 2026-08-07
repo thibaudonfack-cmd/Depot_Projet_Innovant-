@@ -32,7 +32,16 @@ const COMPTES = {
   bilal:     { email: 'bilal.ozturk@example.org',    mot_de_passe: 'Etudiant123!' },
   chiara:    { email: 'chiara.rossi@example.org',    mot_de_passe: 'Etudiant123!' },
   driss:     { email: 'driss.elamrani@example.org',  mot_de_passe: 'Etudiant123!' },
-  formateur: { email: 'formateur@example.org',       mot_de_passe: 'Formateur123!' },
+  elena:     { email: 'elena.petrova@example.org',   mot_de_passe: 'Etudiant123!' },
+  farid:     { email: 'farid.benali@example.org',    mot_de_passe: 'Etudiant123!' },
+  gwendoline:{ email: 'gwendoline.moreau@example.org', mot_de_passe: 'Etudiant123!' },
+  hugo:      { email: 'hugo.vandenberghe@example.org', mot_de_passe: 'Etudiant123!' },
+  // `formateur` reste un alias de Sophie Lambert : les suites ecrites avant
+  // le cloisonnement l'utilisent, et la renommer les casserait toutes sans
+  // rien apporter.
+  formateur: { email: 'sophie.lambert@example.org',  mot_de_passe: 'Formateur123!' },
+  marc:      { email: 'marc.dupont@example.org',     mot_de_passe: 'Formateur123!' },
+  nadia:     { email: 'nadia.cherif@example.org',    mot_de_passe: 'Formateur123!' },
 };
 
 /**

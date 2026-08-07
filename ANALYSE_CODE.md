@@ -4461,6 +4461,300 @@ suffit d'appeler l'API directement.
 
 ---
 
+# Cycle de vie complet d'une présence : le schéma de flux
+
+Le diagramme ci-dessous retrace le parcours d'une donnée d'assiduité, de la
+génération du jeton à sa destruction partielle. Chaque flèche correspond à du
+code réellement écrit ; aucune étape n'est théorique.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant F as Formateur (écran projeté)
+    participant WS as WebSocket qrBroadcaster
+    participant S as Serveur Express
+    participant E as Étudiant (PWA)
+    participant DB as MySQL
+
+    Note over S,WS: 1. GÉNÉRATION DU JETON — toutes les 20 s
+    S->>S: tokenService : JWT signé RS256<br/>{session_id, salle_id, jti, exp = +25 s}
+    S->>WS: diffusion du jeton
+    WS-->>F: le QR code se renouvelle
+    Note right of F: Rotation 20 s / TTL 25 s :<br/>recouvrement volontaire de 5 s
+
+    Note over E: 2. SCAN
+    E->>E: getUserMedia + jsQR : lecture du QR
+    E->>E: WebCrypto : signature ECDSA P-256 du jeton<br/>(clé privée extractable:false, IndexedDB)
+    E->>E: Geolocation API : lat, lon, accuracy
+    E->>S: POST /api/scans<br/>{jeton, signature_appareil, position}
+
+    Note over S,DB: 3. CASCADE DE VALIDATION
+    S->>S: a) vérif RS256 (clé publique) + exp → ferme V1
+    S->>DB: b) clé publique de l'appareil enrôlé
+    S->>S: c) vérif ECDSA (dsaEncoding ieee-p1363) → ferme V2
+    S->>S: d) Haversine : distance − accuracy > rayon ?<br/>→ true / false / NULL
+    S->>DB: BEGIN
+    S->>DB: INSERT scans (jti) → uq_scan_nonce ferme V4
+    S->>DB: SELECT presences FOR UPDATE
+    alt Aucune présence
+        S->>DB: INSERT presences (heure_arrivee = NOW())
+    else Présence ouverte
+        S->>DB: UPDATE heure_depart = NOW()
+    else Cycle complet
+        S-->>E: 409 DEPART_DEJA_POINTE
+    end
+    S->>DB: COMMIT
+    S-->>E: 201 / 200 {sens: arrivee | depart}
+
+    Note over S,DB: 4. EXPLOITATION
+    F->>S: GET /rapport, /rapport-global
+    S->>DB: agrégats SUM / GROUP BY<br/>filtrés par formateur_uf
+    Note right of DB: Durées CALCULÉES, jamais stockées
+
+    Note over S,DB: 5. MINIMISATION RGPD
+    F->>S: POST /api/uf/:id/cloture-rgpd
+    S->>DB: pool app_rgpd (identité séparée)
+    S->>DB: UPDATE presences : lat/lon/precision/distance = NULL
+    S->>DB: UPDATE scans : jti = CONCAT('purge:', id)
+    S->>DB: INSERT journal_modifications
+    Note right of DB: Heures et identité CONSERVÉES 5 ans
+```
+
+## La même chose en texte, pour qui préfère
+
+```
+  [Serveur] --RS256--> JWT{jti, exp+25s} --WS 20s--> [QR projeté]
+                                                          |
+                                                     scan caméra
+                                                          v
+                                          [Appareil étudiant enrôlé]
+                                          clé privée ECDSA, non extractible
+                                                          |
+                        POST /api/scans {jeton, signature, lat/lon}
+                                                          v
+   +------------------------ CASCADE ------------------------------+
+   | a. RS256 valide ?      non -> 401   (V1 : jeton forgé/expiré)  |
+   | b. appareil enrôlé ?   non -> 403   (V2 : appareil inconnu)    |
+   | c. ECDSA valide ?      non -> 401   (V2 : usurpation)          |
+   | d. jti déjà vu ?       oui -> 409   (V4 : rejeu)               |
+   | e. Haversine           -> coherente : true | false | NULL      |
+   +----------------------------------------------------------------+
+                                                          |
+                                    TRANSACTION UNIQUE    v
+                          INSERT scans  +  INSERT/UPDATE presences
+                                                          |
+                                                          v
+                    agrégats SUM/GROUP BY  ->  rapports (cloisonnés)
+                                                          |
+                                            fin de semestre
+                                                          v
+                       PURGE : géoloc NULL, jti anonymisé, heures gardées
+```
+
+---
+
+# « Pourquoi le rapport n'est-il pas chiffré en base ? »
+
+C'est la question réflexe, et elle mérite une réponse construite plutôt qu'une
+justification défensive. La réponse courte : **le chiffrement au repos ne
+répondrait pas à la menace réelle, et rendrait le système inutilisable.**
+
+## Ce que le chiffrement au repos protège, et ce qu'il ne protège pas
+
+Chiffrer les colonnes protège contre **un seul scénario** : quelqu'un obtient
+une copie physique des fichiers de la base — disque volé, sauvegarde égarée,
+instantané de machine virtuelle exfiltré — **sans** obtenir les identifiants
+applicatifs.
+
+Il ne protège contre **aucune** des menaces que ce système doit réellement
+traiter :
+
+| Menace | Le chiffrement au repos aide-t-il ? |
+| --- | --- |
+| Un étudiant fait valider une présence qu'il n'a pas | Non |
+| Quelqu'un modifie une heure après coup | **Non** : l'application déchiffre, modifie, rechiffre |
+| Un formateur consulte les données d'un collègue | Non : c'est le cloisonnement qui répond |
+| Une injection SQL lit la table | Non : elle passe par la même connexion, donc les mêmes clés |
+| Un disque est volé | **Oui** |
+
+Le point décisif est la deuxième ligne. **Une donnée chiffrée reste
+parfaitement modifiable.** Le chiffrement garantit la confidentialité, jamais
+l'intégrité. Or la question qu'un jury doit se poser sur un relevé d'assiduité
+n'est pas « qui peut le lire ? » mais **« peut-on lui faire dire autre
+chose ? »**.
+
+## Sur quoi repose réellement la sécurité de ce système
+
+Trois piliers, aucun n'étant le chiffrement des données au repos.
+
+**1. L'intégrité à la source, par la non-répudiation.** Chaque présence dérive
+d'un scan portant deux signatures : le jeton est signé RS256 par le serveur,
+et sa possession est prouvée par une signature ECDSA P-256 de l'appareil
+enrôlé, dont la clé privée est marquée `extractable: false` et ne peut donc
+pas être copiée, même par le JavaScript de la page. Fabriquer une présence
+suppose de disposer des deux clés privées. Ce n'est pas une donnée protégée en
+lecture : c'est une donnée **coûteuse à falsifier**.
+
+**2. L'inaltérabilité par le moteur, pas par le code.** L'utilisateur
+applicatif n'a **ni `UPDATE` ni `DELETE`** sur `db_logs.scans`, et seulement
+`SELECT, INSERT` sur `db_attestations.journal_modifications`. Une injection
+SQL, un endpoint mal protégé ou une dépendance compromise ne peuvent pas
+réécrire l'historique : **le refus vient d'InnoDB, pas d'une condition
+JavaScript qu'un défaut pourrait contourner.** C'est la garantie la plus forte
+de l'architecture, précisément parce qu'elle ne dépend pas de la correction du
+code applicatif.
+
+**3. La traçabilité obligatoire.** Toute modification humaine exige un motif,
+écrit dans une base séparée, conservée cinq ans, sur laquelle l'application ne
+peut qu'ajouter.
+
+## Pourquoi le chiffrement rendrait le produit inutilisable
+
+L'argument n'est pas seulement « ça n'aide pas » — c'est aussi « ça casse
+tout ». Un rapport d'assiduité est **un agrégat** :
+
+```sql
+SELECT e.id, COUNT(p.id), SUM(TIMESTAMPDIFF(MINUTE, p.heure_arrivee, ...))
+  FROM inscriptions i ... GROUP BY e.id
+```
+
+Une colonne chiffrée est, pour le moteur, une suite d'octets opaques. `SUM`,
+`TIMESTAMPDIFF`, `GROUP BY`, `ORDER BY`, `WHERE date > ?` et tout usage d'index
+deviennent impossibles. Il faudrait rapatrier **toutes** les lignes de
+l'établissement dans le processus Node, les déchiffrer une à une et calculer en
+JavaScript. Conséquences concrètes :
+
+- Perte des index : un `WHERE seance_id = ?` deviendrait un balayage complet.
+- Le calcul quitte la base, où le fuseau fait foi — soit exactement la source
+  du défaut d'horloge documenté plus haut.
+- **Et surtout : les données en clair transiteraient quand même par le
+  processus applicatif**, c'est-à-dire par la couche que l'on cherchait à ne
+  pas avoir à faire confiance.
+
+Le chiffrement homomorphe ou searchable resterait théoriquement possible, à un
+coût de complexité sans rapport avec le gain, pour une menace déjà couverte au
+niveau de l'infrastructure.
+
+## La position à défendre en soutenance
+
+> Le chiffrement au repos est une mesure d'**infrastructure** (chiffrement de
+> volume, LUKS ou équivalent, sauvegardes chiffrées), pas une mesure
+> **applicative**. Il protège contre le vol de support. Ce système, lui, doit
+> répondre d'une question différente : **la donnée est-elle authentique et
+> n'a-t-elle pas été modifiée ?** Cette question se traite par la signature
+> cryptographique à la source et par la restriction des privilèges au niveau
+> du moteur — pas par le chiffrement, qui laisse une donnée aussi modifiable
+> qu'avant.
+
+Le parallèle : un acte notarié n'est pas illisible. Il est **signé**, **daté**,
+et **conservé chez un tiers dont le registre ne se réécrit pas**. C'est
+exactement le modèle retenu ici.
+
+---
+
+# Le cloisonnement multi-tenants (Étape 10)
+
+## Ce n'était pas un défaut d'affichage
+
+Tout formateur authentifié voyait les séances, rapports et bilans de
+l'établissement entier. Formulé en termes RGPD, c'est un accès à des données
+personnelles **sans finalité** (art. 5.1.b) : rien ne fonde qu'un formateur
+consulte les heures d'étudiants qu'il n'encadre pas.
+
+## Table de liaison plutôt que `seances.createur_id`
+
+Filtrer sur le créateur de la séance aurait été plus simple, et faux pour trois
+raisons :
+
+- **Un bilan porte sur toutes les séances de l'UF.** Si un collègue remplace le
+  titulaire une semaine, sa séance sortirait du bilan — alors que les heures
+  des étudiants, elles, comptent bien.
+- **Le co-encadrement est un cas d'usage réel** (théorie et laboratoire). Un
+  modèle « un créateur = un propriétaire » ne sait pas le représenter.
+- **Le droit à exercer porte sur l'unité de formation, pas sur l'événement.**
+  C'est le mandat pédagogique qui fonde l'accès, et un mandat ne se déduit pas
+  d'un clic passé.
+
+Le seed illustre le cas : « Développement Web » est confiée à **deux**
+formateurs simultanément.
+
+## Deux principes d'implémentation
+
+**Le filtre est dans la requête, pas dans la réponse.** Charger toutes les
+séances puis retirer celles des collègues en JavaScript fonctionnerait à
+l'écran, mais les données auraient quitté la base et transité par le processus.
+Une erreur de filtrage ultérieure, un journal qui sérialise l'objet complet, un
+champ oublié — et la fuite est là. **Ce qui n'est jamais lu ne peut pas
+fuir.**
+
+**Le cloisonnement s'applique aussi en écriture.** Masquer une UF dans une
+liste déroulante n'empêche personne de poster son identifiant. Chaque route qui
+*agit* vérifie donc le mandat : création de séance, modification d'horaire,
+traitement d'une rectification, et surtout **clôture RGPD** — dont la
+conséquence, irréversible, ne se répare pas.
+
+## `EXISTS` et non `JOIN`
+
+Une UF co-encadrée par deux formateurs produirait **deux lignes** avec une
+jointure : doublons dans les listes, totaux doublés dans les agrégats. `EXISTS`
+répond à une question booléenne sans multiplier les lignes. Un test vérifie
+explicitement qu'une UF partagée n'apparaît qu'une fois.
+
+## 404 et non 403
+
+Répondre « interdit » **confirmerait l'existence** de la ressource. En
+énumérant des identifiants, un formateur curieux apprendrait quelles UF
+existent et combien de séances chacune compte. « Introuvable » ne distingue pas
+l'absence de l'interdiction.
+
+Le `403` reste utilisé pour les erreurs de **rôle** (un étudiant sur une route
+formateur), où la ressource n'est pas en cause et où dire la vérité n'apprend
+rien à personne.
+
+---
+
+# Les KPI d'assiduité : deux taux qu'il ne faut pas confondre
+
+Un temps sans référence ne veut rien dire. « 2 h 30 » ne se compare à rien ;
+« 2 h 30 / 3 h 00, soit 83 % » se lit d'un coup d'œil.
+
+Le bilan expose donc **deux** taux, qui répondent à des questions différentes :
+
+| Taux | Question | Usage |
+| --- | --- | --- |
+| `taux_presence` | À combien de séances est-il venu ? | Repérer un décrochage |
+| `taux_temps` | Quelle part du volume horaire a-t-il suivie ? | **Conditionne la certification** |
+
+Les confondre serait trompeur : un étudiant présent à **toutes** les séances
+mais reparti au bout d'une heure affiche 100 % de présences et bien moins de
+100 % de temps. C'est le second qui compte administrativement.
+
+Trois précautions de calcul :
+
+- **Le dénominateur est le volume programmé ÉCOULÉ**, pas le volume officiel de
+  l'UF. Rapporter au volume officiel donnerait 20 % à un étudiant assidu en
+  milieu de semestre, ce qui affolerait le secrétariat pour rien. Le volume
+  officiel reste affiché **à titre de référence**.
+- **Le taux est plafonné à 100 %.** Un étudiant arrivé en avance et reparti en
+  retard afficherait 104 %, ce qui ferait douter de tout le tableau.
+- **`null` et non `0` quand la référence manque.** Un pourcentage calculé sur
+  une durée inconnue serait faux, et 0 % se lirait comme une absence totale.
+
+## Le rendu
+
+Les seuils — 80 % (validation) et 50 % (décrochage) — viennent du règlement de
+la promotion sociale, **pas d'un choix graphique**. Ils vivent dans
+`components/taux.js`, séparés du composant : ce sont des règles de domaine,
+testables sans monter la moindre interface.
+
+Le chiffre accompagne **toujours** la barre. Une jauge seule est invisible pour
+une personne daltonienne (WCAG 1.4.1) et disparaît à l'impression noir et
+blanc — soit précisément le support de ces documents. La barre porte en outre
+un `role="img"` avec un libellé qui annonce le **sens administratif** (« Quota
+atteint »), et non une suite de `div` vides.
+
+---
+
 ## Prochaine étape suggérée
 
 Le prototype couvre désormais l'ensemble de la chaîne. Les compléments
