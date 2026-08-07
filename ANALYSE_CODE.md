@@ -4148,6 +4148,319 @@ pour couvrir le cycle administratif complet.
 
 ---
 
+# Le paradoxe apparent : double scan et protection anti-rejeu
+
+C'est la question qu'un jury posera, parce que les deux mécanismes semblent
+s'exclure. D'un côté, le système interdit qu'un jeton serve deux fois. De
+l'autre, il demande à l'étudiant de scanner deux fois. Comment les deux
+peuvent-ils tenir ensemble ?
+
+## La réponse tient en une phrase
+
+**Le QR code ne contient pas « la séance » : il contient un jeton éphémère,
+renouvelé toutes les 20 secondes.** Un étudiant qui scanne à 9h00 puis à 12h00
+ne présente pas deux fois le même jeton. Il en présente deux, séparés par
+plusieurs centaines de rotations, et qui n'ont en commun que la séance qu'ils
+désignent.
+
+La contrainte anti-rejeu porte sur le couple `(jti, etudiant_id)`. Deux jetons
+différents ont deux `jti` différents. Rien ne se déclenche.
+
+## Le détail qui fait comprendre
+
+| | Rejeu (attaque) | Double scan (usage normal) |
+| --- | --- | --- |
+| Ce qui est présenté | **Le même** jeton, deux fois | **Deux** jetons distincts |
+| `jti` | Identique | Différents |
+| Écart typique | Quelques secondes ou minutes | Plusieurs heures |
+| `uq_scan_nonce` | **Violée** → `409 REJEU_DETECTE` | Satisfaite |
+| Effet sur `presences` | Aucun | `heure_depart` renseignée |
+
+Le scénario d'attaque visé (V1/V4) est celui de l'étudiant absent qui reçoit
+par messagerie la photo du QR code prise par un camarade présent. Le jeton
+photographié a une durée de vie de 25 secondes : le temps de la capture, de
+l'envoi et de l'ouverture, il est presque toujours expiré. S'il ne l'est pas,
+et si le camarade l'a déjà utilisé, `uq_scan_nonce` le rejette.
+
+**La rotation ferme donc l'attaque par le temps, et l'unicité du `jti` la
+ferme par l'identité du jeton.** Le double scan légitime, lui, ne franchit
+aucune des deux barrières, parce qu'il n'utilise ni le même jeton ni la même
+fenêtre.
+
+## Ce qui aurait vraiment posé problème
+
+Il faut être précis sur ce qui bloquait : ce n'était **pas** la protection
+anti-rejeu. C'était une contrainte distincte, `uq_scan_presence
+(seance_id, etudiant_id)`, posée sur la table `scans`.
+
+Celle-là interdisait bien le double scan — mais elle n'avait rien à voir avec
+la sécurité. Elle exprimait une règle métier (« une seule présence par
+séance ») posée sur la table du **journal** au lieu de la table de **l'état**.
+Elle a été déplacée vers `uq_presence` sur `presences`. La protection
+cryptographique, elle, n'a pas bougé d'une ligne.
+
+> Ce qu'il faut retenir : le double scan a exigé de corriger un mauvais
+> placement de contrainte métier, **pas** d'assouplir une protection de
+> sécurité. Aucune garantie n'a été échangée contre une fonctionnalité.
+
+## Un cas limite traité explicitement
+
+Deux scans dans la même seconde violeraient `chk_presence_bornes`
+(`heure_depart > heure_arrivee`). Le contrôleur intercepte ce cas avant la
+base et répond `409 DEPART_TROP_TOT` avec une consigne utilisable, plutôt que
+de laisser remonter une erreur 500 sur une contrainte de schéma.
+
+---
+
+# Minimisation RGPD : la clôture d'une unité de formation
+
+## D'abord, une correction de la cartographie
+
+Le cahier des charges demandait de purger « les signatures cryptographiques et
+les logs géolocalisés de la table `scans` ». L'inventaire réel du schéma
+contredit cette formulation, et l'appliquer littéralement aurait produit
+**l'inverse** de l'effet recherché.
+
+| Donnée | Où elle se trouve réellement |
+| --- | --- |
+| Coordonnées GPS, précision, distance, verdict | `presences` |
+| Nonce du jeton (`jti`) | `scans` |
+| Signature ECDSA de l'appareil | **Nulle part** : vérifiée puis jetée |
+| Clé publique de l'appareil | `appareils_enroles` |
+
+La table `scans` ne contient ni coordonnée ni signature. Purger `scans` en
+préservant `presences` aurait donc **laissé intactes les données de
+localisation** — la catégorie la plus sensible du système, et la seule qui
+justifie vraiment une minimisation.
+
+La clôture porte donc sur les deux tables, en ciblant ce qui s'y trouve
+effectivement.
+
+## La règle de partage
+
+Une donnée est conservée si, et seulement si, elle sert encore la finalité
+administrative : prouver le temps de formation suivi. Tout le reste disparaît,
+quelle que soit son utilité technique passée.
+
+**Détruit** — utile pendant la séance, sans objet ensuite :
+
+- `presences.latitude_scan`, `longitude_scan` : où se trouvait la personne
+- `presences.precision_m`, `distance_m` : dérivés de la position
+- `presences.position_coherente` : verdict de géofencing
+- `scans.jti` : lien vers le jeton réel
+
+**Conservé cinq ans** — obligation de conservation administrative belge :
+
+- `presences.etudiant_id`, `heure_arrivee`, `heure_depart`
+- les **lignes** de `scans`, anonymisées
+- `db_attestations.journal_modifications`
+
+Le raisonnement de proportionnalité tient en une phrase : **la localisation
+répondait à une question ponctuelle** — « cette personne était-elle dans la
+salle à cet instant ? ». Une fois la séance terminée et le délai de
+contestation expiré, cette question ne se posera plus jamais. La conserver
+cinq ans constituerait un historique de déplacements sans finalité, ce que
+l'article 5.1.c interdit précisément.
+
+L'heure d'arrivée, elle, garde sa finalité pendant toute la durée de
+conservation : c'est elle qui prouve le droit à la certification.
+
+## Anonymiser plutôt que supprimer
+
+Les lignes de `scans` ne sont pas supprimées. Leur `jti` est remplacé par une
+valeur dérivée de leur propre identifiant :
+
+```sql
+UPDATE scans sc JOIN seances s ON s.id = sc.seance_id
+   SET sc.jti = CONCAT('purge:', sc.id)
+ WHERE s.uf_id = ?;
+```
+
+Deux raisons, l'une juridique et l'autre technique.
+
+**Juridique** : le nombre de scans reste vérifiable. On peut toujours prouver
+qu'un étudiant a scanné **deux** fois, donc qu'il a pointé son départ. Détruire
+les lignes détruirait aussi la preuve que la présence repose sur des scans et
+non sur une saisie manuelle du formateur — on affaiblirait l'archive
+administrative au nom de sa protection.
+
+**Technique** : `CONCAT('purge:', sc.id)` et non une constante. `uq_scan_nonce`
+porte sur `(jti, etudiant_id)` ; un étudiant ayant scanné deux fois dans la
+même séance produirait deux lignes identiques, et la contrainte rejetterait la
+purge — précisément pour les étudiants ayant correctement pointé leur départ.
+Le détail est minuscule et la panne aurait été spectaculaire.
+
+## La capacité d'effacement est elle-même un privilège isolé
+
+C'est le point d'architecture le plus intéressant de cette étape.
+
+La purge doit écrire dans `scans`. Or l'utilisateur applicatif n'a
+volontairement **ni `UPDATE` ni `DELETE`** sur cette table : c'est la garantie
+la plus forte de l'architecture, parce qu'elle ne dépend pas de la correction
+du code. Une injection SQL ou une dépendance compromise ne peut pas réécrire
+l'historique — le refus vient du moteur.
+
+Lui accorder `UPDATE` sur `scans` ferait disparaître cette garantie pour
+**toutes** les routes, au bénéfice d'une seule. Le prix serait sans commune
+mesure avec le gain.
+
+D'où une **troisième identité SQL**, `app_rgpd`, avec son propre pool
+(`dbRgpd.js`) que seul `rgpdController.js` importe :
+
+```sql
+GRANT SELECT ON db_logs.* TO 'app_rgpd'@'%';
+GRANT UPDATE (jti) ON db_logs.scans TO 'app_rgpd'@'%';   -- colonne, pas table
+GRANT UPDATE ON db_logs.presences TO 'app_rgpd'@'%';
+GRANT UPDATE ON db_logs.uf TO 'app_rgpd'@'%';
+GRANT SELECT, INSERT ON db_attestations.journal_modifications TO 'app_rgpd'@'%';
+```
+
+Trois points à souligner :
+
+- **`UPDATE (jti)` est un privilège de COLONNE**, pas de table. Le compte de
+  purge ne peut ni réattribuer un scan à un autre étudiant, ni en modifier
+  l'horodatage.
+- **Aucun `DELETE` nulle part.** Le compte ne peut pas supprimer une ligne,
+  même par erreur de code.
+- L'application ordinaire reste, elle, totalement incapable de toucher à
+  `scans`.
+
+C'est exactement ce que le RGPD attend d'une opération d'effacement : **une
+capacité restreinte et traçable, jamais diffuse dans tout le code**.
+
+## Les garde-fous de l'opération
+
+L'opération étant irréversible, elle est protégée à cinq niveaux, chacun
+fermant une porte différente :
+
+| Garde-fou | Ce qu'il empêche |
+| --- | --- |
+| Rôle `formateur` | Un étudiant purge une UF |
+| `confirmation: "CLOTURER"` dans le corps | Un appel direct à l'API sans intention |
+| Saisie du mot dans la modale | Un clic réflexe sur un bouton habituel |
+| `409 DEMANDES_EN_ATTENTE` | Purger avant d'avoir tranché une contestation |
+| `409 DEJA_CLOTUREE` (`FOR UPDATE`) | Deux clôtures concurrentes, deux traces pour une destruction |
+
+Le quatrième mérite un mot : **le droit à la minimisation ne prime pas sur le
+droit d'être entendu**. Purger avant d'avoir statué priverait le formateur des
+éléments du dossier — la position enregistrée en fait partie — et l'étudiant
+se verrait opposer une décision fondée sur des données détruites entre-temps.
+
+L'ensemble est consigné dans `journal_modifications`, **dans la même
+transaction** : une destruction sans trace serait indéfendable devant une
+inspection, et une trace écrite hors transaction pourrait survivre à une purge
+annulée, ou l'inverse.
+
+## Le verrou d'archive
+
+`uf.date_cloture_rgpd` ne date pas seulement l'événement : elle **porte le
+verrou**. Une UF clôturée n'accepte plus ni rectification étudiante, ni
+modification par le formateur.
+
+Deux choix de conception :
+
+- **L'état verrouillé est déduit de cette date**, jamais dupliqué en drapeau
+  sur chaque présence. Deux sources pour un même fait finissent toujours par
+  diverger ; et c'est bien l'événement juridique qui est stocké, pas ses
+  conséquences.
+- **Le verrou s'applique aussi au formateur.** Une archive dont le détenteur
+  peut encore modifier le contenu n'est pas une archive.
+
+---
+
+# Le bilan global par unité de formation (Étape 9)
+
+Le rapport de séance répond à « qui était là ce jour-là ? ». Le bilan répond à
+la question sur laquelle une certification se joue : « cet étudiant a-t-il
+suivi assez d'heures pour valider son UF ? ».
+
+Le changement de maille impose deux précautions, apprises des étapes
+précédentes.
+
+**Seules les séances terminées sont agrégées.** Une séance en cours n'a pas de
+durée définitive : l'inclure ferait varier le bilan d'une minute à l'autre, et
+un formateur qui l'imprime à 10 h obtiendrait autre chose qu'à 11 h pour les
+mêmes faits. Un document destiné au secrétariat doit être stable.
+
+**Le dénominateur est commun à tous les étudiants.** Le calculer à partir des
+lignes de présence donnerait un dénominateur différent pour chacun, et un taux
+d'assiduité de **100 %** à quelqu'un venu une seule fois sur douze séances.
+C'est le piège classique du `GROUP BY`, et il produit exactement le chiffre
+qu'un secrétariat ne doit jamais lire.
+
+Deux détails complètent le tableau :
+
+- `COALESCE(SUM(...), 0)` : un étudiant jamais venu affiche **0**, pas `NULL`.
+  Une case vide dans une colonne d'heures se lit comme une donnée manquante,
+  pas comme une absence totale.
+- Le taux vaut `null`, jamais `NaN`, quand aucune séance n'est encore
+  terminée. Une division par zéro non gardée s'afficherait telle quelle dans
+  le tableau.
+
+---
+
+# Un défaut de fuseau découvert en écrivant la borne de rectification
+
+Il vaut la peine d'être raconté, parce qu'il illustre comment une nouvelle
+règle révèle un défaut ancien.
+
+En ajoutant la borne « le départ demandé ne peut pas dépasser la fin prévue »,
+le test du cas légitime — un départ **avant** la fin — échouait. Vérification
+faite en interrogeant directement la base :
+
+```
+NOW() converti par mysql2 → 2026-08-07 12:40:04   (horloge UTC)
+DATE_FORMAT(NOW())        → 2026-08-07 14:40:04   (horloge du serveur)
+```
+
+**Deux horloges cohabitaient dans les mêmes colonnes.** L'ancienne fonction de
+conversion produisait `toISOString().slice(0,19)`, une horloge murale UTC,
+écrite telle quelle dans une colonne `DATETIME` — alors que `heure_arrivee`,
+`heure_debut_prevue` et `NOW()` sont exprimées dans l'horloge du serveur.
+
+Le défaut était invisible tant qu'on ne comparait pas les deux familles. Ses
+conséquences réelles :
+
+- une rectification acceptée **décalait le départ de l'étudiant** de l'offset
+  UTC — deux heures en été à Bruxelles — silencieusement ;
+- ma nouvelle borne comparait 12:40 à 14:40 et rejetait un départ légitime.
+
+La correction applique la règle déjà posée ailleurs dans ce projet : **le
+fuseau de la base fait foi de bout en bout, et JavaScript ne convertit
+jamais**. La fonction renvoie désormais des **secondes epoch** — un instant
+absolu, sans ambiguïté — et c'est MySQL qui les place dans son horloge via
+`FROM_UNIXTIME()`. Les comparaisons de bornes sont elles aussi passées dans le
+`SELECT`, où les deux côtés vivent dans la même horloge.
+
+> La leçon : une valeur temporelle ne devrait jamais traverser une frontière
+> système sous forme d'horloge murale. Soit un instant absolu, soit une
+> horloge accompagnée de son fuseau — jamais une chaîne nue dont le fuseau se
+> devine au contexte.
+
+---
+
+# Pourquoi l'heure d'arrivée n'est pas contestable
+
+L'étudiant peut contester son **départ**, jamais son **arrivée**. La
+distinction n'est pas arbitraire.
+
+L'heure d'arrivée n'est pas déclarative : elle résulte d'un scan dont le jeton
+est signé RS256 par le serveur et dont la possession est prouvée par une
+signature ECDSA de l'appareil enrôlé. **C'est la donnée la mieux établie de
+tout le système.** Autoriser une déclaration libre à l'écraser viderait de son
+sens toute la chaîne des Étapes 3 à 5.
+
+Le départ, lui, repose sur un second scan qui peut simplement avoir été oublié
+en quittant la salle. C'est une **omission**, pas une contestation de preuve.
+
+Côté interface, le champ est `readOnly` et non `disabled` : un champ désactivé
+sort de l'ordre de tabulation et est souvent ignoré par les lecteurs d'écran,
+alors que la valeur doit rester lisible et annonçable. Mais le refus véritable
+est posé **côté serveur** — un formulaire verrouillé ne protège de rien, il
+suffit d'appeler l'API directement.
+
+---
+
 ## Prochaine étape suggérée
 
 Le prototype couvre désormais l'ensemble de la chaîne. Les compléments

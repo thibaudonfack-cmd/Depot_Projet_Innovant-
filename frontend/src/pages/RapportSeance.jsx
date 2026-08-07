@@ -236,11 +236,10 @@ function RapportSeance({ seanceId, onRetour }) {
           {donnees.etudiants.some((e) => e.depart_deduit) && (
             <p className="mt-4 text-xs leading-relaxed text-sable-600">
               <span className="font-medium">Départ automatique</span> :
-              l&apos;heure de fin prévue a été appliquée par défaut, ce qui
-              correspond à une présence jusqu&apos;au terme de la séance. Pour un
-              suivi du temps exact, les étudiants scannent le QR code une
-              seconde fois en quittant la salle. Corrigez la présence si la
-              valeur retenue ne correspond pas.
+              l&apos;heure de fin prévue a été appliquée par défaut. Pour un
+              suivi du temps exact (ex: départ anticipé), les étudiants doivent
+              scanner le QR code une seconde fois en quittant la salle. Vous
+              pouvez également corriger une présence manuellement.
             </p>
           )}
 
@@ -263,7 +262,7 @@ function RapportSeance({ seanceId, onRetour }) {
               a ete etablie. */}
           <p className="mention-impression mt-6 hidden border-t border-sable-300 pt-4 text-xs text-sable-600">
             Document établi le {new Date().toLocaleString('fr-BE')} · Prise de présence numérique ·{' '}
-            {provisoire ? 'PROVISOIRE — ne peut servir de base à une validation de crédits.' : 'Rapport officiel.'}
+            {provisoire ? 'PROVISOIRE : ne peut servir de base à une validation de crédits.' : 'Rapport officiel.'}
           </p>
         </Carte>
       )}

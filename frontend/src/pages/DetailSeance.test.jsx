@@ -141,7 +141,7 @@ describe('séance TERMINÉE', () => {
     // doit dire quoi faire pour obtenir mieux.
     const t = texte(await monter());
     expect(t).toContain('Départ automatique');
-    expect(t).toContain('scannent le QR code une seconde fois');
+    expect(t).toContain('scanner le QR code une seconde fois');
     expect(t).not.toContain("n'ont pas pointé");
   });
 

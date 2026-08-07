@@ -9,12 +9,34 @@ const { consigner } = require('../services/journalService');
 /** Fenetre laissee a l'etudiant apres la fin prevue de la seance. */
 const FENETRE_HEURES = 24;
 
-/** Convertit une chaine ISO en DATETIME MySQL (UTC), ou null. */
-function versDatetimeUtc(valeur, nomChamp) {
+/**
+ * Convertit une chaine ISO du client en SECONDES EPOCH, ou null.
+ *
+ * CORRECTION D'UN DEFAUT DE FUSEAU, decouvert en ecrivant la borne de
+ * l'Etape 9. La version precedente renvoyait `toISOString().slice(0,19)`,
+ * c'est-a-dire une horloge murale UTC, qui etait ensuite ecrite telle quelle
+ * dans une colonne DATETIME. Or toutes les autres heures de la base
+ * (heure_arrivee, heure_debut_prevue, NOW()) sont exprimees dans l'horloge du
+ * SERVEUR. Deux horloges cohabitaient donc dans les memes colonnes.
+ *
+ * Consequences, invisibles tant qu'on ne comparait pas les deux familles :
+ *   - une rectification acceptee decalait le depart de l'etudiant de
+ *     l'offset UTC (2 h en ete a Bruxelles), silencieusement ;
+ *   - une borne "depart <= fin prevue" comparait 12:40 (UTC) a 14:40
+ *     (serveur) et rejetait un depart parfaitement legitime.
+ *
+ * Les secondes epoch n'ont, elles, aucune ambiguite : c'est un instant
+ * absolu. La conversion vers une horloge murale est faite par MySQL via
+ * FROM_UNIXTIME(), qui produit un DATETIME dans le fuseau de la session --
+ * donc exactement la meme horloge que NOW() et que les colonnes existantes.
+ * La regle generale du projet est ainsi respectee : le fuseau de la base
+ * fait foi de bout en bout, et JavaScript ne convertit jamais lui-meme.
+ */
+function versInstantSql(valeur, nomChamp) {
   if (valeur === undefined || valeur === null || valeur === '') return null;
   const date = new Date(valeur);
   if (Number.isNaN(date.getTime())) throw new Error(`${nomChamp} n'est pas une date valide.`);
-  return date.toISOString().slice(0, 19).replace('T', ' ');
+  return Math.floor(date.getTime() / 1000);
 }
 
 /**
@@ -45,16 +67,35 @@ async function soumettreRectification(req, res) {
   let arriveeDemandee;
   let departDemande;
   try {
-    arriveeDemandee = versDatetimeUtc(arriveeBrute, 'heure_arrivee_demandee');
-    departDemande = versDatetimeUtc(departBrut, 'heure_depart_demandee');
+    arriveeDemandee = versInstantSql(arriveeBrute, 'heure_arrivee_demandee');
+    departDemande = versInstantSql(departBrut, 'heure_depart_demandee');
   } catch (erreur) {
     return res.status(400).json({ status: 'error', message: erreur.message });
   }
 
-  if (arriveeDemandee && departDemande && departDemande <= arriveeDemandee) {
+  // ---------------------------------------------------------------------
+  // L'HEURE D'ARRIVEE N'EST PAS CONTESTABLE PAR L'ETUDIANT.
+  //
+  // Elle n'est pas declarative : elle resulte d'un scan dont le jeton est
+  // signe RS256 par le serveur et dont la possession est prouvee par une
+  // signature ECDSA de l'appareil enrole. C'est la donnee la MIEUX etablie
+  // de tout le systeme. Autoriser l'etudiant a la deplacer reviendrait a
+  // laisser une declaration libre ecraser une preuve cryptographique -- et
+  // viderait de son sens toute la chaine des Etapes 3 a 5.
+  //
+  // Le depart, lui, est legitimement contestable : il repose sur un SECOND
+  // scan qui peut simplement avoir ete oublie en quittant la salle. C'est
+  // une omission, pas une contestation de preuve.
+  //
+  // Le champ est en lecture seule cote interface, mais le refus est pose
+  // ICI : un formulaire desactive ne protege de rien, il suffit d'appeler
+  // l'API directement.
+  if (arriveeDemandee) {
     return res.status(400).json({
       status: 'error',
-      message: "L'heure de depart demandee doit etre posterieure a l'heure d'arrivee.",
+      code: 'ARRIVEE_NON_CONTESTABLE',
+      message: "L'heure d'arrivee resulte d'un scan signe et ne peut pas etre modifiee "
+             + 'par une demande de rectification. Seule l\'heure de depart est contestable.',
     });
   }
 
@@ -63,7 +104,16 @@ async function soumettreRectification(req, res) {
     // fournir l'identifiant de la presence d'un camarade permettrait de
     // soumettre une demande en son nom.
     const [presences] = await pool.query(
-      `SELECT p.id, p.etudiant_id, s.heure_fin_prevue,
+      `SELECT p.id, p.etudiant_id, u.date_cloture_rgpd,
+              DATE_FORMAT(s.heure_fin_prevue, '%H:%i') AS fin_prevue_hhmm,
+              -- Les DEUX bornes sont evaluees par MySQL, jamais en
+              -- JavaScript : FROM_UNIXTIME place l'instant du client dans
+              -- l'horloge de la base, la meme que celle des colonnes
+              -- comparees. Comparer en JS reintroduirait le melange de
+              -- fuseaux documente au-dessus de versInstantSql.
+              (FROM_UNIXTIME(?) <= p.heure_arrivee) AS depart_avant_arrivee,
+              (s.heure_fin_prevue IS NOT NULL AND FROM_UNIXTIME(?) > s.heure_fin_prevue)
+                AS depart_apres_fin,
               -- MEME regle que dans presenceController : la fenetre s'ouvre
               -- a la FIN de la seance et se referme 24 h plus tard. Le
               -- controle cote lecture n'est qu'un confort d'affichage ; c'est
@@ -76,8 +126,9 @@ async function soumettreRectification(req, res) {
               END AS fenetre_ouverte
        FROM presences p
        JOIN seances s ON s.id = p.seance_id
+       JOIN uf u ON u.id = s.uf_id
        WHERE p.id = ? AND p.etudiant_id = ?`,
-      [FENETRE_HEURES, presenceId, req.utilisateur.etudiant_id]
+      [departDemande, departDemande, FENETRE_HEURES, presenceId, req.utilisateur.etudiant_id]
     );
 
     const presence = presences[0];
@@ -87,12 +138,63 @@ async function soumettreRectification(req, res) {
       return res.status(404).json({ status: 'error', message: 'Presence introuvable.' });
     }
 
+    // Une UF cloturee au titre du RGPD est FIGEE. Les elements du dossier
+    // (position enregistree, trace des scans) ont ete detruits : statuer sur
+    // une contestation sans eux serait statuer a l'aveugle. Le verrou est
+    // DEDUIT de uf.date_cloture_rgpd plutot que duplique sur chaque presence,
+    // pour qu'il n'existe qu'une seule source de verite.
+    if (presence.date_cloture_rgpd !== null) {
+      return res.status(409).json({
+        status: 'error',
+        code: 'UF_CLOTUREE',
+        message: 'Cette unite de formation est cloturee. Les heures sont definitives.',
+      });
+    }
+
     if (presence.fenetre_ouverte !== 1) {
       return res.status(403).json({
         status: 'error',
         code: 'DELAI_EXPIRE',
         message: "Le signalement n'est possible qu'apres la fin de la seance, et pendant 24 heures.",
       });
+    }
+
+    // -------------------------------------------------------------------
+    // BORNES DU DEPART DEMANDE
+    //
+    // Comparaison de CHAINES 'YYYY-MM-DD HH:MM:SS', volontairement : les
+    // deux bornes viennent de la base via DATE_FORMAT, et versDatetimeUtc
+    // produit le meme format. Passer par des objets Date reintroduirait la
+    // conversion de fuseau qui a deja fausse des comparaisons ailleurs dans
+    // ce projet (cf. ANALYSE_CODE.md, mysql2 et les DATETIME). En format
+    // ISO a longueur fixe, l'ordre lexicographique EST l'ordre chronologique.
+    // -------------------------------------------------------------------
+    if (departDemande) {
+      // a) Le depart ne peut pas preceder l'arrivee, qui fait foi.
+      if (presence.depart_avant_arrivee === 1) {
+        return res.status(400).json({
+          status: 'error',
+          code: 'DEPART_AVANT_ARRIVEE',
+          message: "L'heure de depart demandee doit etre posterieure a l'heure d'arrivee.",
+        });
+      }
+
+      // b) Le depart ne peut pas depasser la fin PREVUE de la seance.
+      //
+      // Sans cette borne, un etudiant parti a 10 h pourrait demander un
+      // depart a 23 h et se voir crediter des heures qui n'ont jamais eu
+      // lieu : la rectification deviendrait un moyen de fabriquer du temps
+      // de formation, exactement ce que le systeme entier cherche a empecher.
+      // La fenetre de 24 h rend d'ailleurs la manoeuvre naturelle, puisqu'elle
+      // s'ouvre APRES la fin de la seance.
+      if (presence.depart_apres_fin === 1) {
+        return res.status(400).json({
+          status: 'error',
+          code: 'DEPART_APRES_FIN_SEANCE',
+          message: "L'heure de depart demandee ne peut pas depasser l'heure de fin prevue "
+                 + `de la seance (${presence.fin_prevue_hhmm}).`,
+        });
+      }
     }
 
     // Une seule demande en attente a la fois : sans ce controle, un etudiant
@@ -114,7 +216,7 @@ async function soumettreRectification(req, res) {
     await pool.query(
       `INSERT INTO demandes_rectification
          (id, presence_id, motif, heure_arrivee_demandee, heure_depart_demandee)
-       VALUES (?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, FROM_UNIXTIME(?), FROM_UNIXTIME(?))`,
       [demandeId, presenceId, motif.trim(), arriveeDemandee, departDemande]
     );
 
@@ -277,7 +379,7 @@ async function modifierPresence(req, res) {
 
   let nouveauDepart;
   try {
-    nouveauDepart = versDatetimeUtc(departBrut, 'heure_depart');
+    nouveauDepart = versInstantSql(departBrut, 'heure_depart');
   } catch (erreur) {
     return res.status(400).json({ status: 'error', message: erreur.message });
   }
@@ -289,11 +391,19 @@ async function modifierPresence(req, res) {
     // Meme precaution que ci-dessus : lecture en chaines, jamais en objets
     // Date, pour ne pas reintroduire de conversion de fuseau.
     const [presences] = await connexion.query(
-      `SELECT id,
-              DATE_FORMAT(heure_arrivee, '%Y-%m-%d %H:%i:%s') AS heure_arrivee,
-              DATE_FORMAT(heure_depart, '%Y-%m-%d %H:%i:%s') AS heure_depart
-       FROM presences WHERE id = ? FOR UPDATE`,
-      [presenceId]
+      `SELECT p.id,
+              DATE_FORMAT(p.heure_arrivee, '%Y-%m-%d %H:%i:%s') AS heure_arrivee,
+              DATE_FORMAT(p.heure_depart, '%Y-%m-%d %H:%i:%s') AS heure_depart,
+              -- Valeur demandee, ramenee dans l'horloge de la base pour le
+              -- journal d'audit ET pour la comparaison ci-dessous.
+              DATE_FORMAT(FROM_UNIXTIME(?), '%Y-%m-%d %H:%i:%s') AS depart_demande_texte,
+              (FROM_UNIXTIME(?) <= p.heure_arrivee) AS depart_avant_arrivee,
+              u.date_cloture_rgpd
+       FROM presences p
+       JOIN seances s ON s.id = p.seance_id
+       JOIN uf u ON u.id = s.uf_id
+       WHERE p.id = ? FOR UPDATE`,
+      [nouveauDepart, nouveauDepart, presenceId]
     );
     const presence = presences[0];
     if (!presence) {
@@ -301,12 +411,27 @@ async function modifierPresence(req, res) {
       return res.status(404).json({ status: 'error', message: 'Presence introuvable.' });
     }
 
+    // Le verrou de cloture s'applique AUSSI au formateur, et c'est voulu.
+    // Une archive dont le detenteur peut encore modifier le contenu n'est pas
+    // une archive. Passe cette date, seule une procedure administrative hors
+    // application pourrait revenir sur les heures.
+    if (presence.date_cloture_rgpd !== null) {
+      await connexion.rollback();
+      return res.status(409).json({
+        status: 'error',
+        code: 'UF_CLOTUREE',
+        message: 'Cette unite de formation est cloturee. Les heures sont definitives '
+               + 'et ne peuvent plus etre modifiees.',
+      });
+    }
+
     // Coherence des bornes verifiee ici EN PLUS de la contrainte CHECK du
     // schema : la contrainte protege l'integrite, ce controle donne un
     // message utilisable a l'utilisateur plutot qu'une erreur SQL brute.
-    // Comparaison de chaines au format '%Y-%m-%d %H:%i:%s' : lexicographique
-    // et chronologique coincident, donc pas besoin de reconstruire des Date.
-    if (nouveauDepart && nouveauDepart <= presence.heure_arrivee) {
+    // La comparaison est faite PAR MYSQL (colonne depart_avant_arrivee
+    // ci-dessus), pas en JavaScript : voir versInstantSql pour le defaut de
+    // fuseau que cela evite.
+    if (nouveauDepart && presence.depart_avant_arrivee === 1) {
       await connexion.rollback();
       return res.status(400).json({
         status: 'error',
@@ -315,13 +440,17 @@ async function modifierPresence(req, res) {
     }
 
     await connexion.query(
-      "UPDATE presences SET heure_depart = ?, source = 'correction_formateur' WHERE id = ?",
+      `UPDATE presences SET heure_depart = FROM_UNIXTIME(?),
+              source = 'correction_formateur' WHERE id = ?`,
       [nouveauDepart, presenceId]
     );
 
     await consigner(connexion, {
       tableCible: 'presences', ligneId: presenceId, champ: 'heure_depart',
-      valeurAvant: presence.heure_depart, valeurApres: nouveauDepart,
+      // Le journal recoit une heure LISIBLE dans l'horloge de la base, pas
+      // un timestamp epoch : une trace destinee a etre relue par un humain
+      // cinq ans plus tard ne doit pas exiger une conversion.
+      valeurAvant: presence.heure_depart, valeurApres: presence.depart_demande_texte,
       auteur: req.utilisateur, motif, origine: 'formateur',
     });
 

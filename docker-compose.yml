@@ -12,6 +12,8 @@ services:
       # l'utilisateur restreint a db_attestations) -- jamais lues par le backend.
       MYSQL_ATTESTATIONS_USER: ${MYSQL_ATTESTATIONS_USER}
       MYSQL_ATTESTATIONS_PASSWORD: ${MYSQL_ATTESTATIONS_PASSWORD}
+      MYSQL_RGPD_USER: ${MYSQL_RGPD_USER}
+      MYSQL_RGPD_PASSWORD: ${MYSQL_RGPD_PASSWORD}
     # Aucun port publie vers l'hote : conformement a l'architecture de deploiement
     # (chap. 4.3), MySQL n'est accessible que via le reseau Docker interne, jamais
     # depuis l'exterieur du conteneur hote. Seul le proxy Caddy est expose (ports 80/443).
@@ -47,6 +49,11 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      # Identite dediee a la cloture RGPD (Etape 9). Pool SEPARE : seul le
+      # controleur de cloture l'emprunte, pour que l'application ordinaire
+      # reste incapable de modifier la table scans.
+      MYSQL_RGPD_USER: ${MYSQL_RGPD_USER}
+      MYSQL_RGPD_PASSWORD: ${MYSQL_RGPD_PASSWORD}
       # FIX (post Etape 2) : ces deux variables manquaient ici. Sans elles,
       # tokenService.js retombe sur un chemin de secours calcule depuis
       # __dirname (/app/src/services), qui remonte a la racine du systeme de

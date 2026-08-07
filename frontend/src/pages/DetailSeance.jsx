@@ -420,9 +420,9 @@ function DetailSeance({ seanceId, onRetour }) {
           <p className="mt-4 text-xs leading-relaxed text-sable-600">
             <span className="font-medium">Départ automatique</span> :
             l&apos;heure de fin prévue a été appliquée par défaut. Pour un suivi
-            du temps exact — départ anticipé, par exemple — les étudiants
-            scannent le QR code une seconde fois en quittant la salle. Vous
-            pouvez aussi corriger une présence manuellement.
+            du temps exact (ex: départ anticipé), les étudiants doivent scanner
+            le QR code une seconde fois en quittant la salle. Vous pouvez
+            également corriger une présence manuellement.
           </p>
         )}
         {donnees && donnees.presences.some((p) => p.position_coherente === 0) && (

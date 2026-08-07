@@ -24,6 +24,8 @@ variables:
   MYSQL_PASSWORD: ci_app_test_pw
   MYSQL_ATTESTATIONS_USER: app_attestations
   MYSQL_ATTESTATIONS_PASSWORD: ci_attestations_test_pw
+  MYSQL_RGPD_USER: app_rgpd
+  MYSQL_RGPD_PASSWORD: ci_rgpd_test_pw
   # "mysql" = alias du service ci-dessous, resolu par le DNS interne du job
   # (jamais "localhost" : le service tourne dans un conteneur separe de
   # celui qui execute le script).

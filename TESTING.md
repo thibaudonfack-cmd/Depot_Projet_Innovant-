@@ -3014,6 +3014,258 @@ automatique est procédural (section 3) ; et les deux suites passent
 
 ---
 
+# Étape 9 — Bilan par UF, clôture RGPD et bornes de rectification
+
+**`docker compose down -v` OBLIGATOIRE**, et **avant de relancer, complétez
+votre `.env`** avec les deux nouvelles variables (voir `.env.example`) :
+
+```
+MYSQL_RGPD_USER=app_rgpd
+MYSQL_RGPD_PASSWORD=un_mot_de_passe_solide
+```
+
+Sans elles, le backend refuse de démarrer avec un message explicite : le pool
+RGPD applique la même stratégie fail-fast que le pool applicatif. Mieux vaut
+un refus au démarrage qu'une découverte au milieu d'une opération
+irréversible.
+
+```bash
+docker compose down -v && docker compose up -d --build
+```
+
+## 1. La rectification : arrivée verrouillée, départ borné
+
+Connectez-vous en étudiant, sur une séance **terminée depuis moins de 24 h**,
+et ouvrez « Signaler une erreur ».
+
+### À l'écran
+
+| Élément | Attendu |
+| --- | --- |
+| Champ *Arrivée enregistrée* | Grisé, **non modifiable**, avec la mention « Validée par votre scan » |
+| Champ *Départ réel* | Modifiable, avec « Au plus tard HH:MM » |
+| Saisie d'un départ après la fin | Message d'erreur, bouton d'envoi désactivé |
+
+### Le contrôle qui compte : contourner l'interface
+
+Un formulaire verrouillé ne protège de rien. Appelez l'API directement :
+
+```bash
+# a) Tenter de modifier l'ARRIVEE
+curl -k -b etu.txt -X POST https://localhost/api/rectifications \
+  -H 'Content-Type: application/json' \
+  -d '{"presence_id":"<ID>","motif":"Test","heure_arrivee_demandee":"2026-09-01T08:00:00.000Z"}'
+```
+
+Attendu : **400**, code `ARRIVEE_NON_CONTESTABLE`.
+
+```bash
+# b) Tenter un depart APRES la fin prevue de la seance
+curl -k -b etu.txt -X POST https://localhost/api/rectifications \
+  -H 'Content-Type: application/json' \
+  -d '{"presence_id":"<ID>","motif":"Test","heure_depart_demandee":"2026-09-01T23:00:00.000Z"}'
+```
+
+Attendu : **400**, code `DEPART_APRES_FIN_SEANCE`, avec l'heure limite dans le
+message.
+
+```bash
+# c) Contre-epreuve : un depart ANTICIPE doit passer
+curl -k -b etu.txt -X POST https://localhost/api/rectifications \
+  -H 'Content-Type: application/json' \
+  -d '{"presence_id":"<ID>","motif":"Rendez-vous medical","heure_depart_demandee":"<fin moins 1h>"}'
+```
+
+Attendu : **201**. La borne ne doit pas bloquer le cas légitime, qui est
+précisément le départ anticipé.
+
+### Vérifier l'absence de décalage horaire
+
+C'est le contrôle qui a révélé un défaut réel. Acceptez la demande ci-dessus
+en tant que formateur, puis relisez la présence :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT heure_arrivee, heure_depart FROM presences WHERE id = '<ID>';"
+```
+
+L'heure de départ enregistrée doit correspondre **exactement** à celle
+demandée dans l'interface, à la minute près. Un écart de 1 ou 2 heures
+signalerait le retour du mélange de fuseaux corrigé à cette étape.
+
+## 2. Le bilan global par UF
+
+Depuis le tableau de bord formateur, cliquez **« Voir le bilan »**.
+
+### Vérifier le dénominateur
+
+Créez trois séances sur une même UF : deux terminées, une en cours.
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT COUNT(*) total,
+         SUM(NOW() > heure_fin_prevue) terminees
+    FROM seances WHERE uf_id = '<UF_ID>';"
+```
+
+Le bilan doit afficher le nombre de séances **terminées** comme dénominateur,
+pas le total. Une séance en cours n'a pas de durée définitive : l'inclure ferait
+varier le bilan d'une minute à l'autre.
+
+### Vérifier le taux
+
+Un étudiant présent à 1 séance sur 2 doit afficher **1 / 2** et **50 %**, pas
+100 %. C'est le piège du `GROUP BY` : un dénominateur calculé par étudiant
+donnerait 100 % à quelqu'un venu une seule fois sur douze séances.
+
+Vérifiez aussi :
+
+- Un étudiant **jamais venu** figure au tableau avec **0** et non une case
+  vide.
+- Une UF dont aucune séance n'est terminée n'affiche **jamais `NaN`**.
+- Le taux est écrit **en chiffres** à côté de la barre : à l'impression noir et
+  blanc, la barre seule serait illisible.
+
+### L'impression
+
+**Ctrl+P** sur le bilan. Doivent disparaître : l'en-tête applicatif, le
+sélecteur d'UF, les boutons, et **toute la zone de clôture**. Doit apparaître :
+le pied « Document établi le… ».
+
+## 3. La clôture RGPD
+
+### Les garde-fous, d'abord
+
+| Test | Attendu |
+| --- | --- |
+| Bouton *Clôturer* sur une UF déjà clôturée | **Absent** |
+| Valider la modale sans saisir le mot | Bouton **désactivé** |
+| Saisir autre chose que `CLOTURER` | Bouton **toujours désactivé** |
+| Appel API sans `confirmation` | **400** `CONFIRMATION_MANQUANTE` |
+| Appel API par un étudiant | **403** |
+| Clôturer avec une demande en attente | **409** `DEMANDES_EN_ATTENTE` |
+
+Le dernier mérite d'être testé explicitement : faites soumettre une demande de
+rectification, puis tentez la clôture. Le refus est volontaire — **le droit à
+la minimisation ne prime pas sur le droit d'être entendu**.
+
+### Relever l'état AVANT la purge
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT p.id, p.latitude_scan, p.longitude_scan, p.distance_m,
+         p.position_coherente, p.heure_arrivee, p.heure_depart
+    FROM presences p JOIN seances s ON s.id = p.seance_id
+   WHERE s.uf_id = '<UF_ID>';
+  SELECT sc.jti FROM scans sc JOIN seances s ON s.id = sc.seance_id
+   WHERE s.uf_id = '<UF_ID>';"
+```
+
+Notez les valeurs : coordonnées renseignées, `jti` ressemblant à un UUID.
+
+### Purger
+
+Traitez d'abord toute demande en attente, puis cliquez **« Clôturer l'UF et
+purger les métadonnées (RGPD) »**, saisissez `CLOTURER`, validez.
+
+La modale doit clairement séparer **Détruit** (coordonnées GPS, distance,
+précision, verdict, lien vers les jetons) de **Conservé 5 ans** (identité,
+heures, nombre de scans, journal).
+
+### Relever l'état APRÈS
+
+Rejouez exactement les deux mêmes requêtes.
+
+| Colonne | Attendu |
+| --- | --- |
+| `latitude_scan`, `longitude_scan` | **NULL** |
+| `precision_m`, `distance_m` | **NULL** |
+| `position_coherente` | **NULL** |
+| `heure_arrivee`, `heure_depart` | **inchangées** |
+| `scans.jti` | commence par `purge:` |
+| Nombre de lignes dans `scans` | **inchangé** |
+
+Ce dernier point est essentiel : les lignes survivent. On peut toujours
+prouver qu'un étudiant a scanné **deux** fois, donc qu'il a pointé son départ.
+Supprimer les lignes détruirait la preuve que la présence repose sur des scans
+et non sur une saisie manuelle.
+
+### La trace d'audit
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_attestations -e "
+  SELECT champ, valeur_apres, motif, auteur_email, origine
+    FROM journal_modifications WHERE table_cible = 'uf';"
+```
+
+Attendu : une ligne, avec le compte des positions détruites et des scans
+anonymisés, et un motif mentionnant la minimisation.
+
+### Le verrou d'archive
+
+```bash
+# Cote etudiant
+curl -k -b etu.txt -X POST https://localhost/api/rectifications \
+  -H 'Content-Type: application/json' \
+  -d '{"presence_id":"<ID>","motif":"Tentative apres cloture"}'
+
+# Cote formateur
+curl -k -b form.txt -X PUT https://localhost/api/presences/<ID> \
+  -H 'Content-Type: application/json' \
+  -d '{"heure_depart":null,"motif":"Tentative apres cloture"}'
+```
+
+Attendu dans les **deux** cas : **409** `UF_CLOTUREE`. Le verrou s'applique
+aussi au formateur, et c'est voulu : une archive dont le détenteur peut encore
+modifier le contenu n'est pas une archive.
+
+## 4. Vérifier la séparation des privilèges
+
+C'est le point d'architecture le plus défendable de cette étape.
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" \
+  -e "SHOW GRANTS FOR 'app_logs'@'%'; SHOW GRANTS FOR 'app_rgpd'@'%';"
+```
+
+Attendu :
+
+- `app_logs` : **aucun** `UPDATE` ni `DELETE` sur `db_logs.scans`. La garantie
+  d'inaltérabilité n'a pas été affaiblie pour implémenter la purge.
+- `app_rgpd` : `GRANT UPDATE (jti) ON db_logs.scans` — un privilège de
+  **colonne**, pas de table. Le compte de purge ne peut ni réattribuer un scan
+  à un autre étudiant, ni en modifier l'horodatage. Et **aucun `DELETE` nulle
+  part**.
+
+## 5. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+
+Attendu : **`138 passed`** (11 suites) côté backend et **`93 passed`**
+(9 fichiers) côté frontend.
+
+Le test central demandé se lance isolément :
+
+```bash
+docker compose exec backend npx jest -t "depart apres la fin prevue"
+```
+
+## Critère de succès global
+
+Validée si et seulement si : l'arrivée est refusée par le serveur et pas
+seulement grisée à l'écran, et un départ après la fin prévue renvoie
+`DEPART_APRES_FIN_SEANCE` (section 1) ; une heure rectifiée est enregistrée
+sans décalage horaire (section 1) ; le bilan compte les seules séances
+terminées avec un dénominateur commun (section 2) ; la clôture détruit les
+coordonnées, préserve les heures, anonymise sans supprimer les scans, et
+verrouille l'UF pour les deux rôles (section 3) ; `app_logs` reste sans droit
+d'écriture sur `scans` (section 4) ; et les deux suites passent (section 5).
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

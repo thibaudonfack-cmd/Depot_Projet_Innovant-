@@ -7,6 +7,7 @@
 // logique d'ecriture viendra avec le suivi du temps.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import EnTeteApplication from '../components/EnTeteApplication';
 import AffichageQR from '../components/AffichageQR';
 import DetailSeance from './DetailSeance';
@@ -151,6 +152,7 @@ function FormulaireSeance({ unitesFormation, salles, onCreee }) {
 // ---------------------------------------------------------------------------
 
 function TableauBordFormateur() {
+  const navigate = useNavigate();
   const [seances, setSeances] = useState(null);
   const [erreur, setErreur] = useState('');
   const [seanceProjetee, setSeanceProjetee] = useState(null);
@@ -233,6 +235,25 @@ function TableauBordFormateur() {
           <DetailSeance seanceId={seanceDetaillee} onRetour={() => { setSeanceDetaillee(null); chargerSeances(); }} />
         ) : (
           <>
+            {/* Acces au bilan de fin de semestre, en tete de page : c'est le
+                point d'entree de la cloture administrative, et le chercher
+                dans un menu au moment ou l'on en a besoin serait une friction
+                inutile. */}
+            <Carte>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="text-sm font-semibold text-sable-900">Bilan de fin de semestre</h2>
+                  <p className="mt-1 text-sm leading-relaxed text-sable-600">
+                    Assiduité cumulée par unité de formation, prête à imprimer.
+                  </p>
+                </div>
+                <Bouton variante="secondaire" onClick={() => navigate('/formateur/bilan')}
+                        className="w-auto px-4 py-2 text-xs">
+                  Voir le bilan
+                </Bouton>
+              </div>
+            </Carte>
+
             <Carte>
               <h2 className="text-sm font-semibold text-sable-900">Ouvrir une séance</h2>
               <p className="mt-1 text-sm leading-relaxed text-sable-600">

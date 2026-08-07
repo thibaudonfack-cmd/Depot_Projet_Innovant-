@@ -192,7 +192,23 @@ CREATE TABLE sessions (
 CREATE TABLE uf (
   id           CHAR(36)     NOT NULL DEFAULT (UUID()) PRIMARY KEY,
   intitule     VARCHAR(255) NOT NULL,
-  date_cloture DATE         NULL
+  -- Fin pedagogique de l'unite de formation (date administrative).
+  date_cloture DATE         NULL,
+  -- Etape 9 : horodatage de la CLOTURE RGPD.
+  --
+  -- A ne pas confondre avec date_cloture ci-dessus, qui est une date de
+  -- calendrier pedagogique. Celle-ci marque un evenement IRREVERSIBLE : les
+  -- donnees de localisation et la trace cryptographique des scans de cette
+  -- UF ont ete detruites, en application du principe de minimisation
+  -- (RGPD art. 5.1.c). Seule subsiste l'archive administrative
+  -- (identite, arrivee, depart), conservee cinq ans.
+  --
+  -- Cette colonne porte AUSSI le verrou : une UF cloturee n'accepte plus ni
+  -- rectification ni modification d'horaire. L'etat verrouille est DEDUIT de
+  -- cette date plutot que duplique dans un drapeau sur chaque presence --
+  -- deux sources pour un meme fait finissent toujours par diverger, et c'est
+  -- ici l'evenement juridique qui est stocke, pas ses consequences.
+  date_cloture_rgpd DATETIME NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------------------------------------------------------

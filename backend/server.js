@@ -39,6 +39,7 @@ const mesPresencesRoutes = require('./src/routes/mesPresencesRoutes');
 const rectificationRoutes = require('./src/routes/rectificationRoutes');
 const presenceRoutes = require('./src/routes/presenceRoutes');
 const appareilRoutes = require('./src/routes/appareilRoutes');
+const ufRoutes = require('./src/routes/ufRoutes');
 const { attachQrBroadcaster } = require('./src/services/qrBroadcaster');
 
 const app = express();
@@ -78,6 +79,7 @@ app.use('/api/mes-presences', mesPresencesRoutes);
 app.use('/api/mon-appareil', appareilRoutes);
 app.use('/api/rectifications', rectificationRoutes);
 app.use('/api/presences', presenceRoutes);
+app.use('/api/uf', ufRoutes);
 app.use('/api/seances', seanceRoutes);
 app.use('/api/scans', scanRoutes);
 app.use('/api/enrolements', enrolementRoutes);

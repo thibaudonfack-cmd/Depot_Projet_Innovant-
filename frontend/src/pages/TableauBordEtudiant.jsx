@@ -206,14 +206,38 @@ function CarteAppareil({ etat, appareilActif, onEnrole }) {
 // Signalement d'une erreur
 // ---------------------------------------------------------------------------
 
+/**
+ * Signalement d'une erreur sur une presence.
+ *
+ * L'ARRIVEE EST EN LECTURE SEULE, et ce n'est pas un detail d'ergonomie.
+ * Elle resulte d'un scan dont le jeton est signe RS256 par le serveur et dont
+ * la possession est prouvee par une signature ECDSA de l'appareil enrole :
+ * c'est la donnee la mieux etablie du systeme. La rendre modifiable
+ * laisserait une declaration libre ecraser une preuve cryptographique.
+ *
+ * Le depart, lui, repose sur un SECOND scan qui peut simplement avoir ete
+ * oublie en quittant la salle. C'est une omission, pas une contestation de
+ * preuve -- et c'est donc le seul champ contestable.
+ *
+ * Le serveur refuse de toute facon toute arrivee soumise : ce qui suit est
+ * la traduction visible d'une regle, pas la regle elle-meme.
+ */
 function ModaleSignalement({ presence, onFermer, onEnvoye }) {
   const [motif, setMotif] = useState('');
-  const [arrivee, setArrivee] = useState(versChampLocal(presence?.heure_arrivee));
   const [depart, setDepart] = useState(versChampLocal(presence?.heure_depart));
   const [erreur, setErreur] = useState('');
   const [envoi, setEnvoi] = useState(false);
 
-  const bornesIncoherentes = Boolean(arrivee && depart && depart <= arrivee);
+  const arrivee = versChampLocal(presence?.heure_arrivee);
+  const finPrevue = versChampLocal(presence?.heure_fin_prevue);
+
+  const avantArrivee = Boolean(depart && depart <= arrivee);
+  // Un depart posterieur a la fin prevue creditrait des heures qui n'ont
+  // jamais eu lieu. La fenetre de 24 h s'ouvrant APRES la seance, une heure
+  // tardive parait plausible au moment ou l'etudiant saisit -- d'ou le
+  // besoin d'une borne explicite plutot que d'un simple bon sens.
+  const apresFin = Boolean(depart && finPrevue && depart > finPrevue);
+  const bornesIncoherentes = avantArrivee || apresFin;
 
   async function envoyer(evenement) {
     evenement.preventDefault();
@@ -225,9 +249,11 @@ function ModaleSignalement({ presence, onFermer, onEnvoye }) {
         corps: {
           presence_id: presence.id,
           motif: motif.trim(),
-          // Les valeurs saisies sont locales ; toISOString() les convertit en
-          // UTC, seul format que le serveur accepte.
-          heure_arrivee_demandee: arrivee ? new Date(arrivee).toISOString() : null,
+          // heure_arrivee_demandee n'est JAMAIS envoyee : le serveur la
+          // refuse, et la transmettre laisserait croire qu'elle est prise en
+          // compte.
+          // La valeur saisie est locale ; toISOString() la convertit en UTC,
+          // seul format que le serveur accepte.
           heure_depart_demandee: depart ? new Date(depart).toISOString() : null,
         },
       });
@@ -249,15 +275,31 @@ function ModaleSignalement({ presence, onFermer, onEnvoye }) {
       />
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <Champ id="arrivee" libelle="Arrivée réelle" type="datetime-local"
-               value={arrivee} onChange={(e) => setArrivee(e.target.value)} />
+        {/* readOnly plutot que disabled : un champ desactive est retire de
+            l'ordre de tabulation et souvent ignore par les lecteurs d'ecran.
+            Ici la valeur doit rester lisible et annoncable, simplement pas
+            modifiable. */}
+        <Champ id="arrivee" libelle="Arrivée enregistrée" type="datetime-local"
+               value={arrivee} readOnly
+               aide="Validée par votre scan, non modifiable."
+               className="bg-sable-100 text-sable-700" />
         <Champ id="depart" libelle="Départ réel" type="datetime-local"
                value={depart} onChange={(e) => setDepart(e.target.value)}
+               max={finPrevue || undefined}
+               aide={finPrevue ? `Au plus tard ${heure(presence.heure_fin_prevue)}.` : undefined}
                erreur={bornesIncoherentes} />
       </div>
 
       <div aria-live="polite" className="space-y-3">
-        {bornesIncoherentes && <Message ton="erreur">Le départ doit être postérieur à l&apos;arrivée.</Message>}
+        {avantArrivee && (
+          <Message ton="erreur">Le départ doit être postérieur à l&apos;arrivée.</Message>
+        )}
+        {apresFin && (
+          <Message ton="erreur">
+            Le départ ne peut pas dépasser l&apos;heure de fin prévue de la séance
+            ({heure(presence.heure_fin_prevue)}).
+          </Message>
+        )}
         {erreur && <Message ton="erreur">{erreur}</Message>}
       </div>
 

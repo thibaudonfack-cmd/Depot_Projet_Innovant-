@@ -58,6 +58,45 @@ mysql -h "${MYSQL_HOST:-localhost}" -uroot -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
   CREATE USER IF NOT EXISTS '${MYSQL_ATTESTATIONS_USER}'@'%' IDENTIFIED BY '${MYSQL_ATTESTATIONS_PASSWORD}';
   GRANT SELECT, INSERT ON db_attestations.* TO '${MYSQL_ATTESTATIONS_USER}'@'%';
 
+  -- ---------------------------------------------------------------------
+  -- Etape 9 : TROISIEME identite, dediee a la seule cloture RGPD.
+  --
+  -- Le probleme a resoudre : la minimisation exige de DETRUIRE des donnees
+  -- dans db_logs.scans -- table sur laquelle l'utilisateur applicatif n'a
+  -- volontairement ni UPDATE ni DELETE. C'est la garantie la plus forte de
+  -- toute l'architecture : meme une injection SQL ou une dependance
+  -- compromise ne peut pas reecrire l'historique des scans, parce que le
+  -- refus vient du moteur et non du code.
+  --
+  -- Accorder UPDATE sur scans a '${MYSQL_USER}' ferait disparaitre cette
+  -- garantie pour TOUTES les routes de l'application, au benefice d'une
+  -- seule. Le prix serait sans commune mesure avec le gain.
+  --
+  -- D'ou une identite SEPAREE, utilisee par un pool distinct que seul le
+  -- controleur de cloture peut emprunter (cf. backend/src/config/dbRgpd.js).
+  -- La capacite d'effacement est ainsi elle-meme un privilege isole : c'est
+  -- exactement ce que le RGPD attend d'une operation d'effacement, qui doit
+  -- etre tracable et restreinte, jamais diffuse dans tout le code.
+  --
+  -- Ce compte n'a delibrement PAS de DELETE : la cloture ANONYMISE les
+  -- lignes de scans (le jti est remplace), elle ne les supprime pas. Le
+  -- NOMBRE de scans reste ainsi verifiable -- on peut toujours prouver
+  -- qu'un etudiant a scanne deux fois -- alors que le lien avec le jeton
+  -- reel, lui, a disparu. Detruire les lignes entieres detruirait aussi la
+  -- preuve que la presence repose bien sur des scans.
+  -- ---------------------------------------------------------------------
+  CREATE USER IF NOT EXISTS '${MYSQL_RGPD_USER}'@'%' IDENTIFIED BY '${MYSQL_RGPD_PASSWORD}';
+  REVOKE ALL PRIVILEGES, GRANT OPTION FROM '${MYSQL_RGPD_USER}'@'%';
+  GRANT SELECT ON db_logs.* TO '${MYSQL_RGPD_USER}'@'%';
+  -- UPDATE sur la SEULE colonne jti : le compte de purge ne peut pas
+  -- reattribuer un scan a un autre etudiant ni en changer l'horodatage.
+  GRANT UPDATE (jti) ON db_logs.scans TO '${MYSQL_RGPD_USER}'@'%';
+  GRANT UPDATE ON db_logs.presences TO '${MYSQL_RGPD_USER}'@'%';
+  GRANT UPDATE ON db_logs.uf TO '${MYSQL_RGPD_USER}'@'%';
+  -- La cloture doit etre consignee au journal d'audit, comme toute
+  -- operation irreversible. INSERT seul : jamais UPDATE ni DELETE.
+  GRANT SELECT, INSERT ON db_attestations.journal_modifications TO '${MYSQL_RGPD_USER}'@'%';
+
   -- 1. Remise a zero TOTALE : on retire absolument tous les privileges de l'utilisateur
   REVOKE ALL PRIVILEGES, GRANT OPTION FROM '${MYSQL_USER}'@'%';
 
@@ -91,6 +130,9 @@ mysql -h "${MYSQL_HOST:-localhost}" -uroot -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
   GRANT UPDATE ON db_logs.defis_enrolement TO '${MYSQL_USER}'@'%';
 
   GRANT UPDATE ON db_logs.presences TO '${MYSQL_USER}'@'%';
+
+  -- Etape 9 : la cloture RGPD ecrit uf.date_cloture_rgpd.
+  GRANT UPDATE ON db_logs.uf TO '${MYSQL_USER}'@'%';
   GRANT UPDATE ON db_logs.demandes_rectification TO '${MYSQL_USER}'@'%';
 
   -- EXCEPTION DELIBEREE ET ETROITE a la separation des deux bases.

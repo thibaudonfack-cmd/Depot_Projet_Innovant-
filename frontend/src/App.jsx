@@ -14,6 +14,7 @@ import EcranChargement from './components/EcranChargement';
 import Connexion from './pages/Connexion';
 import TableauBordEtudiant from './pages/TableauBordEtudiant';
 import TableauBordFormateur from './pages/TableauBordFormateur';
+import BilanUf from './pages/BilanUf';
 
 /** Aiguillage de la racine vers le bon espace, ou vers la connexion. */
 function Racine() {
@@ -44,6 +45,18 @@ function App() {
             element={
               <RouteProtegee role="formateur">
                 <TableauBordFormateur />
+              </RouteProtegee>
+            }
+          />
+
+          {/* Bilan de fin de semestre. Route distincte plutot qu'un onglet
+              du tableau de bord : elle s'imprime, se met en favori, et se
+              partage par son URL avec le secretariat. */}
+          <Route
+            path="/formateur/bilan"
+            element={
+              <RouteProtegee role="formateur">
+                <BilanUf />
               </RouteProtegee>
             }
           />

@@ -13,12 +13,27 @@ const pool = require('../config/db');
 /** GET /api/uf - route protegee (toute session authentifiee). */
 async function listerUf(req, res) {
   try {
-    // date_cloture IS NULL : on ne propose que les UF encore actives. Ouvrir
-    // une seance sur une UF cloturee produirait des heures inexploitables.
+    // date_cloture IS NULL : on ne propose que les UF encore actives pour la
+    // CREATION de seance -- ouvrir une seance sur une UF cloturee produirait
+    // des heures inexploitables.
+    //
+    // Etape 9 : la liste sert desormais AUSSI au selecteur du bilan, qui doit
+    // pouvoir atteindre une UF cloturee (c'est meme le cas d'usage principal
+    // en fin de semestre). D'ou le parametre `toutes`, plutot qu'une seconde
+    // route qui dupliquerait la meme requete a un filtre pres.
+    const toutes = req.query.toutes === '1';
     const [lignes] = await pool.query(
-      'SELECT id, intitule FROM uf WHERE date_cloture IS NULL ORDER BY intitule'
+      `SELECT id, intitule, date_cloture, date_cloture_rgpd
+         FROM uf
+        ${toutes ? '' : 'WHERE date_cloture IS NULL'}
+        ORDER BY intitule`
     );
-    return res.status(200).json({ status: 'ok', uf: lignes });
+    return res.status(200).json({
+      status: 'ok',
+      // Drapeau explicite plutot que de laisser chaque ecran comparer une
+      // date a null : la question posee est booleenne.
+      uf: lignes.map((u) => ({ ...u, cloturee_rgpd: u.date_cloture_rgpd !== null })),
+    });
   } catch (error) {
     console.error('[referentielController] Erreur GET /api/uf :', error.message);
     return res.status(500).json({ status: 'error', message: 'Erreur serveur.' });
