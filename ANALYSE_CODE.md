@@ -5146,6 +5146,46 @@ aux formateurs, deviendrait la cible du prêt d'identifiants : il suffirait de
 demander à un formateur complaisant. La friction est **le mécanisme**, pas un
 effet de bord.
 
+## La friction ne doit frapper que la fraude
+
+Un effet de bord est apparu à l'usage, et il valait la peine d'être corrigé :
+sur un téléphone **déjà associé**, le bouton restait cliquable sous le libellé
+« Associer à nouveau cet appareil ». Un clic par mégarde régénérait une paire
+de clés sur ce même appareil et consommait l'unique crédit de secours — sans
+rien apporter, puisque l'appareil était déjà lié.
+
+C'était une **friction punitive** : elle sanctionnait la maladresse, pas la
+fraude. Or le quota est conçu pour rendre le *prêt* coûteux, pas pour punir un
+clic de trop. Un dispositif de sécurité qui frappe surtout les utilisateurs de
+bonne foi finit par être contourné, désactivé, ou simplement détesté — et il
+perd alors toute efficacité contre ceux qu'il visait.
+
+**La correction s'appuie sur l'état local, faute de pouvoir identifier le
+matériel.** L'état `actif` n'est atteint que si trois conditions sont réunies :
+une clé privée est présente dans IndexedDB, un identifiant d'appareil y est
+mémorisé, et cet identifiant est celui que le serveur déclare actif. Les trois
+ensemble ne peuvent être vraies que sur le téléphone réellement enrôlé — un
+identifiant recopié sans la clé serait rattrapé par `possedeDejaUneCle()`.
+
+Dans ce cas, le bouton n'est pas désactivé : il est **absent du DOM**. Un
+bouton désactivé reste annoncé par les lecteurs d'écran et suggère une action
+possible ; ici, aucune action n'est à faire, et un message vert le confirme.
+
+Deux limites délibérées, chacune couverte par un test :
+
+- **Le bouton reste proposé quand l'état n'a pas pu être vérifié.** Bloquer
+  sur un état inconnu empêcherait un étudiant sur un téléphone neuf de
+  s'enrôler pour une simple coupure réseau. Ce serait un défaut plus grave que
+  celui corrigé.
+- **Quota épuisé n'est pas la même chose que déjà associé.** Dans le premier
+  cas l'action serait légitime et c'est le crédit qui manque : le bouton reste
+  donc visible mais désactivé, pour que le refus soit compréhensible. Le
+  masquer laisserait l'étudiant sans explication.
+
+Trois mutations ont vérifié que ces tests détectent bien les régressions
+correspondantes, y compris les deux façons de se tromper *dans l'autre sens* —
+masquer le bouton trop largement.
+
 ## Ce que l'interface annonce
 
 L'avertissement s'affiche **avant** l'action, avec le nombre d'associations

@@ -3709,6 +3709,43 @@ revient pas à l'appareil de l'ami : le scénario du prêt s'arrête là.
 Réessayez plusieurs fois et relisez le compteur : il ne doit **pas** dépasser
 2. Sinon la situation d'un étudiant de bonne foi s'aggraverait à chaque essai.
 
+## 1 bis. On ne peut plus griller son quota par erreur
+
+Sur un téléphone **déjà associé**, le bouton « Associer cet appareil » ne doit
+plus apparaître du tout.
+
+| État de l'appareil | Bouton attendu |
+| --- | --- |
+| Déjà lié (clé locale + identifiant correspondant) | **Absent** |
+| Vierge (aucune clé locale) | Présent |
+| Dissocié (clé locale, autre appareil actif) | Présent |
+| État non vérifiable (coupure réseau) | **Présent** |
+| Quota épuisé | Présent mais **désactivé** |
+
+Deux nuances qui comptent :
+
+- **Absent, pas désactivé.** Un bouton désactivé reste annoncé par les lecteurs
+  d'écran et suggère une action possible. Sur un appareil déjà lié, aucune
+  action n'est à faire : un message vert le confirme à la place.
+- **Le bouton reste présent quand l'état n'est pas vérifiable.** Bloquer sur un
+  état inconnu empêcherait un étudiant sur un téléphone neuf de s'enrôler pour
+  une simple coupure réseau — défaut plus grave que celui corrigé.
+
+Pour vérifier le cas « dissocié » sans second téléphone : enrôlez l'appareil A,
+puis enrôlez l'appareil B (ou simulez en modifiant l'appareil actif en base).
+Rechargez sur A : le message rouge « Cet appareil a été dissocié » et le bouton
+doivent réapparaître.
+
+Vérifiez ensuite qu'un rechargement de page sur un appareil lié **ne consomme
+rien** :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT nom, compteur_enrolements FROM etudiants ORDER BY nom;"
+```
+
+Le compteur doit rester stable, quel que soit le nombre de rechargements.
+
 ## 2. La réinitialisation administrative
 
 C'est la seule issue, et elle passe par un humain.
@@ -3776,7 +3813,7 @@ docker compose exec backend npm test
 docker compose exec frontend npm test
 ```
 
-Attendu : **`165 passed`** (13 suites) et **`109 passed`** (10 fichiers).
+Attendu : **`165 passed`** (13 suites) et **`119 passed`** (11 fichiers).
 
 La suite dédiée au quota :
 

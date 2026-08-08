@@ -85,6 +85,35 @@ function CarteAppareil({ etat, appareilActif, quota, onEnrole }) {
   // le refus renvoye par le serveur. Les deux doivent produire le meme ecran.
   const bloque = Boolean(quotaAtteint) || (quota ? quota.restants === 0 : false);
 
+  // ------------------------------------------------------------------------
+  // DEJA ASSOCIE : le bouton n'est pas propose (Etape 12).
+  //
+  // Le defaut corrige : sur un appareil DEJA actif, le bouton restait
+  // cliquable sous le libelle "Associer a nouveau cet appareil". Un clic par
+  // megarde regenerait une paire de cles sur ce meme telephone et consommait
+  // l'unique credit de secours -- sans rien apporter, puisque l'appareil
+  // etait deja lie.
+  //
+  // C'etait une friction PUNITIVE : elle sanctionnait la maladresse, pas la
+  // fraude. Le quota est concu pour rendre le PRET couteux, pas pour punir
+  // un clic de trop. Un dispositif de securite qui frappe surtout les
+  // utilisateurs de bonne foi finit par etre contourne ou desactive.
+  //
+  // Ce que 'actif' garantit exactement (cf. useEtatAppareil) : une cle privee
+  // est presente dans IndexedDB, un identifiant d'appareil y est memorise, ET
+  // cet identifiant est celui que le serveur declare actif. Les trois
+  // conditions ensemble ne peuvent etre vraies que sur le telephone
+  // reellement enrole -- une copie de l'identifiant sans la cle serait
+  // rattrapee par possedeDejaUneCle().
+  //
+  // Le bouton reste propose dans TOUS les autres cas : appareil vierge
+  // ('aucun', 'autre') ou dissocie ('revoque'). Et deliberement aussi en cas
+  // d'erreur de verification : bloquer sur un etat inconnu empecherait un
+  // etudiant sur un telephone neuf de s'enroler pour une simple coupure
+  // reseau, ce qui serait un defaut plus grave que celui corrige ici.
+  // ------------------------------------------------------------------------
+  const dejaAssocie = etat === 'actif';
+
   async function enroler() {
     setEnCours(true);
     setMessage(null);
@@ -225,7 +254,10 @@ function CarteAppareil({ etat, appareilActif, quota, onEnrole }) {
           refus : quelqu'un qui apprend la limite au moment ou elle le bloque
           la subit, alors qu'informe en amont il peut decider. Masque une fois
           le quota epuise, ou l'alerte ci-dessus dit deja tout. */}
-      {!bloque && etat !== 'erreur' && (
+      {/* L'avertissement precede l'ACTION. Sans bouton a l'ecran, il n'avertit
+          de rien et ne fait qu'inquieter : le solde restant est alors rappele,
+          plus sobrement, dans le panneau de confirmation ci-dessous. */}
+      {!bloque && !dejaAssocie && etat !== 'erreur' && (
         <div className="mt-5 rounded-xl border border-amber-300 bg-amber-50 p-4">
           <p className="text-sm leading-relaxed text-amber-900">
             <span className="font-semibold">Attention :</span> par mesure de
@@ -245,17 +277,42 @@ function CarteAppareil({ etat, appareilActif, quota, onEnrole }) {
         </div>
       )}
 
-      <div className="mt-5">
-        <Bouton
-          variante={etat === 'actif' ? 'secondaire' : 'principal'}
-          onClick={enroler}
-          chargement={enCours}
-          disabled={bloque}
-          enfantsChargement="Association en cours"
-        >
-          {etat === 'actif' ? 'Associer à nouveau cet appareil' : 'Associer cet appareil'}
-        </Bouton>
-      </div>
+      {dejaAssocie ? (
+        <div className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+          <div className="flex gap-3">
+            <svg viewBox="0 0 24 24" aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-emerald-700"
+                 fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 6 9 17l-5-5" />
+            </svg>
+            <div>
+              <p className="text-sm font-semibold text-emerald-900">
+                Cet appareil est déjà lié à votre compte
+              </p>
+              <p className="mt-1 text-sm leading-relaxed text-emerald-900">
+                Vous pouvez scanner les QR codes directement. Aucune action
+                n&apos;est nécessaire.
+                {quota && quota.restants > 0 && (
+                  <>
+                    {' '}Si vous changez un jour de téléphone, il vous restera{' '}
+                    {quota.restants === 1 ? 'une association' : `${quota.restants} associations`}.
+                  </>
+                )}
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-5">
+          <Bouton
+            onClick={enroler}
+            chargement={enCours}
+            disabled={bloque}
+            enfantsChargement="Association en cours"
+          >
+            Associer cet appareil
+          </Bouton>
+        </div>
+      )}
 
       <div aria-live="polite">
         {message && <div className="mt-4"><Message ton={message.ton}>{message.texte}</Message></div>}
