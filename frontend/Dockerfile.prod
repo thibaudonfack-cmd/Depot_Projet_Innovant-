@@ -1,0 +1,53 @@
+# frontend/Dockerfile.prod
+# Build de PRODUCTION du frontend.
+#
+# Difference essentielle avec Dockerfile (developpement) : celui-ci ne lance
+# aucun serveur. Il produit des fichiers statiques, que Caddy sert directement.
+#
+# POURQUOI NE PAS GARDER LE SERVEUR VITE EN PRODUCTION
+#
+#   - Vite sert les modules un par un, non minifies, avec les cartes de source.
+#     Le code source complet du frontend serait donc telechargeable par
+#     n'importe qui, et le poids transfere se compte en megaoctets la ou le
+#     build fait ~150 ko compresses.
+#   - Le client HMR ouvre en permanence un WebSocket inutile.
+#   - Un serveur de developpement n'est pas concu pour encaisser du trafic
+#     reel ni pour resister a des requetes malveillantes.
+#
+# Image multi-etapes : l'etape "build" embarque Node et les 300 Mo de
+# node_modules, l'image FINALE ne contient que le repertoire dist/. Ces
+# dependances ne servent qu'a compiler, jamais a executer -- les embarquer
+# augmenterait la surface d'attaque sans aucune contrepartie.
+
+FROM node:20-alpine AS build
+
+WORKDIR /app
+
+# npm ci et non npm install : installation reproductible a partir du
+# package-lock.json, exactement comme en CI. Un `npm install` pourrait
+# resoudre une version differente au moment du deploiement.
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+# ---------------------------------------------------------------------------
+# Etape finale : une image quasi vide, dont Caddy montera le contenu.
+# ---------------------------------------------------------------------------
+FROM alpine:3.20
+
+# Les fichiers construits restent dans /dist, PAS dans /srv.
+#
+# Nuance qui evite un defaut classique : si l'image les placait directement
+# dans /srv et que le volume partage y etait monte, Docker ne recopierait le
+# contenu de l'image QUE lors de la toute premiere creation du volume. Au
+# deploiement suivant, le volume existant masquerait la nouvelle image, et le
+# site continuerait a servir l'ANCIENNE version -- sans aucune erreur, ce qui
+# rend le diagnostic long.
+#
+# La copie est donc explicite au demarrage (cf. docker-compose.prod.yml) : le
+# conteneur ecrase le volume a chaque lancement, puis s'arrete.
+COPY --from=build /app/dist /dist
+
+CMD ["sh", "-c", "rm -rf /srv/* && cp -r /dist/. /srv/ && echo 'Frontend publie dans /srv'"]

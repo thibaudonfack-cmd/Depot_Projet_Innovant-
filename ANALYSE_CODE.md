@@ -4755,6 +4755,263 @@ atteint »), et non une suite de `div` vides.
 
 ---
 
+# Architecture de déploiement en production
+
+## Pourquoi un VPS, et pas autre chose
+
+Trois familles d'hébergement se présentaient. Le raisonnement qui a écarté les
+deux autres vaut d'être exposé, parce qu'il repose sur une contrainte
+technique précise et non sur une préférence.
+
+### L'hébergement mutualisé : écarté d'emblée
+
+Un hébergement mutualisé classique (PHP/MySQL, cPanel) **ne peut pas exécuter
+Docker**, ni un processus Node.js persistant, ni ouvrir un WebSocket de longue
+durée. Or le QR dynamique repose entièrement sur un WebSocket maintenu ouvert
+pendant toute la séance. Ce n'est pas une question de coût : l'application ne
+fonctionnerait pas.
+
+### Le PaaS (Heroku, Render, Railway) : séduisant, mais mal adapté ici
+
+Le PaaS supprime l'administration système, ce qui est réellement précieux. Il
+achoppe sur trois points propres à ce projet :
+
+- **Le système de fichiers est éphémère.** Les clés RS256 vivent dans `keys/`,
+  monté en lecture seule. Sur un PaaS, chaque redéploiement repart d'une image
+  neuve : il faudrait passer les clés par variables d'environnement, avec les
+  sauts de ligne des fichiers PEM à échapper — source d'erreurs classique.
+- **La base est un service séparé et facturé.** MySQL managé chez ces
+  fournisseurs coûte souvent plus cher que le VPS entier, pour une base qui
+  tient largement dans quelques gigaoctets.
+- **Le modèle de privilèges ne survit pas.** L'architecture repose sur **trois
+  identités SQL distinctes** (`app_logs`, `app_attestations`, `app_rgpd`) avec
+  des droits finement découpés, jusqu'au privilège de colonne
+  `UPDATE (jti) ON scans`. La plupart des bases managées ne donnent qu'un seul
+  utilisateur, sans `GRANT` arbitraire. **La garantie d'inaltérabilité — le
+  point le plus fort du mémoire — disparaîtrait.**
+
+Ce dernier argument est décisif. Ce n'est pas « le PaaS est moins bien », c'est
+« le PaaS ne sait pas exprimer la propriété de sécurité centrale de ce
+système ».
+
+### Le VPS : le bon compromis
+
+Un VPS Debian 12 ou Ubuntu 22.04 LTS chez un hébergeur européen (Hetzner, OVH,
+Scaleway, Infomaniak) offre exactement ce dont la pile a besoin.
+
+**Contrôle total.** `root` permet d'installer Docker, de créer les trois
+utilisateurs MySQL avec leurs `GRANT` précis, et de gérer le pare-feu. Rien
+dans l'architecture n'a besoin d'être contourné.
+
+**Le `docker-compose.yml` se transpose sans réécriture.** C'est le bénéfice
+concret d'avoir conteneurisé dès l'Étape 0 : la production exécute la même
+définition de services que le développement, à une surcouche près
+(`docker-compose.prod.yml`). L'écart entre les deux environnements est
+explicite, listé dans un seul fichier, et donc auditable.
+
+**Coût maîtrisé.** Un VPS 2 vCPU / 4 Go / 40 Go SSD se situe entre 5 et 12 €
+par mois, tout compris. Le même besoin en PaaS (dyno + base managée + stockage)
+dépasse rapidement 40 €.
+
+**Isolation.** Machine virtuelle dédiée, noyau et ressources propres, pas de
+voisin de palier susceptible de saturer le disque.
+
+**Souveraineté des données.** Point non négociable ici : l'application traite
+des données personnelles d'étudiants (identité, horaires, et jusqu'à la clôture
+RGPD, des positions). Un hébergeur européen soumis au seul RGPD évite l'analyse
+de transfert hors UE et l'exposition au CLOUD Act. Une étape administrative
+lourde, épargnée par un choix d'hébergement.
+
+### Dimensionnement
+
+| Ressource | Recommandé | Justification |
+| --- | --- | --- |
+| vCPU | 2 | MySQL + Node + Caddy. Le pic de charge est le début de séance : ~30 scans en 2 minutes, chacun étant une vérification RSA puis ECDSA — quelques millisecondes. |
+| RAM | 4 Go | MySQL 8 réclame ~1 Go au repos ; Node ~150 Mo ; Caddy ~30 Mo. 4 Go laissent de la marge au cache InnoDB. |
+| Disque | 40 Go SSD | La base restera sous le gigaoctet pendant des années. L'espace sert surtout aux images Docker et aux sauvegardes. |
+| Sauvegardes | Snapshots quotidiens | Complètent `deploy.sh`, qui sauvegarde avant chaque déploiement. |
+
+Un 1 vCPU / 2 Go fonctionnerait, mais MySQL 8 y devient inconfortable dès que
+le cache travaille.
+
+## HTTPS : ce que Caddy fait à notre place
+
+C'est le point où l'architecture retenue en Étape 0 paie le plus visiblement.
+
+### Le contraste
+
+**Avec un reverse proxy classique (nginx),** il faudrait : installer `certbot`,
+écrire un bloc `server` provisoire en HTTP pour le défi ACME, lancer
+l'obtention, réécrire la configuration avec les chemins de certificats,
+configurer les protocoles et suites de chiffrement, poser une tâche `cron` de
+renouvellement, et prévoir le rechargement de nginx après renouvellement — le
+tout en surveillant que le `cron` ne s'est pas silencieusement arrêté. C'est
+une source connue d'incidents : le certificat expire un dimanche, et personne
+ne l'a vu venir.
+
+**Avec Caddy,** la configuration complète tient en ceci :
+
+```caddy
+presence.example.org {
+    handle /api/* { reverse_proxy backend:3000 }
+    handle { root * /srv; try_files {path} /index.html; file_server }
+}
+```
+
+Aucun chemin de certificat, aucune clé, aucun `cron`. **La seule présence d'un
+nom de domaine déclenche tout le mécanisme.**
+
+### Ce qui se passe réellement
+
+1. Caddy démarre, voit le domaine, constate qu'il n'a pas de certificat.
+2. Il contacte Let's Encrypt via ACME et reçoit un défi HTTP-01.
+3. Il répond au défi sur le port 80, qu'il écoute déjà.
+4. Le certificat est écrit dans `/data`, c'est-à-dire le volume **persistant**
+   `caddy_data`.
+5. Le renouvellement se déclenche automatiquement aux deux tiers de la durée de
+   vie, soit vers le soixantième jour. En cas d'échec, il reste un mois pour
+   réagir.
+
+Caddy applique en outre par défaut TLS 1.2 minimum, des suites modernes, la
+redirection HTTP vers HTTPS et l'agrafage OCSP. **Ces réglages sont ceux qu'on
+oublie de mettre à jour dans une configuration nginx écrite une fois pour
+toutes.**
+
+### Le seul point de vigilance
+
+Le volume `caddy_data` **doit être préservé**. Le perdre force une redemande de
+tous les certificats, et Let's Encrypt applique des quotas (5 échecs par heure,
+50 certificats par domaine et par semaine) qui peuvent rendre le site
+indisponible plusieurs heures. C'est précisément pourquoi `deploy.sh`
+n'exécute **jamais** `docker compose down -v` — commande qui, en développement,
+est au contraire recommandée à chaque changement de schéma.
+
+### La différence pour l'application, pas seulement pour le cadenas
+
+En local, `tls internal` produit un certificat cryptographiquement valide mais
+émis par une autorité inconnue des navigateurs. Sur un téléphone, cela ne
+signifie pas seulement un avertissement : `crypto.subtle`,
+`navigator.geolocation` et `getUserMedia` sont **refusés**. Autrement dit,
+l'enrôlement, le géofencing et le scan sont inutilisables.
+
+Le passage à Let's Encrypt ne change donc pas l'apparence du site : **il rend
+l'application fonctionnelle sur un vrai appareil.** C'est une exigence
+fonctionnelle, pas une bonne pratique.
+
+## Sécurité de la base : le port 3306 ne doit jamais sortir
+
+### La règle
+
+`docker-compose.yml` ne contient **aucune** section `ports:` pour le service
+`mysql`. Le port 3306 n'est joignable que depuis le réseau Docker
+`presence_net`, où le backend le résout par le nom `mysql`.
+
+La tentation d'ajouter `ports: ["3306:3306"]` pour brancher un client
+graphique est réelle, et c'est exactement ce qu'il ne faut pas faire.
+
+### Ce qui arriverait
+
+Publier 3306 rend la base accessible depuis **tout Internet**. Des robots
+balaient en permanence cette plage : l'exposition se compte en **minutes**, pas
+en semaines. Suivent des tentatives d'authentification en force sur `root`.
+
+Et la conséquence dépasse la fuite de données. Toute l'architecture de sécurité
+repose sur le fait que **l'application n'a pas les droits d'écriture sur
+`scans`**. Une connexion directe avec les identifiants `root` contourne ce
+modèle entièrement : l'historique redevient réécrivable, et la valeur probante
+du système s'effondre. **Le cloisonnement réseau n'est pas une couche
+supplémentaire, c'est ce qui rend le modèle de privilèges crédible.**
+
+### Comment travailler sur la base sans l'exposer
+
+```bash
+# Depuis le VPS, à l'intérieur du réseau Docker
+docker compose exec mysql mysql -u root -p db_logs
+```
+
+Pour un client graphique depuis le poste de travail, **un tunnel SSH**, jamais
+un port publié :
+
+```bash
+ssh -L 3307:127.0.0.1:3306 utilisateur@vps -N
+```
+
+La base devient joignable sur `localhost:3307` du poste, sans qu'aucun octet ne
+transite en clair et sans que le port soit ouvert sur Internet.
+
+### Défense en profondeur
+
+Le cloisonnement Docker ne dispense pas du pare-feu système, qui protège si
+un service publie un port par erreur :
+
+```bash
+ufw default deny incoming
+ufw allow 22/tcp     # SSH — par clé uniquement
+ufw allow 80/tcp     # défi ACME + redirection
+ufw allow 443/tcp    # HTTPS
+ufw enable
+```
+
+Trois ports ouverts, et aucun n'est 3306.
+
+## Ce qui change entre le développement et la production
+
+Le tableau qu'un jury demandera, et que `docker-compose.prod.yml` matérialise
+en un seul fichier.
+
+| | Développement | Production |
+| --- | --- | --- |
+| Domaine | `localhost` | Domaine réel, DNS pointant vers le VPS |
+| TLS | `tls internal` (auto-signé) | **Let's Encrypt automatique** |
+| Frontend | Serveur Vite + code monté | **Build statique servi par Caddy** |
+| Seed de démonstration | Monté | **Jamais monté** |
+| `NODE_ENV` | `development` | `production` |
+| Redémarrage | `unless-stopped` | `always` |
+| `down -v` | Recommandé | **Interdit** |
+
+### Le point le plus dangereux du passage en production
+
+`docker-compose.yml` monte `./database` dans
+`/docker-entrypoint-initdb.d`, ce qui exécute `02-seed.sql` au premier
+démarrage. En production, cela créerait **onze comptes dont les mots de passe
+sont documentés en clair dans un dépôt public** (`Etudiant123!`,
+`Formateur123!`) — dont trois comptes formateurs ayant accès aux données de
+tous les étudiants de leurs UF.
+
+`docker-compose.prod.yml` ne monte donc que `01-schema.sql` et
+`03-privileges.sh`. **C'est la vulnérabilité de mise en production la plus
+banale, et l'une des plus graves** : elle ne provient d'aucun défaut de code,
+seulement d'un fichier de configuration recopié sans être relu.
+
+### Pourquoi le serveur Vite ne doit pas passer en production
+
+Il sert les modules un par un, non minifiés, **avec les cartes de source** :
+le code source complet du frontend serait téléchargeable par n'importe qui. Le
+poids transféré se compte en mégaoctets là où le build fait environ 150 ko
+compressés. Et un serveur de développement n'est conçu ni pour encaisser du
+trafic réel, ni pour résister à des requêtes malveillantes.
+
+## Ce qui reste à faire avant un vrai go-live
+
+Un travail honnête énonce ce qui manque. Ces points sont hors du périmètre du
+prototype, mais un exploitant devra les traiter :
+
+- **Limitation des tentatives de connexion.** `POST /api/auth/login` n'est pas
+  limité en débit. scrypt rend l'attaque coûteuse (~127 ms par essai), ce qui
+  freine sans empêcher. Un `rate_limit` Caddy sur cette route suffirait.
+- **En-têtes CSP.** `Caddyfile.prod` pose HSTS, `X-Frame-Options` et
+  `Permissions-Policy`, mais pas de Content-Security-Policy — elle demande un
+  inventaire précis des sources, à faire une fois le frontend figé.
+- **Supervision.** Aucune alerte si le backend tombe. Un simple contrôle
+  externe sur `/api/health` couvrirait l'essentiel.
+- **Sauvegardes hors site.** `deploy.sh` sauvegarde sur le VPS lui-même. Un
+  incident matériel emporterait la base **et** ses sauvegardes.
+- **Rotation des clés RS256.** Aucune procédure définie. Une rotation
+  invaliderait tous les jetons en circulation — sans conséquence, leur durée de
+  vie étant de 25 secondes — mais le mode opératoire reste à écrire.
+
+---
+
 ## Prochaine étape suggérée
 
 Le prototype couvre désormais l'ensemble de la chaîne. Les compléments

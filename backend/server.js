@@ -94,7 +94,7 @@ attachQrBroadcaster(httpServer);
 // il est importe via require('../server') depuis un fichier de test.
 if (require.main === module) {
   httpServer.listen(PORT, () => {
-    console.log(`Backend demarre sur le port ${PORT}`);
+    console.info(`Backend demarre sur le port ${PORT} (NODE_ENV=${process.env.NODE_ENV})`);
   });
 }
 

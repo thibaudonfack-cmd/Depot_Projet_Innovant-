@@ -1,0 +1,91 @@
+# Caddyfile.prod
+# Configuration Caddy de PRODUCTION.
+#
+# =========================================================================
+# LE POINT LE PLUS IMPORTANT DE CE FICHIER : CE QU'IL NE CONTIENT PAS
+# =========================================================================
+#
+# Aucune reference a un fichier .pem, aucune cle privee, aucun chemin de
+# certificat, aucune tache planifiee de renouvellement. Caddy obtient et
+# renouvelle lui-meme les certificats aupres de Let's Encrypt (protocole
+# ACME), simplement parce qu'un nom de domaine figure ci-dessous.
+#
+# Concretement, au premier demarrage :
+#   1. Caddy voit le nom de domaine et constate qu'il n'a pas de certificat.
+#   2. Il sollicite Let's Encrypt, qui lui soumet un defi HTTP-01.
+#   3. Caddy repond au defi sur le port 80, qu'il ecoute deja.
+#   4. Le certificat est stocke dans /data (volume caddy_data, PERSISTANT).
+#   5. Le renouvellement est automatique aux deux tiers de la duree de vie.
+#
+# Le volume caddy_data est donc a preserver : le perdre obligerait a
+# redemander tous les certificats, et Let's Encrypt applique des quotas
+# (5 echecs/heure, 50 certificats/domaine/semaine) qui rendraient le site
+# indisponible plusieurs heures.
+#
+# C'est la difference concrete avec le "tls internal" du developpement : le
+# certificat devient reconnu par le magasin de confiance de TOUS les
+# navigateurs, sans avertissement -- ce qui conditionne l'acces aux API
+# WebCrypto et Geolocation sur un vrai smartphone.
+
+{
+	admin off
+	# Adresse a laquelle Let's Encrypt enverra les alertes d'expiration si le
+	# renouvellement automatique venait a echouer. A remplacer.
+	email admin@example.org
+}
+
+# REMPLACER par le nom de domaine reel, pointant vers l'IP du VPS (A/AAAA).
+# Caddy n'obtiendra un certificat que si cette resolution DNS fonctionne
+# DEJA : le defi HTTP-01 suppose que Let's Encrypt puisse joindre ce serveur
+# par ce nom.
+presence.example.org {
+	encode gzip zstd
+
+	# --- En-tetes de securite -------------------------------------------
+	header {
+		# HSTS : impose HTTPS pour les visites suivantes. La duree est
+		# volontairement d'un an, mais SANS "preload" : une inscription a la
+		# liste de prechargement des navigateurs est difficilement
+		# reversible, et n'a pas sa place sur un prototype.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Geolocation autorisee sur la MEME origine uniquement : le scan en a
+		# besoin (RF-13), aucun tiers ne doit pouvoir la solliciter. camera
+		# suit la meme regle pour le lecteur de QR code.
+		Permissions-Policy "geolocation=(self), camera=(self), microphone=()"
+		# N'annonce pas le serveur utilise.
+		-Server
+	}
+
+	handle /api/* {
+		reverse_proxy backend:3000
+	}
+
+	# WebSocket du QR dynamique. Caddy detecte et relaie nativement la montee
+	# en version de protocole : aucune directive specifique n'est requise.
+	handle /ws* {
+		reverse_proxy backend:3000
+	}
+
+	# Fichiers statiques construits (cf. frontend/Dockerfile.prod).
+	handle {
+		root * /srv
+		# try_files : indispensable pour une application a routage cote
+		# client. Sans lui, un rechargement direct sur /formateur/bilan
+		# chercherait un fichier de ce nom et renverrait 404 -- defaut
+		# classique, qui n'apparait jamais en navigation normale et se
+		# manifeste seulement quand un utilisateur met une page en favori.
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		format json
+	}
+}

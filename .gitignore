@@ -53,3 +53,8 @@ Thumbs.db
 # ==============================================================
 *.txt
 !requirements.txt
+
+# Sauvegardes de base produites par deploy.sh sur le serveur de production.
+# Elles contiennent des donnees personnelles d'etudiants : elles n'ont RIEN a
+# faire dans un depot Git, meme prive.
+sauvegardes/

@@ -3463,6 +3463,174 @@ document administratif sans boutons (section 4) ; et les deux suites passent
 
 ---
 
+# Tester avec un vrai smartphone : le tunnel HTTPS
+
+## Le problème, et pourquoi il n'a pas une seule cause
+
+Tester le scan depuis un téléphone bute sur **deux obstacles distincts**, qu'il
+est tentant de confondre parce qu'ils se manifestent au même moment.
+
+**1. Le pare-feu.** Windows bloque par défaut les connexions entrantes vers un
+port ouvert par Docker. Le téléphone, pourtant sur le même Wi-Fi, ne joint
+simplement pas la machine.
+
+**2. Le contexte sécurisé.** Même pare-feu ouvert, `https://192.168.1.42`
+présente un certificat auto-signé émis par Caddy (`tls internal`). Le
+navigateur du téléphone affiche un avertissement, et surtout — c'est le point
+décisif — **il refuse `navigator.geolocation` et `crypto.subtle` tant que le
+certificat n'est pas approuvé.** Or importer une autorité de certification sur
+Android ou iOS est une manipulation pénible, et sur Android moderne une CA
+installée par l'utilisateur n'est même plus reconnue par les applications.
+
+L'enrôlement d'appareil et le géofencing seraient donc **inutilisables** :
+exactement les deux fonctions qu'on cherchait à démontrer.
+
+Un tunnel règle les deux d'un coup : il n'y a plus de connexion entrante à
+autoriser (c'est votre machine qui sort), et le certificat est un vrai
+certificat public, reconnu sans manipulation.
+
+## Option A — ngrok (le plus rapide)
+
+Créez un compte gratuit sur `ngrok.com`, récupérez votre jeton, puis :
+
+```bash
+# Une seule fois
+ngrok config add-authtoken <VOTRE_JETON>
+
+# À chaque session — noter le --host-header
+ngrok http https://localhost:443 --host-header=localhost
+```
+
+`--host-header=localhost` **n'est pas facultatif**. Sans lui, ngrok transmet
+`Host: xxxx.ngrok-free.app`, que le bloc `localhost, api.localhost` du
+`Caddyfile` ne reconnaît pas : Caddy répond 404 sur tout. C'est le premier
+piège, et il ne produit aucun message explicite.
+
+ngrok affiche alors une URL du type :
+
+```
+Forwarding  https://a1b2-81-240-x-x.ngrok-free.app -> https://localhost:443
+```
+
+## Option B — Cloudflare Tunnel (pas de compte requis)
+
+```bash
+cloudflared tunnel --url https://localhost:443 --no-tls-verify
+```
+
+`--no-tls-verify` est nécessaire parce que le certificat local de Caddy est
+auto-signé : `cloudflared` le refuserait sinon. Le certificat vu par le
+téléphone, lui, est bien celui de Cloudflare, parfaitement valide.
+
+Plus rapide à démarrer (aucun compte), mais l'URL change à chaque lancement et
+le débit est plus variable — préférable pour un test ponctuel, moins pour une
+démonstration devant jury.
+
+## L'étape que tout le monde oublie : autoriser l'hôte dans Vite
+
+Au premier chargement, vous obtiendrez très probablement une page blanche
+portant :
+
+```
+Blocked request. This host ("a1b2-81-240-x-x.ngrok-free.app") is not allowed.
+```
+
+Ce n'est ni ngrok, ni Caddy : **c'est Vite**, qui refuse par défaut tout
+en-tête `Host` inconnu (protection contre le DNS rebinding). Rien n'apparaît
+dans les journaux de Caddy, ce qui rend le diagnostic long.
+
+Ajoutez l'hôte à votre `.env`, **sans le schéma `https://`** :
+
+```
+VITE_ALLOWED_HOSTS=a1b2-81-240-x-x.ngrok-free.app
+VITE_HMR_HOST=a1b2-81-240-x-x.ngrok-free.app
+```
+
+puis :
+
+```bash
+docker compose restart frontend
+```
+
+`VITE_HMR_HOST` évite que le client de rechargement à chaud tente d'ouvrir un
+WebSocket vers `localhost`, c'est-à-dire vers le téléphone lui-même. Sans lui
+la page fonctionne, mais la console se remplit d'erreurs de connexion.
+
+## Le piège suivant : l'appareil enrôlé n'est plus reconnu
+
+Vous vous connectez, vous scannez, et le serveur répond **403, appareil non
+enrôlé** — alors que l'enrôlement s'était bien passé la veille sur
+`https://localhost`.
+
+Ce n'est pas un défaut. La clé privée ECDSA vit dans **IndexedDB**, et
+IndexedDB est cloisonné **par origine**. `https://localhost` et
+`https://a1b2.ngrok-free.app` sont deux origines différentes : la clé n'y est
+tout simplement pas.
+
+C'est d'ailleurs une propriété de sécurité, pas une gêne — elle garantit qu'un
+site tiers ne peut pas atteindre la clé. **Il faut donc ré-enrôler l'appareil
+sur l'URL du tunnel**, et le refaire à chaque nouvelle URL (l'offre gratuite
+de ngrok en attribue une différente à chaque lancement).
+
+> Pour une démonstration devant jury, réservez un domaine ngrok statique
+> (gratuit, un par compte) : l'URL cesse de changer, l'enrôlement survit d'une
+> session à l'autre, et vous ne perdez pas cinq minutes à ré-enrôler devant
+> l'assistance.
+
+## Protocole de test complet sur téléphone
+
+1. Lancez la pile : `docker compose up -d`.
+2. Ouvrez le tunnel, notez l'URL.
+3. Renseignez `VITE_ALLOWED_HOSTS` et `VITE_HMR_HOST`, puis
+   `docker compose restart frontend`.
+4. Ouvrez l'URL sur le téléphone. **Aucun avertissement de certificat ne doit
+   apparaître** : c'est le signe que le contexte sécurisé est réel.
+5. Connectez-vous en étudiant, **enrôlez l'appareil** (première fois sur cette
+   origine).
+6. Sur l'ordinateur, connectez-vous en formateur et projetez le QR code.
+7. Scannez avec le téléphone.
+
+### Ce que ce test valide, et qui ne peut pas l'être autrement
+
+| Vérification | Pourquoi le tunnel est indispensable |
+| --- | --- |
+| La caméra s'ouvre | `getUserMedia` exige un contexte sécurisé |
+| L'appareil s'enrôle | `crypto.subtle` exige un contexte sécurisé |
+| La position est relevée | `navigator.geolocation` exige un contexte sécurisé, **et** un vrai GPS — absent d'un ordinateur de bureau |
+| `distance_m` est renseignée | Premier test avec des coordonnées réelles |
+| Le QR tourne toutes les 20 s | Le WebSocket traverse bien le tunnel |
+| Le double scan | Deux jetons distincts, plusieurs minutes d'écart |
+
+La ligne sur la géolocalisation est celle qui justifie à elle seule la
+manipulation : c'est **la seule façon d'obtenir un `distance_m` non nul**, et
+donc de vérifier le calcul de Haversine sur des données réelles plutôt que sur
+des valeurs injectées à la main.
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT e.nom, p.latitude_scan, p.longitude_scan,
+         p.precision_m, p.distance_m, p.position_coherente
+    FROM presences p JOIN etudiants e ON e.id = p.etudiant_id
+   ORDER BY p.heure_arrivee DESC LIMIT 5;"
+```
+
+Attendu : des coordonnées réelles, une `precision_m` de l'ordre de 10 à 30 m en
+extérieur (bien meilleure que les 150 à 200 m d'une localisation Wi-Fi en
+intérieur), et une `distance_m` cohérente avec la position de référence de la
+séance.
+
+## Points de vigilance
+
+- **Le tunnel est éphémère.** Il expose votre machine sur Internet public.
+  Fermez-le (`Ctrl+C`) dès le test terminé.
+- **Les comptes de démonstration ont des mots de passe publics**, écrits dans
+  le dépôt. Pendant l'ouverture du tunnel, n'importe qui connaissant l'URL peut
+  s'y connecter. Une raison de plus de ne pas le laisser ouvert.
+- **Ce n'est pas un déploiement.** Voir `ANALYSE_CODE.md`, section
+  « Architecture de déploiement en production ».
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

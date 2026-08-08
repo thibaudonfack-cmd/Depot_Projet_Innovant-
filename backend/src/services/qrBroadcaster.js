@@ -75,7 +75,11 @@ function attachQrBroadcaster(httpServer) {
   });
 
   wss.on('connection', (ws, seanceId, salleId) => {
-    console.log(`[qrBroadcaster] Formateur connecte : seance=${seanceId} salle=${salleId}`);
+    // console.info et non console.log : c'est une trace d'EXPLOITATION
+    // (qui suit le cycle de vie d'une diffusion), pas un reste de mise au
+    // point. La distinction permet de filtrer les niveaux en production sans
+    // avoir a relire le code pour trier.
+    console.info(`[qrBroadcaster] Formateur connecte : seance=${seanceId} salle=${salleId}`);
 
     function envoyerNouveauJeton() {
       let token;
@@ -106,7 +110,7 @@ function attachQrBroadcaster(httpServer) {
     // qui ne seront jamais affiches ni scannes.
     function nettoyer(raison) {
       clearInterval(intervalId);
-      console.log(`[qrBroadcaster] Rotation arretee pour la seance ${seanceId} (${raison}).`);
+      console.info(`[qrBroadcaster] Rotation arretee pour la seance ${seanceId} (${raison}).`);
     }
 
     ws.on('close', () => nettoyer('deconnexion formateur'));

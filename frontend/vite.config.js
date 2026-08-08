@@ -22,6 +22,23 @@ export default defineConfig({
     // si le conteneur frontend demarre correctement.
     host: true,
     port: 5173,
+    // allowedHosts : Vite refuse par defaut toute requete dont l'en-tete Host
+    // ne fait pas partie d'une liste connue (protection contre le DNS
+    // rebinding, durcie depuis Vite 6). Derriere Caddy en local, l'en-tete
+    // vaut "localhost" et passe sans reglage.
+    //
+    // Ce n'est plus le cas derriere un TUNNEL (ngrok, Cloudflare) : l'en-tete
+    // devient alors "xxxx.ngrok-free.app", et Vite repond un laconique
+    // "Blocked request. This host is not allowed." -- page blanche, aucune
+    // trace cote Caddy, diagnostic couteux. La variable d'environnement
+    // evite d'inscrire en dur une URL de tunnel qui change a chaque session.
+    //
+    // Exemple : VITE_ALLOWED_HOSTS=abcd-1234.ngrok-free.app
+    // Ne concerne QUE le serveur de developpement : en production, le
+    // frontend est un build statique servi par Caddy (cf. Caddyfile.prod).
+    allowedHosts: process.env.VITE_ALLOWED_HOSTS
+      ? process.env.VITE_ALLOWED_HOSTS.split(',').map((h) => h.trim())
+      : undefined,
     // strictPort : echoue explicitement si 5173 est deja pris plutot que de
     // glisser silencieusement vers un autre port -- Caddy est configure pour
     // joindre precisement frontend:5173 (Caddyfile), un port different
@@ -45,6 +62,10 @@ export default defineConfig({
       // aucune configuration Caddy supplementaire n'est necessaire, le
       // meme mecanisme de reverse_proxy generique s'applique.
       clientPort: 443,
+      // Derriere un tunnel, le client HMR doit viser l'hote PUBLIC du tunnel
+      // et non "localhost", sans quoi le navigateur du smartphone tenterait
+      // d'ouvrir un WebSocket vers lui-meme. Laisse vide en local.
+      host: process.env.VITE_HMR_HOST || undefined,
     },
   },
 })
