@@ -1437,13 +1437,25 @@ docker compose ps
 
 ## Comptes de démonstration
 
-| Email | Mot de passe | Rôle |
-|---|---|---|
-| `amara.diallo@example.org` | `Etudiant123!` | étudiant |
-| `bilal.ozturk@example.org` | `Etudiant123!` | étudiant |
-| `chiara.rossi@example.org` | `Etudiant123!` | étudiant |
-| `driss.elamrani@example.org` | `Etudiant123!` | étudiant |
-| `sophie.lambert@example.org` | `Formateur123!` | formateur |
+> **Depuis l'Étape 11, il n'est plus nécessaire de saisir ces adresses.**
+> La page `/login` propose un bloc **« Accès rapide »** avec deux listes
+> déroulantes (formateurs, étudiants) alimentées directement par
+> `frontend/src/components/comptesDemo.js`, tenu en correspondance exacte
+> avec `02-seed.sql`. Ce bloc est absent des versions de production.
+
+| Email | Mot de passe | Rôle | Périmètre |
+|---|---|---|---|
+| `amara.diallo@example.org` | `Etudiant123!` | étudiant | — |
+| `bilal.ozturk@example.org` | `Etudiant123!` | étudiant | — |
+| `chiara.rossi@example.org` | `Etudiant123!` | étudiant | — |
+| `driss.elamrani@example.org` | `Etudiant123!` | étudiant | — |
+| `elena.petrova@example.org` | `Etudiant123!` | étudiant | — |
+| `farid.benali@example.org` | `Etudiant123!` | étudiant | — |
+| `gwendoline.moreau@example.org` | `Etudiant123!` | étudiant | — |
+| `hugo.vandenberghe@example.org` | `Etudiant123!` | étudiant | — |
+| `sophie.lambert@example.org` | `Formateur123!` | formateur | Architecture Logicielle, Développement Web |
+| `marc.dupont@example.org` | `Formateur123!` | formateur | Développement Web, Cybersécurité |
+| `nadia.cherif@example.org` | `Formateur123!` | formateur | **DevOps uniquement** |
 
 ## 1. Connexion et cookie de session
 

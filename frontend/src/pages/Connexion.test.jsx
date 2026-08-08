@@ -16,9 +16,10 @@ import { describe, test, expect, beforeEach, vi } from 'vitest';
 import { StrictMode, act } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from '../App';
+import { FORMATEURS, ETUDIANTS } from '../components/comptesDemo';
 
 const ETUDIANT = { id: 'u1', email: 'amara.diallo@example.org', nom: 'Amara Diallo', role: 'etudiant', etudiant_id: 'e1' };
-const FORMATEUR = { id: 'u5', email: 'formateur@example.org', nom: 'Sophie Lambert', role: 'formateur', etudiant_id: null };
+const FORMATEUR = { id: 'u5', email: 'sophie.lambert@example.org', nom: 'Sophie Lambert', role: 'formateur', etudiant_id: null };
 
 let utilisateurConnecte = null;
 
@@ -135,5 +136,96 @@ describe('Connexion — redirection', () => {
     await soumettreConnexion(conteneur, ETUDIANT.email, 'Etudiant123!');
 
     expect(window.location.pathname).toBe('/etudiant');
+  });
+});
+
+// ==========================================================================
+describe('Connexion — accès rapide (jeu de démonstration)', () => {
+  // Ce bloc remplace les anciens boutons « Pré-remplir ». Ils injectaient
+  // formateur@example.org, adresse SUPPRIMÉE lors de la refonte du seed à
+  // l'Étape 10 : le formulaire se remplissait normalement, et l'échec
+  // n'apparaissait qu'à la soumission. Une donnée recopiée finit toujours par
+  // diverger de sa source, d'où le module partagé comptesDemo.js.
+
+  function selectionner(conteneur, id, valeur) {
+    const liste = conteneur.querySelector(`#${id}`);
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLSelectElement.prototype, 'value'
+    ).set;
+    setter.call(liste, valeur);
+    liste.dispatchEvent(new Event('change', { bubbles: true }));
+    return liste;
+  }
+
+  test('les trois formateurs et les huit étudiants du seed sont proposés', async () => {
+    installerReseau(ETUDIANT);
+    const conteneur = await monterApplication();
+
+    expect(FORMATEURS).toHaveLength(3);
+    expect(ETUDIANTS).toHaveLength(8);
+    for (const compte of [...FORMATEURS, ...ETUDIANTS]) {
+      expect(conteneur.textContent).toContain(compte.nom);
+    }
+  });
+
+  test('AUCUNE adresse ne référence le compte supprimé du seed', async () => {
+    // Le défaut exact qui a motivé cette refonte.
+    installerReseau(ETUDIANT);
+    const conteneur = await monterApplication();
+    expect(conteneur.innerHTML).not.toContain('formateur@example.org');
+  });
+
+  test('choisir un formateur remplit e-mail et mot de passe', async () => {
+    installerReseau(FORMATEUR);
+    const conteneur = await monterApplication();
+
+    await act(async () => { selectionner(conteneur, 'demo-formateur', 'nadia.cherif@example.org'); });
+
+    expect(conteneur.querySelector('#email').value).toBe('nadia.cherif@example.org');
+    expect(conteneur.querySelector('#mot-de-passe').value).toBe('Formateur123!');
+  });
+
+  test('choisir un étudiant applique le mot de passe étudiant', async () => {
+    // Les deux rôles n'ont pas le même mot de passe dans le seed : les
+    // confondre produirait un échec de connexion inexplicable en démonstration.
+    installerReseau(ETUDIANT);
+    const conteneur = await monterApplication();
+
+    await act(async () => { selectionner(conteneur, 'demo-etudiant', 'hugo.vandenberghe@example.org'); });
+
+    expect(conteneur.querySelector('#email').value).toBe('hugo.vandenberghe@example.org');
+    expect(conteneur.querySelector('#mot-de-passe').value).toBe('Etudiant123!');
+  });
+
+  test('une identité chasse l\'autre : les deux listes ne montrent jamais deux comptes', async () => {
+    // Deux noms affichés simultanément suggéreraient deux sessions ouvertes.
+    installerReseau(ETUDIANT);
+    const conteneur = await monterApplication();
+
+    await act(async () => { selectionner(conteneur, 'demo-formateur', 'marc.dupont@example.org'); });
+    expect(conteneur.querySelector('#demo-formateur').value).toBe('marc.dupont@example.org');
+
+    await act(async () => { selectionner(conteneur, 'demo-etudiant', 'elena.petrova@example.org'); });
+    expect(conteneur.querySelector('#demo-etudiant').value).toBe('elena.petrova@example.org');
+    expect(conteneur.querySelector('#demo-formateur').value).toBe('');
+  });
+
+  test('le formulaire est rempli mais PAS soumis', async () => {
+    // Voir l'identifiant s'inscrire dans le champ montre au jury quel compte
+    // est utilisé : c'est tout l'intérêt d'une démonstration de cloisonnement.
+    installerReseau(FORMATEUR);
+    const conteneur = await monterApplication();
+
+    await act(async () => { selectionner(conteneur, 'demo-formateur', 'sophie.lambert@example.org'); });
+
+    expect(window.location.pathname).toBe('/login');
+    expect(conteneur.textContent).not.toMatch(/Connexion en cours/);
+  });
+
+  test('le périmètre de chaque formateur est annoncé', async () => {
+    // Permet de choisir le bon compte pour démontrer le cloisonnement.
+    installerReseau(ETUDIANT);
+    const conteneur = await monterApplication();
+    expect(conteneur.textContent).toContain('DevOps uniquement');
   });
 });

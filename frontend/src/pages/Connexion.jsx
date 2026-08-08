@@ -4,16 +4,22 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, accueilDuRole } from '../context/contexte-auth';
-import { Bouton, Carte, Champ, Marque, Message } from '../components/ui';
+import { Bouton, Carte, Champ, Marque, Message, Selection } from '../components/ui';
 import EcranChargement from '../components/EcranChargement';
+import {
+  FORMATEURS, ETUDIANTS, MOT_DE_PASSE_FORMATEUR, MOT_DE_PASSE_ETUDIANT,
+} from '../components/comptesDemo';
 
-// Comptes du jeu de donnees de demonstration (database/02-seed.sql).
-// Uniquement pour les boutons de pre-remplissage, absents de la version de
-// production (voir plus bas).
-const COMPTES_DEMO = {
-  etudiant: { email: 'amara.diallo@example.org', motDePasse: 'Etudiant123!' },
-  formateur: { email: 'formateur@example.org', motDePasse: 'Formateur123!' },
-};
+/**
+ * Le bloc d'acces rapide n'existe QUE hors production.
+ *
+ * import.meta.env.DEV vaut false dans un build de production : Rollup elimine
+ * alors tout le bloc a la compilation, et les identifiants n'apparaissent
+ * meme pas dans le bundle. VITE_MODE_DEMO permet de le reactiver
+ * DELIBEREMENT sur un build, par exemple pour une soutenance servie
+ * autrement que par le serveur de developpement.
+ */
+const MODE_DEMO = import.meta.env.DEV || import.meta.env.VITE_MODE_DEMO === '1';
 
 function Connexion() {
   const { utilisateur, sessionVerifiee, connecter } = useAuth();
@@ -24,6 +30,10 @@ function Connexion() {
   const [motDePasse, setMotDePasse] = useState('');
   const [erreur, setErreur] = useState('');
   const [envoiEnCours, setEnvoiEnCours] = useState(false);
+  // Compte de demonstration selectionne. Un SEUL etat pour les deux listes :
+  // une identite chargee chasse l'autre, et laisser les deux listes afficher
+  // un nom simultanement suggererait deux sessions ouvertes.
+  const [compteDemo, setCompteDemo] = useState('');
 
   // SOURCE UNIQUE DE REDIRECTION.
   //
@@ -79,10 +89,18 @@ function Connexion() {
     }
   }
 
-  function preRemplir(cle) {
-    const compte = COMPTES_DEMO[cle];
-    setEmail(compte.email);
-    setMotDePasse(compte.motDePasse);
+  /**
+   * Remplit le formulaire sans le soumettre.
+   *
+   * Choix delibere de NE PAS enchainer sur une connexion automatique : voir
+   * l'identifiant s'inscrire dans le champ montre au jury quel compte est
+   * utilise, ce qui est precisement l'interet d'une demonstration de
+   * cloisonnement. Une connexion instantanee escamoterait l'information.
+   */
+  function preRemplir(adresse, motDePasseCompte) {
+    setEmail(adresse);
+    setMotDePasse(motDePasseCompte);
+    setCompteDemo(adresse);
     setErreur('');
   }
 
@@ -146,23 +164,64 @@ function Connexion() {
           </form>
         </Carte>
 
-        {/* Raccourcis de developpement. import.meta.env.DEV vaut false dans
-            un build de production : ce bloc n'est alors meme pas inclus dans
-            le bundle, ce qui evite d'y exposer des identifiants. */}
-        {import.meta.env.DEV && (
-          <div className="mt-6">
-            <p className="mb-2 text-center text-xs text-sable-500">
-              Raccourcis de développement
-            </p>
-            <div className="flex gap-2">
-              <Bouton variante="secondaire" onClick={() => preRemplir('etudiant')} className="py-2 text-xs">
-                Pré-remplir étudiant
-              </Bouton>
-              <Bouton variante="secondaire" onClick={() => preRemplir('formateur')} className="py-2 text-xs">
-                Pré-remplir formateur
-              </Bouton>
+        {MODE_DEMO && (
+          <section
+            aria-labelledby="titre-acces-rapide"
+            className="mt-6 rounded-2xl border border-dashed border-sable-400 bg-sable-50/70 p-5"
+          >
+            {/* Bordure en pointillés et fond légèrement teinté : le bloc doit
+                se lire comme un dispositif temporaire, visuellement distinct
+                de la carte de connexion qui, elle, est le produit. */}
+            <div className="flex items-baseline justify-between gap-3">
+              <h2 id="titre-acces-rapide" className="text-sm font-medium text-sable-900">
+                Accès rapide
+              </h2>
+              <span className="text-xs text-sable-600">Jeu de démonstration</span>
             </div>
-          </div>
+
+            <div className="mt-4 space-y-4">
+              <div>
+                <Selection
+                  id="demo-formateur"
+                  libelle="Formateur"
+                  aide="Choisissez Nadia Cherif pour observer le cloisonnement : elle n'encadre qu'une seule unité de formation."
+                  value={FORMATEURS.some((f) => f.email === compteDemo) ? compteDemo : ''}
+                  onChange={(e) => {
+                    if (e.target.value) preRemplir(e.target.value, MOT_DE_PASSE_FORMATEUR);
+                  }}
+                >
+                  <option value="">Sélectionner…</option>
+                  {FORMATEURS.map((f) => (
+                    <option key={f.email} value={f.email}>
+                      {f.nom} · {f.perimetre}
+                    </option>
+                  ))}
+                </Selection>
+              </div>
+
+              <div>
+                <Selection
+                  id="demo-etudiant"
+                  libelle="Étudiant"
+                  value={ETUDIANTS.some((etu) => etu.email === compteDemo) ? compteDemo : ''}
+                  onChange={(e) => {
+                    if (e.target.value) preRemplir(e.target.value, MOT_DE_PASSE_ETUDIANT);
+                  }}
+                >
+                  <option value="">Sélectionner…</option>
+                  {ETUDIANTS.map((etu) => (
+                    <option key={etu.email} value={etu.email}>{etu.nom}</option>
+                  ))}
+                </Selection>
+              </div>
+            </div>
+
+            <p className="mt-4 text-xs leading-relaxed text-sable-600">
+              Le formulaire est rempli, pas soumis : vous gardez la main sur le
+              moment de la connexion. Ce bloc est absent des versions de
+              production.
+            </p>
+          </section>
         )}
       </div>
     </main>

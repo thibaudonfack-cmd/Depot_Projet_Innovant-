@@ -19,17 +19,17 @@
 
 const pool = require('../config/db');
 const { formateurGereUf, refuserHorsPerimetre } = require('../services/perimetreFormateur');
-
-/** Expression SQL : une seance est terminee (meme regle que partout ailleurs). */
-const SQL_TERMINEE = `
-  CASE
-    WHEN s.heure_fin_prevue IS NOT NULL THEN (NOW() > s.heure_fin_prevue)
-    ELSE (s.statut = 'cloturee')
-  END`;
-
-/** Fin retenue : depart pointe, sinon fin prevue si la seance est terminee. */
-const SQL_FIN_RETENUE = `
-  COALESCE(p.heure_depart, CASE WHEN ${SQL_TERMINEE} THEN s.heure_fin_prevue END)`;
+// AUDIT (Etape 11) : ces deux expressions etaient RECOPIEES ici, mot pour
+// mot, depuis presenceController. La regle "une seance est terminee" existait
+// donc en deux exemplaires -- et une modification de l'une aurait laisse
+// l'autre en place sans qu'aucun test ne le signale, puisque les deux
+// auraient continue de fonctionner, chacune a sa facon. Le bilan d'UF et le
+// rapport de seance auraient alors compte differemment les memes seances.
+//
+// presenceController reste la source unique : c'est lui qui porte la
+// definition du cycle de vie d'une seance, et rapportController s'y
+// referait deja.
+const { SQL_SEANCE_TERMINEE: SQL_TERMINEE, SQL_FIN_RETENUE } = require('./presenceController');
 
 /**
  * GET /api/uf/:id/rapport-global
@@ -195,4 +195,6 @@ async function rapportGlobal(req, res) {
   }
 }
 
-module.exports = { rapportGlobal, SQL_TERMINEE };
+// SQL_TERMINEE n'est plus reexporte : personne ne l'importait, et le
+// reexporter depuis ce module suggerait a tort qu'il en etait l'origine.
+module.exports = { rapportGlobal };
