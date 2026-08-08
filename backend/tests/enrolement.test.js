@@ -87,6 +87,22 @@ beforeAll(async () => {
   expect(utilisateur.etudiant_id).toBe(ETUDIANT_ENROLEMENT);
 });
 
+// ETAPE 11 : le quota d'enrolements est un compteur PERSISTANT, et cette
+// suite enrole le meme etudiant bien plus de deux fois -- chaque test
+// verifiant un aspect different de la cascade cryptographique.
+//
+// Le remettre a zero avant chaque test n'affaiblit rien : le quota a sa
+// propre suite dediee (quota-enrolement.test.js), qui verifie precisement
+// qu'il bloque. Ici on isole les tests les uns des autres, ce qui est la
+// regle habituelle -- un test ne doit pas echouer a cause de ce qu'un autre
+// a consomme.
+beforeEach(async () => {
+  await pool.query(
+    'UPDATE etudiants SET compteur_enrolements = 0 WHERE id = ?',
+    [ETUDIANT_ENROLEMENT]
+  );
+});
+
 afterAll(async () => {
   // Nettoyage : contrairement a scans (Etape 3, volontairement en ecriture
   // seule pour app_logs -- RF-18/RNF-13), appareils_enroles autorise

@@ -35,35 +35,46 @@ function Connexion() {
   // un nom simultanement suggererait deux sessions ouvertes.
   const [compteDemo, setCompteDemo] = useState('');
 
-  // SOURCE UNIQUE DE REDIRECTION.
+  /**
+   * Destination apres connexion, pour un utilisateur donne.
+   *
+   * Extraite en fonction pure : la redirection a desormais DEUX declencheurs
+   * (l'arrivee sur /login en etant deja connecte, et la soumission du
+   * formulaire), et c'est precisement parce qu'ils partagent ce calcul qu'ils
+   * ne peuvent pas diverger. Le defaut corrige a l'Etape 7b venait de deux
+   * navigations qui calculaient CHACUNE leur destination.
+   *
+   * La destination memorisee avant la redirection vers /login n'est honoree
+   * que si le role y donne acces. Sans ce controle, un etudiant ayant tente
+   * d'ouvrir /formateur y serait envoye apres connexion, puis renvoye par
+   * RouteProtegee vers /etudiant : deux navigations visibles la ou une suffit.
+   */
+  function destinationPour(compte) {
+    const parDefaut = accueilDuRole(compte.role);
+    const demandee = emplacement.state?.depuis;
+    return demandee && demandee === parDefaut ? demandee : parDefaut;
+  }
+
+  // Cet effet ne traite plus QU'UN seul cas : arriver sur /login alors qu'une
+  // session est deja ouverte (retour arriere du navigateur, favori, second
+  // onglet). La redirection APRES connexion, elle, est imperative dans la
+  // soumission.
   //
-  // Cet effet gere TOUS les cas : arrivee sur /login alors qu'on est deja
-  // connecte, et redirection juste apres une connexion reussie. La version
-  // precedente naviguait a DEUX endroits, ici et a la fin de la soumission,
-  // ce qui produisait deux navigations concurrentes pour un meme evenement.
+  // Pourquoi ce changement : faire dependre la redirection d'un effet
+  // signifiait attendre que l'etat du contexte se propage jusqu'ici. En
+  // local c'est imperceptible ; derriere un tunnel, cela ajoutait un temps
+  // mort visible ou la page paraissait ne rien faire. Naviguer avec la
+  // valeur RENVOYEE par connecter() supprime cette attente : on n'a pas
+  // besoin de l'etat pour savoir ou aller, on a deja l'utilisateur en main.
   //
-  // Le defaut etait aggrave par le fait que envoiEnCours n'etait jamais
-  // remis a false en cas de succes : on comptait sur le demontage du
-  // composant. Si la navigation ne prenait pas effet, le bouton restait fige
-  // sur "Connexion en cours" SANS message d'erreur, et seul un
-  // rafraichissement manuel debloquait la situation.
-  //
-  // Faire dependre la navigation du seul etat `utilisateur` supprime la
-  // course : il n'y a plus qu'un chemin possible, et il se declenche
-  // exactement quand l'etat est pret.
+  // Les deux chemins ne se concurrencent pas : ils ne s'appliquent jamais au
+  // meme evenement, et calculent la meme destination par la meme fonction.
   useEffect(() => {
     if (!sessionVerifiee || !utilisateur) return;
-
-    // La destination memorisee avant la redirection vers /login n'est
-    // honoree que si le role y donne acces. Sans ce controle, un etudiant
-    // ayant tente d'ouvrir /formateur serait envoye vers /formateur apres
-    // connexion, puis renvoye par RouteProtegee vers /etudiant : deux
-    // navigations visibles la ou une suffit.
-    const parDefaut = accueilDuRole(utilisateur.role);
-    const demandee = emplacement.state?.depuis;
-    const destination = demandee && demandee === parDefaut ? demandee : parDefaut;
-
-    navigate(destination, { replace: true });
+    navigate(destinationPour(utilisateur), { replace: true });
+    // destinationPour depend de emplacement.state, deja dans les
+    // dependances ; l'inclure relancerait l'effet a chaque rendu.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionVerifiee, utilisateur, emplacement.state, navigate]);
 
   if (!sessionVerifiee) return <EcranChargement />;
@@ -74,9 +85,15 @@ function Connexion() {
     setEnvoiEnCours(true);
 
     try {
-      // La redirection n'est PAS declenchee ici : mettre a jour l'etat suffit,
-      // l'effet ci-dessus s'en charge des que `utilisateur` est disponible.
-      await connecter(email.trim(), motDePasse);
+      // REDIRECTION IMPERATIVE, avec la valeur renvoyee par connecter().
+      //
+      // On ne lit PAS l'etat `utilisateur` du contexte : au moment ou cette
+      // ligne s'execute, le rendu qui le contiendra n'a pas encore eu lieu.
+      // L'objet retourne, lui, est disponible immediatement -- la navigation
+      // part donc dans le meme tour de boucle que la reponse du serveur,
+      // sans le temps mort qui se voyait derriere un tunnel.
+      const compte = await connecter(email.trim(), motDePasse);
+      navigate(destinationPour(compte), { replace: true });
     } catch (echec) {
       setErreur(echec.message || 'La connexion a échoué. Réessayez.');
       setMotDePasse('');
@@ -176,7 +193,7 @@ function Connexion() {
               <h2 id="titre-acces-rapide" className="text-sm font-medium text-sable-900">
                 Accès rapide
               </h2>
-              <span className="text-xs text-sable-600">Jeu de démonstration</span>
+              <span className="text-xs text-sable-600">Mode démo</span>
             </div>
 
             <div className="mt-4 space-y-4">
@@ -184,7 +201,6 @@ function Connexion() {
                 <Selection
                   id="demo-formateur"
                   libelle="Formateur"
-                  aide="Choisissez Nadia Cherif pour observer le cloisonnement : elle n'encadre qu'une seule unité de formation."
                   value={FORMATEURS.some((f) => f.email === compteDemo) ? compteDemo : ''}
                   onChange={(e) => {
                     if (e.target.value) preRemplir(e.target.value, MOT_DE_PASSE_FORMATEUR);
@@ -215,12 +231,6 @@ function Connexion() {
                 </Selection>
               </div>
             </div>
-
-            <p className="mt-4 text-xs leading-relaxed text-sable-600">
-              Le formulaire est rempli, pas soumis : vous gardez la main sur le
-              moment de la connexion. Ce bloc est absent des versions de
-              production.
-            </p>
           </section>
         )}
       </div>

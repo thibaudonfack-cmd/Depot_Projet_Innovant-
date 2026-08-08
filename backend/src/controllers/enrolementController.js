@@ -45,6 +45,21 @@
 // l'identifiant d'un autre etudiant, ce qui etait jusqu'ici le contournement
 // le plus direct de toute la chaine (documente comme angle mort a l'Etape 5).
 
+/**
+ * Nombre TOTAL d'associations d'appareil autorisees par etudiant.
+ *
+ * 2 = l'enrolement initial, plus UN changement d'appareil. Ce n'est pas un
+ * chiffre arbitraire : il couvre le cas legitime le plus frequent (telephone
+ * casse ou remplace pendant l'annee) tout en rendant le pret de compte
+ * couteux. Un etudiant qui prete son compte consomme son unique credit de
+ * rechange, et se retrouve durablement sans appareil valide.
+ *
+ * Au-dela, la reprise passe par une verification d'identite humaine au
+ * secretariat -- ce qui est le but : reintroduire un cout qu'aucune mesure
+ * technique ne peut imposer seule.
+ */
+const QUOTA_ENROLEMENTS_MAX = 2;
+
 const crypto = require('crypto');
 const pool = require('../config/db');
 const {
@@ -203,6 +218,46 @@ async function enrolerAppareil(req, res) {
       });
     }
 
+    // -------------------------------------------------------------------
+    // QUOTA D'ENROLEMENTS (Etape 11) -- le dernier verrou.
+    //
+    // Ce controle vient APRES la preuve de possession, deliberement. Refuser
+    // avant de verifier la signature renseignerait un attaquant sur l'etat
+    // d'un compte sans qu'il ait eu a prouver quoi que ce soit ; et surtout,
+    // un quota consomme par une tentative non authentifiee permettrait de
+    // BLOQUER le compte d'un camarade en epuisant son credit a sa place.
+    //
+    // INCREMENT CONDITIONNEL ATOMIQUE, jamais SELECT-puis-UPDATE. Deux
+    // requetes simultanees liraient toutes deux "1", concluraient toutes deux
+    // "autorise", et enroleraient deux appareils pour un seul credit : le
+    // quota serait contournable en cliquant deux fois. Ici le moteur tranche,
+    // et affectedRows dit sans ambiguite si le credit a ete consomme.
+    //
+    // C'est le meme raisonnement que pour la consommation du defi plus haut
+    // et pour uq_scan_nonce : chaque fois qu'une ressource est CONSOMMEE,
+    // c'est InnoDB qui doit arbitrer, pas le code applicatif.
+    // -------------------------------------------------------------------
+    const [quota] = await connexion.query(
+      `UPDATE etudiants
+          SET compteur_enrolements = compteur_enrolements + 1
+        WHERE id = ? AND compteur_enrolements < ?`,
+      [etudiantId, QUOTA_ENROLEMENTS_MAX]
+    );
+
+    if (quota.affectedRows !== 1) {
+      await connexion.rollback();
+      // 403 et non 429 : ce n'est pas une limitation de debit qu'une attente
+      // leverait, c'est un refus definitif tant qu'un humain n'intervient
+      // pas. Le message doit donc indiquer la SEULE issue reelle.
+      return res.status(403).json({
+        status: 'error',
+        code: 'QUOTA_ENROLEMENT_ATTEINT',
+        message: 'Vous avez atteint le nombre maximal d\'associations d\'appareil '
+               + `(${QUOTA_ENROLEMENTS_MAX}). Contactez le secretariat pour faire `
+               + 'reinitialiser ce compteur apres verification de votre identite.',
+      });
+    }
+
     const [resultatRevocation] = await connexion.query(
       `UPDATE appareils_enroles
        SET statut = 'revoque', date_revocation = CURRENT_TIMESTAMP
@@ -272,4 +327,4 @@ async function enrolerAppareil(req, res) {
   }
 }
 
-module.exports = { enrolerAppareil, emettreDefi, DUREE_DEFI_SECONDES };
+module.exports = { enrolerAppareil, emettreDefi, DUREE_DEFI_SECONDES, QUOTA_ENROLEMENTS_MAX };

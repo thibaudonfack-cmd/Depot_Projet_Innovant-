@@ -53,6 +53,7 @@ function versChampLocal(instant) {
 function useEtatAppareil() {
   const [etat, setEtat] = useState(null);
   const [appareilActif, setAppareilActif] = useState(null);
+  const [quota, setQuota] = useState(null);
 
   const verifier = useCallback(async () => {
     try {
@@ -61,6 +62,7 @@ function useEtatAppareil() {
       ]);
       const actif = reponse.appareil;
       setAppareilActif(actif);
+      setQuota(reponse.quota ?? null);
 
       if (!actif) setEtat('aucun');
       else if (!cleLocale || !idLocal) setEtat('autre');
@@ -71,12 +73,17 @@ function useEtatAppareil() {
   }, []);
 
   useEffect(() => { verifier(); }, [verifier]);
-  return { etat, appareilActif, verifier };
+  return { etat, appareilActif, quota, verifier };
 }
 
-function CarteAppareil({ etat, appareilActif, onEnrole }) {
+function CarteAppareil({ etat, appareilActif, quota, onEnrole }) {
   const [enCours, setEnCours] = useState(false);
   const [message, setMessage] = useState(null);
+  const [quotaAtteint, setQuotaAtteint] = useState('');
+
+  // Le blocage vient de DEUX sources : le quota deja epuise au chargement, et
+  // le refus renvoye par le serveur. Les deux doivent produire le meme ecran.
+  const bloque = Boolean(quotaAtteint) || (quota ? quota.restants === 0 : false);
 
   async function enroler() {
     setEnCours(true);
@@ -120,7 +127,12 @@ function CarteAppareil({ etat, appareilActif, onEnrole }) {
       });
       onEnrole();
     } catch (echec) {
-      setMessage({ ton: 'erreur', texte: echec.message });
+      // Le refus de quota n'est PAS une erreur ordinaire : elle ne se corrige
+      // pas en reessayant, et son unique issue passe par un humain. Elle
+      // merite donc un traitement visuel distinct, pas une ligne de message
+      // parmi d'autres.
+      if (echec.code === 'QUOTA_ENROLEMENT_ATTEINT') setQuotaAtteint(echec.message);
+      else setMessage({ ton: 'erreur', texte: echec.message });
     } finally {
       setEnCours(false);
     }
@@ -184,11 +196,61 @@ function CarteAppareil({ etat, appareilActif, onEnrole }) {
         </div>
       )}
 
+      {/* ALERTE BLOQUANTE. Bordure epaisse et fond rouge, comme la
+          dissociation : ce sont les deux seuls etats qui empechent
+          reellement de valider une presence. */}
+      {bloque && (
+        <div className="mt-5 rounded-xl border-2 border-red-300 bg-red-50 p-4" role="alert">
+          <div className="flex gap-3">
+            <svg viewBox="0 0 24 24" aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-red-700"
+                 fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="4" y="10" width="16" height="10" rx="2" />
+              <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+            </svg>
+            <div>
+              <p className="text-sm font-semibold text-red-900">
+                Nombre maximal d&apos;associations atteint
+              </p>
+              <p className="mt-1 text-sm leading-relaxed text-red-900">
+                {quotaAtteint || "Vous avez utilisé toutes vos associations d'appareil."}
+                {' '}Présentez-vous au secrétariat avec une pièce d&apos;identité pour
+                faire réinitialiser ce compteur.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AVERTISSEMENT PREALABLE. Affiche AVANT l'action, pas apres son
+          refus : quelqu'un qui apprend la limite au moment ou elle le bloque
+          la subit, alors qu'informe en amont il peut decider. Masque une fois
+          le quota epuise, ou l'alerte ci-dessus dit deja tout. */}
+      {!bloque && etat !== 'erreur' && (
+        <div className="mt-5 rounded-xl border border-amber-300 bg-amber-50 p-4">
+          <p className="text-sm leading-relaxed text-amber-900">
+            <span className="font-semibold">Attention :</span> par mesure de
+            sécurité, vous ne pouvez associer un nouvel appareil qu&apos;une seule
+            fois après votre enrôlement initial. En cas de perte multiple,
+            contactez le secrétariat.
+          </p>
+          {quota && (
+            <p className="mt-2 text-xs font-medium text-amber-900 tabular-nums">
+              {quota.restants === 1
+                ? 'Il vous reste 1 association.'
+                : `Il vous reste ${quota.restants} associations.`}
+              {' '}({quota.consommes} sur {quota.maximum} utilisée
+              {quota.consommes > 1 ? 's' : ''})
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="mt-5">
         <Bouton
           variante={etat === 'actif' ? 'secondaire' : 'principal'}
           onClick={enroler}
           chargement={enCours}
+          disabled={bloque}
           enfantsChargement="Association en cours"
         >
           {etat === 'actif' ? 'Associer à nouveau cet appareil' : 'Associer cet appareil'}
@@ -486,7 +548,7 @@ function HistoriquePresences({ declencheur }) {
 // ---------------------------------------------------------------------------
 
 function TableauBordEtudiant() {
-  const { etat, appareilActif, verifier } = useEtatAppareil();
+  const { etat, appareilActif, quota, verifier } = useEtatAppareil();
   const [scannerOuvert, setScannerOuvert] = useState(false);
   const [scanEnCours, setScanEnCours] = useState(false);
   const [resultatScan, setResultatScan] = useState(null);
@@ -544,7 +606,8 @@ function TableauBordEtudiant() {
       <EnTeteApplication sousTitre="Espace étudiant" />
 
       <main className="mx-auto w-full max-w-3xl space-y-4 px-4 py-6 sm:px-6 sm:py-8">
-        <CarteAppareil etat={etat} appareilActif={appareilActif} onEnrole={verifier} />
+        <CarteAppareil etat={etat} appareilActif={appareilActif} quota={quota}
+                       onEnrole={verifier} />
 
         <Carte>
           <h2 className="text-sm font-semibold text-sable-900">Valider ma présence</h2>

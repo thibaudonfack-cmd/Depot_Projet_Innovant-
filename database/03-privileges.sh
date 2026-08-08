@@ -133,6 +133,14 @@ mysql -h "${MYSQL_HOST:-localhost}" -uroot -p"${MYSQL_ROOT_PASSWORD}" <<-EOSQL
 
   -- Etape 9 : la cloture RGPD ecrit uf.date_cloture_rgpd.
   GRANT UPDATE ON db_logs.uf TO '${MYSQL_USER}'@'%';
+
+  -- Etape 11 : quota d'enrolements. Privilege de COLONNE et non de table --
+  -- l'application incremente un compteur, elle n'a aucune raison de pouvoir
+  -- renommer un etudiant ou changer son adresse. Restreindre a la seule
+  -- colonne concernee fait que meme une injection SQL reussie sur cette
+  -- route ne permettrait pas d'usurper une identite en modifiant l'email
+  -- d'un compte.
+  GRANT UPDATE (compteur_enrolements) ON db_logs.etudiants TO '${MYSQL_USER}'@'%';
   GRANT UPDATE ON db_logs.demandes_rectification TO '${MYSQL_USER}'@'%';
 
   -- EXCEPTION DELIBEREE ET ETROITE a la separation des deux bases.

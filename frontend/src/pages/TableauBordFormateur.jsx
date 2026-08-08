@@ -178,7 +178,37 @@ function TableauBordFormateur() {
     chargerSeances();
   }, [chargerSeances]);
 
+  /**
+   * Apres creation d'une seance.
+   *
+   * DEFAUT CORRIGE (Etape 11). L'ancienne version se contentait d'appeler
+   * chargerSeances() sans attendre ni surveiller le resultat. Deux
+   * consequences, invisibles en local et bien reelles derriere un tunnel :
+   *
+   *   - si ce rechargement echouait (coupure passagere), la liste restait
+   *     figee sur son contenu precedent SANS que rien ne l'indique, et la
+   *     seance qui venait d'etre creee semblait ne pas exister ;
+   *   - meme reussi, il n'aboutissait qu'apres la latence du reseau, alors
+   *     que l'utilisateur avait deja bascule sur l'affichage du QR.
+   *
+   * Correction en deux temps. D'abord une MISE A JOUR OPTIMISTE : la seance
+   * vient d'etre confirmee par un 201, elle existe donc certainement en
+   * base, et l'inserer immediatement en tete de liste est exact -- ce n'est
+   * pas un pari, c'est un fait deja acquis. Puis un rechargement, qui remet
+   * les champs calcules par le serveur (nombre de presences, statut deduit).
+   *
+   * Si le rechargement echoue, la seance reste tout de meme visible : le
+   * pire cas est une ligne aux compteurs non actualises, pas une disparition.
+   */
   function handleCreee(seance, geofencingActif) {
+    setSeances((precedentes) => {
+      if (!precedentes) return precedentes;
+      // Garde anti-doublon : si le rechargement d'un appel precedent a deja
+      // ramene cette seance, l'inserer une seconde fois ferait apparaitre
+      // deux lignes identiques avec la meme cle React.
+      if (precedentes.some((s) => s.id === seance.id)) return precedentes;
+      return [{ ...seance, nb_presences: 0, terminee: false }, ...precedentes];
+    });
     setSeanceProjetee({ ...seance, geofencing_actif: geofencingActif });
     chargerSeances();
   }
@@ -223,7 +253,11 @@ function TableauBordFormateur() {
             </div>
 
             <div className="mt-5 flex flex-col gap-3 sm:flex-row">
-              <Bouton variante="secondaire" onClick={() => setSeanceProjetee(null)}>
+              {/* chargerSeances() au retour : revenir a une liste, c'est
+                  s'attendre a la voir a jour. Sans cela, la seule occasion de
+                  rafraichir etait l'appel non bloquant de handleCreee. */}
+              <Bouton variante="secondaire"
+                      onClick={() => { setSeanceProjetee(null); chargerSeances(); }}>
                 Masquer le QR code
               </Bouton>
               <Bouton variante="secondaire" onClick={() => { setSeanceDetaillee(seanceProjetee.id); setSeanceProjetee(null); }}>

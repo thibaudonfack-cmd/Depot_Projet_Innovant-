@@ -3643,6 +3643,162 @@ séance.
 
 ---
 
+# Étape 11 — Quota d'enrôlements et réactivité sous latence
+
+**`docker compose down -v` OBLIGATOIRE** : la table `etudiants` gagne la
+colonne `compteur_enrolements`.
+
+## 1. Le quota, en conditions réelles
+
+Connectez-vous en étudiant sur le téléphone (via le tunnel, cf. section
+« Tester avec un vrai smartphone »).
+
+### Avant toute action
+
+L'encart ambre doit annoncer la limite **et** le solde :
+
+> **Attention :** par mesure de sécurité, vous ne pouvez associer un nouvel
+> appareil qu'une seule fois après votre enrôlement initial…
+>
+> Il vous reste 2 associations. (0 sur 2 utilisées)
+
+Le point à vérifier : l'avertissement est **antérieur** à l'action. Une limite
+découverte au moment où elle bloque est subie ; annoncée avant, elle laisse
+décider.
+
+### Consommer le quota
+
+1. **Association 1** — succès. Le solde passe à « 1 association ».
+2. **Association 2** — succès. Le solde passe à 0, l'encart ambre disparaît.
+3. **Association 3** — l'alerte **rouge bloquante** s'affiche et le bouton
+   devient inactif.
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT nom, compteur_enrolements FROM etudiants ORDER BY nom;"
+```
+
+### Contourner l'interface
+
+Le bouton désactivé ne protège de rien. Appelez l'API directement :
+
+```bash
+curl -k -b etu.txt -X POST https://localhost/api/enrolements \
+  -H 'Content-Type: application/json' \
+  -d '{"public_key":"...","device_info":"Test","defi_id":"...","signature_defi":"..."}'
+```
+
+Attendu : **403**, code `QUOTA_ENROLEMENT_ATTEINT`.
+
+### Le point qui ferme réellement l'angle mort
+
+Après le refus, vérifiez **quel appareil reste actif** :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT e.nom, a.info_appareil, a.statut
+    FROM appareils_enroles a JOIN etudiants e ON e.id = a.etudiant_id
+   WHERE a.statut = 'actif';"
+```
+
+L'appareil actif doit être celui du **deuxième** enrôlement. Le compte ne
+revient pas à l'appareil de l'ami : le scénario du prêt s'arrête là.
+
+### Un refus ne consomme pas de crédit
+
+Réessayez plusieurs fois et relisez le compteur : il ne doit **pas** dépasser
+2. Sinon la situation d'un étudiant de bonne foi s'aggraverait à chaque essai.
+
+## 2. La réinitialisation administrative
+
+C'est la seule issue, et elle passe par un humain.
+
+```sql
+-- 1. Constater
+SELECT id, nom, email, compteur_enrolements
+  FROM db_logs.etudiants WHERE email = 'elena.petrova@example.org';
+
+-- 2. Reinitialiser, APRES verification d'identite
+UPDATE db_logs.etudiants SET compteur_enrolements = 0 WHERE id = '<ID>';
+```
+
+Reprenez ensuite l'association sur le téléphone : elle doit réussir. Toujours
+filtrer sur `id` et jamais sur `nom` — deux homonymes existent dans toute
+promotion.
+
+## 3. Les bugs de latence (à tester VIA LE TUNNEL)
+
+Ces trois défauts **ne se reproduisent pas en local** : la latence est le
+révélateur. Testez depuis le téléphone, sur le tunnel.
+
+### Connexion
+
+| Test | Attendu |
+| --- | --- |
+| Se connecter | Le tableau de bord s'affiche **immédiatement**, sans F5 |
+| Se connecter **très vite** après le chargement de `/login` | Idem, aucune déconnexion inopinée |
+| Revenir sur `/login` en étant connecté | Redirection automatique |
+| Mauvais mot de passe | Message d'erreur, le bouton ne reste **jamais** figé |
+
+Le deuxième cas est celui qui échouait : la vérification initiale, encore en
+vol, terminait en `401` et effaçait la session fraîche.
+
+Pour le reproduire volontairement, ralentissez le réseau (DevTools, profil
+« Slow 3G »), rechargez `/login` et connectez-vous **sans attendre**.
+
+### Création de séance
+
+1. Créez une séance. Le QR s'affiche.
+2. Cliquez sur **« Masquer le QR code »**.
+3. La séance doit apparaître en tête de liste, **sans F5**.
+
+Vérifiez aussi le cas dégradé : coupez le réseau juste après la création, puis
+masquez le QR. La séance doit **rester visible** (insertion optimiste), même si
+ses compteurs ne sont pas à jour. Elle ne doit jamais disparaître.
+
+## 4. Le bloc « Accès rapide »
+
+Allégé : un titre, la mention « Mode démo », deux listes déroulantes. Aucun
+texte explicatif.
+
+Vérifiez qu'il reste **absent du build de production** :
+
+```bash
+cd frontend && npm run build && grep -c "nadia.cherif" dist/assets/*.js
+```
+
+Attendu : **0**.
+
+## 5. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+
+Attendu : **`165 passed`** (13 suites) et **`109 passed`** (10 fichiers).
+
+La suite dédiée au quota :
+
+```bash
+docker compose exec backend npx jest tests/quota-enrolement.test.js
+```
+
+Onze tests, dont **deux enrôlements simultanés** qui doivent produire
+exactement un `201` et un `403` — un `SELECT`-puis-`UPDATE` en laisserait
+passer deux.
+
+## Critère de succès global
+
+Validée si et seulement si : le 3ᵉ enrôlement renvoie `403` y compris en
+appelant l'API directement, et l'appareil actif reste celui du 2ᵉ (section 1) ;
+un refus ne consomme pas de crédit (section 1) ; la réinitialisation SQL
+débloque le compte (section 2) ; la connexion et la création de séance ne
+demandent **jamais** de F5 via le tunnel (section 3) ; le bloc démo est absent
+du build (section 4) ; et les deux suites passent (section 5).
+
+---
+
 # Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
 
 ## Contexte

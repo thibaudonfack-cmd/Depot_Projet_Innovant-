@@ -5012,6 +5012,243 @@ prototype, mais un exploitant devra les traiter :
 
 ---
 
+# Le quota d'enrôlements : fermer le prêt d'identifiants
+
+## L'angle mort, et pourquoi la cryptographie ne pouvait pas le fermer
+
+Le scénario est simple, et il survivait à toute la chaîne construite jusqu'ici :
+
+1. A prête son compte à B.
+2. B s'enrôle depuis son propre téléphone. L'appareil de A est révoqué.
+3. B scanne. La présence de A est validée, signée, géolocalisée : **tout est
+   parfaitement conforme**.
+4. Le soir, A se ré-enrôle chez lui. L'appareil de B est révoqué à son tour.
+5. Retour à l'étape 1, indéfiniment.
+
+**Aucun mécanisme cryptographique ne détecte cela**, et c'est normal : chaque
+enrôlement, pris isolément, est légitime. Bonne session, bon défi, bonne preuve
+de possession. Le défaut n'est pas dans un maillon mais dans la **répétition**.
+
+Pire : la révocation automatique de l'ancien appareil, conçue comme une
+protection contre le vol de compte, est précisément ce qui rend le manège
+répétable. Elle remet le compteur à zéro à chaque tour.
+
+> Il n'existe aucune signature qui distingue « je change de téléphone » de
+> « je prête mon compte ». Les deux gestes sont **identiques**. Ce qui les
+> sépare est leur fréquence.
+
+## Le remède est métier, pas technique
+
+D'où le choix de rendre l'opération **limitée** plutôt que de chercher à la
+détecter. `etudiants.compteur_enrolements` autorise **deux** associations au
+total : l'enrôlement initial, plus un remplacement.
+
+Ce chiffre n'est pas arbitraire. Il couvre le cas légitime le plus fréquent —
+un téléphone cassé ou remplacé en cours d'année — tout en rendant le prêt
+**coûteux et durable** : celui qui prête son compte consomme son unique crédit
+de rechange et se retrouve sans appareil valide pour le reste du semestre.
+
+Le vecteur n'est pas rendu impossible. Il est rendu **non répétable**, ce qui
+suffit : une fraude qu'on ne peut commettre qu'une fois, au prix de son propre
+accès, cesse d'être une stratégie.
+
+## L'incrément est atomique, et c'est essentiel
+
+```sql
+UPDATE etudiants
+   SET compteur_enrolements = compteur_enrolements + 1
+ WHERE id = ? AND compteur_enrolements < 2;
+```
+
+Puis `affectedRows` tranche : 1 = crédit consommé, 0 = quota atteint.
+
+Un `SELECT` suivi d'un `UPDATE` laisserait deux requêtes simultanées lire
+toutes deux « 1 », conclure toutes deux « autorisé », et enrôler deux
+appareils pour un seul crédit. **Le quota serait contournable en cliquant deux
+fois**, ce qui est exactement le geste qu'un utilisateur pressé fait
+naturellement sur une connexion lente.
+
+C'est le même raisonnement que pour la consommation du défi et pour
+`uq_scan_nonce` : **chaque fois qu'une ressource est consommée, c'est le
+moteur qui doit arbitrer, jamais le code applicatif.** Un test dédié lance
+deux enrôlements en parallèle et vérifie qu'exactement un `201` et un `403`
+sont renvoyés.
+
+## L'ordre de la cascade est délibéré
+
+Le quota est vérifié **après** la preuve de possession, et cet ordre est un
+choix de sécurité.
+
+Vérifier le quota en premier renseignerait un attaquant sur l'état d'un compte
+sans qu'il ait rien eu à prouver. Surtout, un crédit consommé par une tentative
+non authentifiée offrirait un moyen de **bloquer le compte d'un camarade** en
+épuisant son quota à sa place — on aurait créé un vecteur de déni de service
+en voulant fermer un vecteur de fraude.
+
+Un test vérifie qu'une signature dépareillée renvoie bien `401` et non `403` :
+la cascade s'arrête avant le quota.
+
+## Privilège de colonne
+
+```sql
+GRANT UPDATE (compteur_enrolements) ON db_logs.etudiants TO 'app_logs'@'%';
+```
+
+Privilège de **colonne**, pas de table, dans la continuité de `app_rgpd` :
+l'application incrémente un compteur, elle n'a aucune raison de pouvoir
+renommer un étudiant ou changer son adresse. Même une injection SQL réussie sur
+cette route ne permettrait pas d'usurper une identité en modifiant l'e-mail
+d'un compte.
+
+## PROCÉDURE ADMINISTRATIVE — réinitialisation du compteur
+
+Un étudiant ayant réellement perdu deux téléphones se retrouve bloqué. C'est
+assumé : **le déblocage passe par un humain**, et c'est le cœur du dispositif.
+Aucune remise à zéro automatique ni en libre-service n'existe — elle rouvrirait
+l'angle mort en une ligne.
+
+**Procédure, à exécuter par un administrateur de la base après vérification de
+l'identité de l'étudiant** (présentation d'une pièce d'identité au
+secrétariat) :
+
+```sql
+-- 1. Identifier l'etudiant et constater l'etat du compteur.
+SELECT id, nom, email, compteur_enrolements
+  FROM db_logs.etudiants
+ WHERE email = 'prenom.nom@example.org';
+
+-- 2. Reinitialiser, APRES verification d'identite.
+UPDATE db_logs.etudiants
+   SET compteur_enrolements = 0
+ WHERE id = 'IDENTIFIANT_DE_L_ETUDIANT';
+```
+
+En production, cette commande s'exécute depuis le serveur, à l'intérieur du
+réseau Docker (le port 3306 n'est jamais exposé) :
+
+```bash
+docker compose exec mysql mysql -u root -p db_logs
+```
+
+Trois précautions :
+
+- **Toujours filtrer sur `id`**, jamais sur `nom` : deux homonymes existent
+  dans toute promotion, et un `UPDATE` sans `WHERE` précis débloquerait
+  plusieurs comptes.
+- **Vérifier d'abord** avec le `SELECT` : un compteur à 0 ou 1 signale que le
+  blocage vient d'ailleurs, et remettre à zéro ne résoudrait rien.
+- **Consigner la demande** hors application (registre du secrétariat). Cette
+  opération n'a volontairement pas d'interface : elle ne passe donc pas par le
+  journal d'audit, et la traçabilité doit être assurée par la procédure.
+
+Cette absence d'écran est un choix. Une interface de déblocage, même réservée
+aux formateurs, deviendrait la cible du prêt d'identifiants : il suffirait de
+demander à un formateur complaisant. La friction est **le mécanisme**, pas un
+effet de bord.
+
+## Ce que l'interface annonce
+
+L'avertissement s'affiche **avant** l'action, avec le nombre d'associations
+restantes :
+
+> **Attention :** par mesure de sécurité, vous ne pouvez associer un nouvel
+> appareil qu'une seule fois après votre enrôlement initial. En cas de perte
+> multiple, contactez le secrétariat.
+
+Un utilisateur qui découvre la limite au moment où elle le bloque la **subit** ;
+informé en amont, il peut décider. Le refus, lui, produit une alerte rouge
+bloquante et désactive le bouton — un refus définitif ne doit pas ressembler à
+une erreur qu'un nouvel essai lèverait.
+
+---
+
+# Deux courses React révélées par la latence
+
+Les tests derrière un tunnel ont mis au jour deux défauts invisibles en local.
+Ils partagent une même origine : **du code correct en séquentiel, faux en
+concurrent**, et une latence de quelques dizaines de millisecondes suffit à
+transformer l'un en l'autre.
+
+## Course 1 — le 401 tardif qui efface une session fraîche
+
+**Symptôme** : après connexion, la page reste sur `/login` sans message. F5
+débloque.
+
+**Mécanisme.** La vérification initiale (`GET /api/auth/moi`) part au montage.
+En local elle répond en quelques millisecondes, bien avant toute action. À
+travers un tunnel, elle peut être **encore en vol** quand l'utilisateur valide
+le formulaire :
+
+```
+t=0    GET /api/auth/moi  ──────────────────────────┐  (sans cookie)
+t=200  POST /login  ──────┐
+t=260                     └─> 200, setUtilisateur(compte)   ← connecté
+t=800                                                └─> 401
+                                                        .catch()
+                                                        setUtilisateur(null)  ← EFFACÉ
+```
+
+La réponse **la plus ancienne** écrase la plus récente. La session existe côté
+serveur, l'interface croit le contraire. F5 fonctionne parce qu'une nouvelle
+vérification part cette fois avec le cookie.
+
+**Correction : rendre l'état monotone.** Un compteur de génération, incrémenté
+par toute action explicite (connexion, déconnexion, session perdue). Chaque
+requête asynchrone capture sa génération au départ et ne s'applique que si
+elle n'a pas changé :
+
+```js
+const generationAuDepart = generation.current;
+const encoreValable = () => !annule && generation.current === generationAuDepart;
+```
+
+Un simple booléen `dejaConnecte` ne suffirait pas : il faudrait le remettre à
+zéro à la déconnexion, et la même course se reproduirait en sens inverse. **Un
+compteur qui ne fait que croître n'a pas ce défaut.**
+
+## Course 2 — la redirection qui attend un rendu
+
+Même symptôme, cause distincte. La redirection dépendait d'un `useEffect`
+surveillant l'état `utilisateur` : il fallait donc attendre que l'état se
+propage jusqu'au composant. Imperceptible en local, temps mort visible derrière
+un tunnel.
+
+`connecter()` **renvoie** déjà l'utilisateur. La navigation utilise désormais
+cette valeur, disponible immédiatement :
+
+```js
+const compte = await connecter(email.trim(), motDePasse);
+navigate(destinationPour(compte), { replace: true });
+```
+
+**Sans réintroduire le défaut de l'Étape 7b**, où deux navigations
+concurrentes calculaient chacune leur destination. Ici l'effet subsiste, mais
+ne traite plus **qu'un seul cas** — arriver sur `/login` en étant déjà
+connecté — et les deux chemins partagent la même fonction `destinationPour()`.
+Ils ne s'appliquent jamais au même événement et ne peuvent pas diverger.
+
+## Course 3 — la séance créée qui n'apparaît pas
+
+`handleCreee` appelait `chargerSeances()` sans l'attendre ni surveiller son
+résultat. Si ce rechargement échouait — une coupure passagère suffit — la
+liste restait figée **sans que rien ne l'indique**, et la séance qui venait
+d'être créée semblait ne pas exister.
+
+Correction en deux temps. D'abord une **mise à jour optimiste** : la séance
+vient d'être confirmée par un `201`, elle existe donc certainement en base.
+L'insérer immédiatement n'est pas un pari, c'est un fait déjà acquis. Puis le
+rechargement, qui remet les champs calculés par le serveur.
+
+Si le rechargement échoue, la séance reste visible : le pire cas devient une
+ligne aux compteurs non actualisés, plus une disparition. Le retour depuis
+l'affichage du QR déclenche également un rechargement — revenir à une liste,
+c'est s'attendre à la voir à jour.
+
+> La leçon commune aux trois : **une latence n'introduit pas de bug, elle en
+> révèle.** Le code était déjà faux ; seul l'ordonnancement le cachait.
+
+---
+
 ## Prochaine étape suggérée
 
 Le prototype couvre désormais l'ensemble de la chaîne. Les compléments

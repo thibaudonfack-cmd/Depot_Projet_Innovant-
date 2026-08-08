@@ -25,6 +25,26 @@ CREATE TABLE etudiants (
   nom        VARCHAR(255) NOT NULL,
   email      VARCHAR(255) NOT NULL,
   created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  -- Etape 11 : QUOTA D'ENROLEMENTS (fermeture du pret d'identifiants).
+  --
+  -- L'angle mort qui subsistait : l'etudiant A prete son compte a B, B
+  -- s'enrole (ce qui revoque l'appareil de A), B scanne, puis A se re-enrole
+  -- le soir chez lui. Aucun mecanisme cryptographique ne detecte cela --
+  -- chaque enrolement est individuellement legitime, et la revocation
+  -- automatique de l'ancien appareil, concue comme une protection, devient
+  -- justement ce qui rend le manege repetable a l'infini.
+  --
+  -- Le remede n'est pas cryptographique mais METIER : rendre l'operation
+  -- LIMITEE. Deux enrolements sont autorises au total (l'initial, plus un
+  -- pour un changement de telephone reel) ; au-dela, le serveur refuse toute
+  -- nouvelle cle publique. Le pret devient alors un choix couteux et
+  -- definitif : celui qui prete son compte perd durablement l'acces au sien.
+  --
+  -- NOT NULL DEFAULT 0 : une colonne nullable obligerait chaque lecture a
+  -- traiter le cas NULL, et un COALESCE oublie quelque part rouvrirait
+  -- silencieusement le quota.
+  compteur_enrolements INT NOT NULL DEFAULT 0,
+
   UNIQUE KEY uq_etudiants_email (email)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
