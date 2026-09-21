@@ -1,0 +1,13 @@
+# Empeche Docker de copier le node_modules de l'hote dans l'image (le
+# Dockerfile fait deja RUN npm install a l'interieur du conteneur -- copier
+# aussi celui de l'hote via COPY . . ecraserait l'installation fraiche par
+# une version potentiellement differente/desynchronisee de package-lock.json).
+node_modules
+npm-debug.log*
+
+# Jamais dans l'image : la cle est montee en volume (docker-compose.yml),
+# pas embarquee dans l'image buildee.
+keys/
+
+.env
+.git

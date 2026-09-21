@@ -1,0 +1,109 @@
+# docker-compose.prod.yml
+# Surcouche de PRODUCTION, a superposer au fichier de developpement :
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# POURQUOI UNE SURCOUCHE ET NON UN FICHIER AUTONOME
+#
+# Un second fichier complet dupliquerait le reseau, les dependances, la
+# verification de sante de MySQL et les variables d'environnement. Deux
+# copies d'une meme configuration divergent toujours : on corrige un defaut
+# d'un cote, on l'oublie de l'autre, et l'ecart ne se decouvre qu'en
+# production. La surcouche ne decrit QUE les differences, ce qui la rend
+# lisible d'un coup d'oeil -- et c'est precisement cette liste de differences
+# qu'un jury voudra examiner.
+#
+# TROIS DIFFERENCES, ET ELLES COMPTENT TOUTES LES TROIS.
+
+services:
+  mysql:
+    volumes:
+      # ---------------------------------------------------------------------
+      # 1. LE SEED DE DEMONSTRATION N'EST PLUS MONTE.
+      #
+      # En developpement, ./database est monte dans
+      # /docker-entrypoint-initdb.d : MySQL y execute 01-schema.sql,
+      # 02-seed.sql et 03-privileges.sh au premier demarrage.
+      #
+      # Garder ce montage en production creerait onze comptes dont les mots
+      # de passe sont DOCUMENTES EN CLAIR dans le depot public
+      # (Etudiant123!, Formateur123!) -- dont trois comptes formateurs ayant
+      # acces aux donnees de tous les etudiants de leurs UF. C'est la
+      # vulnerabilite de mise en production la plus banale, et la plus grave.
+      #
+      # Seuls le schema et les privileges sont donc montes. Les donnees
+      # reelles sont a charger separement (cf. deploy.sh, etape "amorcage").
+      # ---------------------------------------------------------------------
+      - mysql_data:/var/lib/mysql
+      - ./database/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/03-privileges.sh:/docker-entrypoint-initdb.d/03-privileges.sh:ro
+    # Rappel : AUCUNE section "ports". Le port 3306 n'est joignable que depuis
+    # le reseau presence_net. Voir ANALYSE_CODE.md, section deploiement.
+    command:
+      - --default-authentication-plugin=caching_sha2_password
+      # Journalisation des requetes lentes : le seul reglage d'observabilite
+      # qui se revele indispensable des les premieres semaines d'exploitation.
+      - --slow-query-log=1
+      - --long-query-time=1
+
+  backend:
+    environment:
+      NODE_ENV: production
+    volumes:
+      # Les cles RS256 restent montees en LECTURE SEULE. Elles ne sont jamais
+      # dans l'image : une image se pousse sur un registre, se partage, se
+      # rejoue -- une cle privee ne doit jamais suivre ce chemin.
+      - ./keys:/app/keys:ro
+    # Redemarrage systematique : en developpement, "unless-stopped" laisse un
+    # conteneur arrete apres un docker compose stop. En production, le service
+    # doit revenir apres un redemarrage du VPS, quoi qu'il se soit passe.
+    restart: always
+
+  # ---------------------------------------------------------------------------
+  # 2. LE FRONTEND N'EST PLUS UN SERVEUR, C'EST UN BUILD.
+  #
+  # En developpement, ce service fait tourner Vite avec le code source monte
+  # en volume. En production, il CONSTRUIT les fichiers statiques puis
+  # s'arrete : Caddy les sert directement depuis un volume partage.
+  #
+  # Le gain n'est pas seulement de performance (~150 ko compresses contre
+  # plusieurs megaoctets de modules non minifies) : le serveur de
+  # developpement expose le code source complet et les cartes de source, et
+  # n'est pas concu pour encaisser du trafic public.
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    # restart: "no" -- ce conteneur a vocation a s'arreter apres avoir publie
+    # les fichiers. Sans ce reglage, il heriterait du "unless-stopped" du
+    # fichier de base et Docker le relancerait en boucle.
+    restart: "no"
+    volumes:
+      # Le bind mount ./frontend:/app du developpement N'EST PAS repris : la
+      # surcouche remplace entierement la liste des volumes de ce service.
+      # C'est voulu -- monter le code source par-dessus l'image ecraserait le
+      # build.
+      - frontend_dist:/srv
+
+  proxy:
+    volumes:
+      - ./Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      # Les fichiers construits, servis par file_server (cf. Caddyfile.prod).
+      - frontend_dist:/srv:ro
+      - caddy_logs:/var/log/caddy
+    restart: always
+
+volumes:
+  # -----------------------------------------------------------------------
+  # 3. PERSISTANCE. Ces volumes survivent a docker compose down.
+  #
+  # ATTENTION : `docker compose down -v` les DETRUIT. La commande est
+  # indispensable en developpement (elle est repetee dans tout TESTING.md) et
+  # catastrophique en production : elle effacerait la base ET les certificats
+  # Let's Encrypt. deploy.sh ne l'emploie jamais.
+  # -----------------------------------------------------------------------
+  frontend_dist:
+  caddy_logs:

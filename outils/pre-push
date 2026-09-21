@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Hook Git pre-push (OPTIONNEL) -- refuse le push si verifier-avant-push.sh
+# echoue.
+#
+# Installation (une seule fois, depuis la racine du projet) :
+#     cp outils/pre-push .git/hooks/pre-push
+#     chmod +x .git/hooks/pre-push
+#
+# Note : les hooks vivent dans .git/hooks/, qui n'est JAMAIS versionne par
+# Git. C'est pour cela que ce fichier est range dans outils/ (versionne) et
+# doit etre copie manuellement -- il n'y a pas de moyen de "committer un
+# hook" directement, et c'est voulu par Git : un depot ne doit pas pouvoir
+# faire executer du code sur la machine de quiconque le clone.
+#
+# Pour contourner ponctuellement (urgence) :
+#     git push --no-verify
+# =============================================================================
+RACINE="$(git rev-parse --show-toplevel)"
+
+if [ ! -x "$RACINE/verifier-avant-push.sh" ]; then
+  echo "[pre-push] verifier-avant-push.sh introuvable -- push autorise sans verification."
+  exit 0
+fi
+
+echo "[pre-push] Verification avant push (contourner : git push --no-verify)"
+if bash "$RACINE/verifier-avant-push.sh"; then
+  exit 0
+fi
+
+echo ""
+echo "[pre-push] PUSH ANNULE : corrige les points ci-dessus, ou force avec --no-verify."
+exit 1

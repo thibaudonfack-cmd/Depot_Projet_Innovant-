@@ -1,0 +1,7 @@
+# Empeche Docker de copier le node_modules de l'hote dans l'image (le
+# conteneur installe le sien, potentiellement sur une architecture/OS
+# differente -- meme raison que backend/.dockerignore).
+node_modules
+npm-debug.log*
+dist
+.git

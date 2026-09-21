@@ -1,0 +1,307 @@
+/* src/index.css
+ *
+ * Point d'entrée unique des styles, importé par src/main.jsx.
+ * Tailwind CSS v4 : configuration en CSS via @theme, sans tailwind.config.js.
+ */
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+ * Palette
+ *
+ * Refonte claire et chaleureuse. Deux leviers :
+ *
+ * 1. Des neutres CHAUDS (teinte 70, vers le beige) au lieu des gris bleutés
+ *    de la version précédente. C'est ce qui porte l'essentiel de la
+ *    perception de chaleur : un gris froid sur de grandes surfaces donne un
+ *    rendu clinique, le même gris légèrement ambré paraît accueillant sans
+ *    qu'on sache dire pourquoi.
+ * 2. Un accent bleu franc et lumineux, plus clair que le bleu-violet
+ *    précédent, qui alourdissait les zones d'action.
+ *
+ * Chaque valeur a été choisie en CALCULANT son ratio de contraste, pas à
+ * l'oeil. Les tons 400 et 500 des neutres sont volontairement plus sombres
+ * que la convention Tailwind : ils servent aux textes d'aide et aux bordures
+ * de champ, où la convention habituelle échoue aux seuils WCAG. Le détail
+ * chiffré figure dans ANALYSE_CODE.md, section Étape 7b (refonte visuelle).
+ *
+ * Espace OKLCH : y faire varier la seule clarté produit une gamme
+ * perceptuellement régulière, là où une échelle construite en HSL donne des
+ * tons inégalement espacés.
+ * ------------------------------------------------------------------------ */
+@theme {
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas,
+    "Liberation Mono", monospace;
+
+  /* Neutres chauds. Le suffixe indique la clarté, comme dans Tailwind. */
+  --color-sable-50:  oklch(0.988 0.004 80);
+  --color-sable-100: oklch(0.972 0.006 80);
+  --color-sable-200: oklch(0.928 0.008 75);
+  --color-sable-300: oklch(0.860 0.010 72);
+  --color-sable-400: oklch(0.660 0.012 70);  /* bordures : 3,12:1 sur blanc */
+  --color-sable-500: oklch(0.550 0.015 70);  /* aides    : 4,86:1 sur blanc */
+  --color-sable-600: oklch(0.480 0.016 68);  /* secondaire : 6,56:1 */
+  --color-sable-700: oklch(0.400 0.016 66);
+  --color-sable-900: oklch(0.260 0.014 64);  /* principal : 15,57:1 */
+
+  /* Accent. Le 600 porte les actions principales : 4,90:1 avec du blanc. */
+  --color-accent-50:  oklch(0.968 0.016 255);
+  --color-accent-100: oklch(0.930 0.035 255);
+  --color-accent-200: oklch(0.870 0.060 255);
+  --color-accent-500: oklch(0.600 0.150 255);
+  --color-accent-600: oklch(0.550 0.160 255);
+  --color-accent-700: oklch(0.480 0.155 255);
+  --color-accent-900: oklch(0.330 0.100 255);
+
+  /* Ombres larges et très peu opaques, en deux couches. Une ombre franche
+   * dessine un contour dur et donne l'effet « carte découpée » ; une ombre
+   * diffuse suggère l'élévation sans trancher. Teintées de brun plutôt que
+   * de noir pur, pour rester cohérentes avec les neutres chauds. */
+  --shadow-douce: 0 1px 2px oklch(0.35 0.02 65 / 0.05),
+                  0 4px 14px oklch(0.35 0.02 65 / 0.06);
+  --shadow-elevee: 0 2px 4px oklch(0.35 0.02 65 / 0.05),
+                   0 14px 36px oklch(0.35 0.02 65 / 0.10);
+}
+
+/* Fond de page : un blanc cassé très légèrement chaud, réchauffé en haut par
+ * un halo ambré presque imperceptible. L'aplat de blanc pur donne
+ * l'impression d'une page inachevée ; ce dégradé y remédie sans introduire
+ * de couleur visible. */
+body {
+  background:
+    radial-gradient(70rem 45rem at 50% -18rem,
+      oklch(0.975 0.020 75), transparent 65%),
+    var(--color-sable-50);
+  min-height: 100svh;
+  color: var(--color-sable-900);
+}
+
+/* Animation de la ligne de balayage du scanner (src/components/QRScanner.jsx).
+ * Définie ici car les @keyframes ne s'expriment pas en classes utilitaires,
+ * même en Tailwind v4 : seule leur invocation l'est. Purement décorative,
+ * appliquée uniquement via le variant motion-safe:. */
+@keyframes balayage {
+  0%   { top: 0.5rem;              opacity: 0; }
+  15%  {                           opacity: 1; }
+  85%  {                           opacity: 1; }
+  100% { top: calc(100% - 0.5rem); opacity: 0; }
+}
+
+/* Entrée douce des cartes et des messages, assez brève pour ne jamais donner
+ * l'impression d'attendre. */
+@keyframes apparition {
+  from { opacity: 0; transform: translateY(0.5rem); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------------------------------------------------------------------------
+ * Modales
+ *
+ * Écrit en CSS et non en classes utilitaires, pour une raison précise :
+ * animer l'ouverture ET la fermeture d'un <dialog> exige trois choses qui ne
+ * s'expriment pas en utilitaires.
+ *
+ * 1. `@starting-style` définit l'état de départ d'un élément qui vient
+ *    d'apparaître. Sans lui, le navigateur n'a pas d'état initial à
+ *    interpoler et l'ouverture est instantanée, quelle que soit la
+ *    transition déclarée.
+ * 2. `transition-behavior: allow-discrete` sur `display` et `overlay` fait
+ *    que le dialogue reste affiché le temps de l'animation de sortie. Sans
+ *    cela il disparaît au premier frame et seule l'ouverture est animée.
+ * 3. `::backdrop` est un pseudo-élément que les classes utilitaires ne
+ *    peuvent pas cibler avec des transitions.
+ *
+ * L'ensemble est natif : aucune bibliothèque d'animation, aucun état React
+ * à synchroniser, et la fermeture par Échap est animée comme les autres.
+ * ------------------------------------------------------------------------ */
+.modale {
+  padding: 0;
+  border: none;
+  background: transparent;
+  max-width: min(34rem, calc(100vw - 2rem));
+  width: 100%;
+  /* Les marges automatiques centrent le dialogue dans sa couche supérieure,
+   * horizontalement comme verticalement, sans position fixe ni transform. */
+  margin: auto;
+
+  opacity: 0;
+  transform: translateY(0.75rem) scale(0.97);
+  transition:
+    opacity 180ms ease-out,
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    display 180ms allow-discrete,
+    overlay 180ms allow-discrete;
+}
+
+.modale[open] {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+@starting-style {
+  .modale[open] {
+    opacity: 0;
+    transform: translateY(0.75rem) scale(0.97);
+  }
+}
+
+.modale::backdrop {
+  background: oklch(0.26 0.014 64 / 0.5);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  transition:
+    opacity 180ms ease-out,
+    display 180ms allow-discrete,
+    overlay 180ms allow-discrete;
+}
+
+.modale[open]::backdrop {
+  opacity: 1;
+}
+
+@starting-style {
+  .modale[open]::backdrop {
+    opacity: 0;
+  }
+}
+
+/* Respect de la réduction des animations : la modale apparaît sans mouvement,
+ * mais reste parfaitement fonctionnelle. */
+@media (prefers-reduced-motion: reduce) {
+  .modale,
+  .modale::backdrop {
+    transition-duration: 1ms;
+  }
+  .modale {
+    transform: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Feuille d'impression
+ *
+ * Un formateur qui fait Ctrl+P sur le rapport d'assiduité doit obtenir un
+ * document administratif, pas une capture de l'application. Trois principes :
+ *
+ * 1. RETIRER CE QUI N'EXISTE PAS SUR PAPIER. Un en-tête collant, un bouton
+ *    « Exporter en CSV » ou une bannière de navigation imprimés donneraient un
+ *    document manifestement issu d'un écran, que personne ne classerait dans
+ *    un dossier d'inspection.
+ * 2. RENDRE VISIBLE CE QUI MANQUE À L'ÉCRAN. La date d'établissement et la
+ *    mention « PROVISOIRE » n'ont pas d'utilité à l'écran, où le contexte est
+ *    présent ; sur une feuille détachée, ce sont les seules informations
+ *    permettant de savoir ce qu'on lit.
+ * 3. FORCER L'ENCRE. Les navigateurs suppriment par défaut les fonds à
+ *    l'impression : sans `print-color-adjust`, les badges d'état perdraient
+ *    leur fond et deviendraient du texte gris sur blanc. Le libellé resterait
+ *    lisible — la couleur ne porte jamais l'information seule — mais la
+ *    lecture en diagonale d'un tableau de vingt lignes en pâtirait.
+ * ------------------------------------------------------------------------ */
+@media print {
+  /* Le fond de page et les ombres consomment de l'encre sans rien apporter. */
+  html,
+  body {
+    background: #fff;
+  }
+
+  .zone-rapport {
+    border: none;
+    box-shadow: none;
+    padding: 0;
+  }
+
+  /* En-tête applicatif, boutons d'action, indicateurs d'actualisation. */
+  header[class*="sticky"],
+  .zone-actions,
+  button {
+    display: none !important;
+  }
+
+  /* Pied de document, masqué à l'écran par `hidden`. */
+  .mention-impression {
+    display: block !important;
+  }
+
+  /* Une ligne d'étudiant coupée en deux par un saut de page se relit mal, et
+   * un tableau dont l'en-tête ne reparaît pas en page 2 devient illisible. */
+  tr,
+  td,
+  th {
+    break-inside: avoid;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  * {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  @page {
+    margin: 1.5cm;
+  }
+
+  /* -------------------------------------------------------------------------
+   * Rigueur documentaire (Étape 10)
+   *
+   * À l'écran, la hiérarchie passe par la couleur et l'espacement. Sur
+   * papier, les deux s'affaiblissent : l'encre couleur n'est pas garantie, et
+   * la densité augmente mécaniquement. La typographie doit donc reprendre le
+   * travail à sa charge.
+   * ---------------------------------------------------------------------- */
+
+  /* Corps légèrement réduit : un tableau de vingt étudiants doit tenir sur
+   * une page A4, sinon l'en-tête se répète et le document double de volume. */
+  .zone-rapport {
+    font-size: 10.5pt;
+    line-height: 1.35;
+  }
+
+  /* Filets francs autour du tableau. À l'écran, un séparateur discret suffit ;
+   * imprimé, il disparaît presque et les colonnes se confondent. */
+  .zone-rapport table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .zone-rapport thead tr {
+    border-top: 1.5pt solid #000;
+    border-bottom: 1.5pt solid #000;
+  }
+
+  .zone-rapport tbody tr {
+    border-bottom: 0.4pt solid #999;
+  }
+
+  .zone-rapport th,
+  .zone-rapport td {
+    padding: 4pt 6pt;
+  }
+
+  /* Le survol n'existe pas sur papier : la trame alternée le remplacerait
+   * inutilement en encre. On la neutralise. */
+  .zone-rapport tbody tr {
+    background: transparent !important;
+  }
+
+  /* Les jauges gardent un contour visible même sans fond imprimé : la piste
+   * seule deviendrait invisible et la barre flotterait sans référence. */
+  .zone-rapport [role="img"] {
+    border: 0.4pt solid #666;
+  }
+
+  /* Le filet d'en-tête reste, en noir : c'est la marque visuelle qui
+   * distingue un relevé engageant d'une simple impression d'écran. */
+  .zone-rapport header {
+    border-top-color: #000 !important;
+  }
+
+  /* Titre du document légèrement agrandi, à contre-courant de la réduction
+   * générale : sur une feuille détachée, c'est la première chose lue. */
+  .zone-rapport h2 {
+    font-size: 14pt;
+  }
+}

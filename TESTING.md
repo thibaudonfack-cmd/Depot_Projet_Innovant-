@@ -1,0 +1,4042 @@
+# TESTING.md — Protocole de validation
+
+Protocole de test manuel, à exécuter sur ta machine (Docker n'est pas
+disponible dans l'environnement où le code a été écrit — voir `ANALYSE_CODE.md`
+pour les tests déjà effectués sans Docker : intégrité des clés, signature
+RS256, logique du serveur Express en dehors du conteneur).
+
+Chaque section indique la commande exacte, le résultat exact attendu, et ce
+qu'il faut faire si le résultat diffère.
+
+---
+
+## 0. Prérequis
+
+```bash
+docker --version
+docker compose version
+git --version
+```
+
+Attendu : trois versions affichées sans erreur. Docker Desktop doit être
+démarré (icône active dans la barre des tâches/menu).
+
+---
+
+## 1. Récupération du code (branche `dev`)
+
+```bash
+git clone git@github.com:thibaudonfack-cmd/Depot_Projet_Innovant-.git
+cd Depot_Projet_Innovant-
+git checkout dev
+git log --oneline
+```
+
+Attendu : au moins 3 commits sur `dev` (scaffolding Partie 1 + doc + Partie 2),
+en plus de l'`Initial commit` hérité de `main`.
+
+---
+
+## 2. Préparation de l'environnement
+
+```bash
+cp .env.example .env
+./generate_keys.sh
+```
+
+Attendu :
+```
+Génération de la clé privée RSA 2048 bits (RS256)...
+Extraction de la clé publique correspondante...
+
+Clés générées avec succès :
+  Privée  : .../keys/private.pem (permissions 600, exclue de Git par .gitignore)
+  Publique : .../keys/public.pem (permissions 644, diffusable aux vérificateurs tiers)
+```
+
+Vérification : `ls keys/` doit lister `private.pem` et `public.pem`.
+`git status` doit rester silencieux sur `.env` et `keys/` (ignorés).
+
+---
+
+## 3. Validation de la configuration avant démarrage
+
+```bash
+docker compose config
+```
+
+Attendu : un YAML complet, résolu, sans `${...}` restant en clair (toutes les
+variables du `.env` doivent apparaître substituées par leur valeur). Si une
+variable apparaît vide ou non résolue, le fichier `.env` est incomplet.
+
+---
+
+## 4. Démarrage complet
+
+```bash
+docker compose up -d --build
+```
+
+Attendu (ordre indicatif, peut varier) :
+```
+[+] Running 4/4
+ ✔ Network ...presence_net       Created
+ ✔ Container presence_mysql      Started
+ ✔ Container presence_backend    Started
+ ✔ Container presence_proxy      Started
+```
+
+Le `--build` force la (re)construction de l'image backend à partir du
+`Dockerfile` — nécessaire au premier lancement ou après toute modification de
+`backend/`.
+
+---
+
+## 5. Vérification de l'état des conteneurs
+
+```bash
+docker compose ps
+```
+
+Attendu : trois lignes, `STATUS` :
+- `presence_mysql` → `Up ... (healthy)` (peut afficher `(health: starting)`
+  pendant les 20-30 premières secondes — attendre et relancer la commande)
+- `presence_backend` → `Up ...`
+- `presence_proxy` → `Up ...`
+
+Si `presence_backend` n'est pas `Up` : voir section 9 (dépannage).
+
+---
+
+## 6. Logs du proxy — preuve que le certificat local est émis
+
+```bash
+docker compose logs proxy
+```
+
+Attendu, entre autres lignes JSON structurées de Caddy : une mention de
+l'émission d'un certificat par l'autorité interne, du type :
+```
+"msg":"certificate obtained successfully","identifier":"localhost"
+```
+ou, au redémarrage suivant (certificat déjà émis et persisté dans le volume
+`caddy_data`) :
+```
+"msg":"loaded certificate","identifiers":["localhost"]
+```
+Aucune ligne contenant `"level":"error"` liée à `tls` ne doit apparaître.
+
+---
+
+## 7. Logs du backend
+
+```bash
+docker compose logs backend
+```
+
+Attendu :
+```
+Backend demarre sur le port 3000
+```
+Sans erreur `Error: listen EADDRINUSE` ni trace de crash (`node:internal`).
+
+---
+
+## 8. Test de la route de santé — en ligne de commande
+
+```bash
+curl -k https://localhost/api/health
+```
+
+Le flag `-k` (`--insecure`) est nécessaire ici : il indique à `curl` de ne pas
+vérifier l'autorité du certificat, exactement pour la raison expliquée dans
+`ANALYSE_CODE.md` (CA interne de Caddy, non approuvée par défaut par l'hôte).
+Ce n'est pas un contournement de bug, c'est le comportement attendu à ce stade.
+
+Attendu, exactement :
+```json
+{"status":"ok","message":"Backend is running securely"}
+```
+
+Variante avec le second nom d'hôte configuré :
+```bash
+curl -k https://api.localhost/api/health
+```
+Même résultat attendu.
+
+**Test du routage HTTP → HTTPS** :
+```bash
+curl -I http://localhost/api/health
+```
+Attendu : un en-tête `HTTP/1.1 308 Permanent Redirect` (ou `301`) avec un
+`Location: https://localhost/api/health` — Caddy force la bascule vers TLS.
+
+**Test de la route par défaut (hors `/api/*`)** :
+```bash
+curl -k https://localhost/
+```
+Attendu :
+```
+Proxy Caddy actif. API disponible sous /api/*
+```
+
+---
+
+## 9. Test dans le navigateur — et l'avertissement de certificat attendu
+
+Ouvrir `https://localhost/api/health` dans le navigateur.
+
+**Avertissement attendu au premier accès** (normal, pas un échec) :
+
+| Navigateur | Message affiché |
+|---|---|
+| Chrome / Edge | « Votre connexion n'est pas privée » — code `NET::ERR_CERT_AUTHORITY_INVALID` |
+| Firefox | « Avertissement : risque de sécurité potentiel » — `SEC_ERROR_UNKNOWN_ISSUER` |
+| Safari | « Cette connexion n'est pas privée » |
+
+C'est attendu : la CA de Caddy (générée dans le conteneur) n'est pas dans le
+magasin de confiance de ton système. Cliquer sur « Paramètres avancés » (Chrome)
+ou « Avancé » puis « Accepter le risque et continuer » (Firefox) pour
+poursuivre. La page doit ensuite afficher exactement le JSON de la section 8.
+
+**Pour supprimer cet avertissement proprement (facultatif, non requis pour
+valider cette étape)** :
+
+```bash
+docker compose exec proxy cat /data/caddy/pki/authorities/local/root.crt > caddy-root-ca.crt
+```
+
+Puis importer `caddy-root-ca.crt` dans le magasin de certificats de confiance
+du système (Windows : double-clic → Installer le certificat → Autorités de
+certification racines de confiance) ou du navigateur (Firefox : Paramètres →
+Vie privée et sécurité → Certificats → Importer). Après import, recharger la
+page : le cadenas doit apparaître sans avertissement.
+
+---
+
+## 10. Non-exposition directe du backend et de MySQL
+
+```bash
+curl -m 3 http://localhost:3000/api/health
+```
+Attendu : échec de connexion (`Connection refused` ou timeout) — le backend
+n'est volontairement pas publié en dehors du réseau Docker interne.
+
+Sous Windows (PowerShell), vérifier qu'aucun processus n'écoute sur 3306 ou
+3000 côté hôte :
+```powershell
+netstat -an | findstr "3000 3306"
+```
+Attendu : aucune ligne en `LISTENING`. Seuls 80 et 443 (Caddy) doivent
+apparaître.
+
+---
+
+## 11. Persistance entre redémarrages
+
+```bash
+docker compose restart proxy
+docker compose logs proxy | tail -5
+```
+Attendu : le message `"msg":"loaded certificate"` (pas `"certificate
+obtained successfully"` à nouveau) — preuve que le volume `caddy_data` a bien
+conservé la CA et le certificat entre deux démarrages du conteneur.
+
+---
+
+## 12. Régression — MySQL toujours fonctionnel (Partie 1)
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p -e "SHOW DATABASES;"
+```
+(mot de passe : celui du `.env`, variable `MYSQL_PASSWORD`)
+
+Attendu : `db_logs` apparaît dans la liste — la brique validée en Partie 1
+n'a pas été cassée par l'ajout du proxy et du backend.
+
+---
+
+## 13. Arrêt propre
+
+```bash
+docker compose down
+```
+Attendu : les trois conteneurs et le réseau `presence_net` sont supprimés ;
+les volumes nommés (`mysql_data`, `caddy_data`, `caddy_config`) restent
+présents (`docker volume ls` doit encore les lister).
+
+---
+
+## 14. Dépannage rapide
+
+| Symptôme | Cause probable | Action |
+|---|---|---|
+| `presence_backend` redémarre en boucle | Erreur dans `server.js` ou dépendance manquante | `docker compose logs backend` pour voir la stack trace |
+| `curl -k https://localhost/api/health` renvoie une erreur 502 | Le backend n'est pas encore prêt ou a crashé | Vérifier `docker compose ps` puis les logs backend |
+| Le port 443 est déjà utilisé | Un autre service (IIS, Skype, un ancien conteneur) occupe le port | `docker compose down` sur tout autre projet, ou changer temporairement le mapping de port dans `docker-compose.yml` |
+| `docker compose config` échoue avec une variable vide | `.env` incomplet ou non copié depuis `.env.example` | Refaire `cp .env.example .env` et vérifier chaque valeur |
+| `backend` crash en boucle avec `ENOENT ... open '/keys/private.pem'` (chemin SANS `/app`) | `JWT_PRIVATE_KEY_PATH`/`JWT_PUBLIC_KEY_PATH` absentes de l'environnement du service `backend` (bug latent depuis l'Étape 2, corrigé — voir Annexe A) ou `.env`/`keys/` supprimés localement (ex. `git clean -fd`) | `git pull origin dev` pour récupérer le correctif, puis suivre le protocole de relance complet de l'Annexe A |
+
+---
+
+## Critère de succès global — Étape 0.2
+
+L'étape est validée si, et seulement si, **toutes** les sections 3 à 12
+produisent le résultat attendu documenté ci-dessus, sans intervention
+manuelle autre que celle explicitement décrite (y compris l'acceptation de
+l'avertissement de certificat, qui fait partie du résultat attendu et non
+d'un échec).
+
+---
+
+# Étape 1 — Modélisation DB, seed et connexion backend
+
+Ce protocole suppose l'Étape 0.2 déjà validée (proxy, backend, réseau Docker
+opérationnels). Si `docker-compose.yml` a déjà tourné une fois avec l'ancien
+schéma (sans `database/`), le volume `mysql_data` existe déjà et l'entrypoint
+MySQL **n'exécutera pas** les nouveaux scripts d'init (ils ne s'exécutent
+qu'au tout premier démarrage d'un volume vide). Repartir de zéro si besoin :
+
+```bash
+docker compose down -v
+```
+
+`-v` supprime aussi les volumes (données MySQL et certificat Caddy) — sans
+danger sur un prototype de développement, à éviter en tout autre contexte.
+
+## 1. Mise à jour de l'environnement
+
+```bash
+git pull origin dev
+cp .env.example .env    # uniquement si ton .env existant ne contient pas
+                         # encore les variables MYSQL_ATTESTATIONS_*
+```
+
+Vérifier que `.env` contient bien `MYSQL_ATTESTATIONS_USER` et
+`MYSQL_ATTESTATIONS_PASSWORD` avant de continuer (sinon `03-privileges.sh`
+échouera au démarrage de MySQL faute de variable).
+
+## 2. Démarrage à partir d'un volume propre
+
+```bash
+docker compose up -d --build
+docker compose logs -f mysql
+```
+
+Attendu dans les logs (dans cet ordre, en clair, pas du JSON comme Caddy) :
+```
+[Entrypoint] ... Initializing database
+...
+[Entrypoint] ... /docker-entrypoint-initdb.d/01-schema.sql
+[Entrypoint] ... /docker-entrypoint-initdb.d/02-seed.sql
+[Entrypoint] ... /docker-entrypoint-initdb.d/03-privileges.sh
+03-privileges.sh : utilisateur app_attestations cree (db_attestations uniquement) ; scans/corrections passees en ecriture seule pour app_logs.
+...
+[Entrypoint] ... MySQL init process done. Ready for start up.
+```
+`Ctrl+C` pour sortir du suivi de logs une fois cette séquence observée.
+Aucune ligne `ERROR` ne doit apparaître pour ces trois scripts.
+
+## 3. Vérification en ligne de commande MySQL — tables et seed
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" db_logs
+```
+(mot de passe demandé si non passé inline — utiliser celui du `.env`)
+
+Dans le prompt `mysql>` :
+
+```sql
+SHOW TABLES;
+```
+Attendu : `appareils_enroles`, `corrections`, `etudiants`, `inscriptions`, `salles`, `scans`, `seances`, `uf` (8 tables).
+
+```sql
+SELECT COUNT(*) FROM etudiants;
+```
+Attendu : `4`.
+
+```sql
+SELECT id, nom, email FROM etudiants;
+```
+Attendu : les 4 étudiants de démonstration (Amara Diallo, Bilal Ozturk, Chiara Rossi, Driss El Amrani).
+
+```sql
+SELECT nom, JSON_PRETTY(polygone_geojson) FROM salles;
+```
+Attendu : `Local 12 - ESA Namur` avec un polygone GeoJSON de type `Polygon` à 5 points (le 5ᵉ referme le 1ᵉʳ).
+
+```sql
+SHOW CREATE TABLE scans\G
+```
+Attendu : la définition doit contenir `UNIQUE KEY uq_scan_nonce (jti,etudiant_id)`.
+
+```sql
+SHOW CREATE TABLE appareils_enroles\G
+```
+Attendu : doit contenir la colonne générée `actif_key` et `UNIQUE KEY uq_appareil_actif (actif_key)`.
+
+```sql
+exit
+```
+
+## 4. Vérification des privilèges séparés
+
+```bash
+docker compose exec mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "SHOW GRANTS FOR 'app_logs'@'%';"
+```
+Attendu, exactement (4 lignes) :
+```
+GRANT USAGE ON *.* TO `app_logs`@`%`
+GRANT SELECT, INSERT ON `db_logs`.* TO `app_logs`@`%`
+GRANT UPDATE, DELETE ON `db_logs`.`seances` TO `app_logs`@`%`
+GRANT UPDATE, DELETE ON `db_logs`.`appareils_enroles` TO `app_logs`@`%`
+```
+Aucune ligne ne doit mentionner `db_attestations`, ni `scans`, ni
+`corrections` — ces deux dernières tables ne reçoivent que le `SELECT,
+INSERT` de la ligne globale sur `db_logs.*`, jamais de `GRANT` `UPDATE`/
+`DELETE` dédié (c'est cette absence, et non un `REVOKE`, qui garantit leur
+statut d'écriture seule — voir `ANALYSE_CODE.md` pour la note de révision sur
+ce point).
+
+```bash
+docker compose exec mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "SHOW GRANTS FOR 'app_attestations'@'%';"
+```
+Attendu :
+```
+GRANT USAGE ON *.* TO `app_attestations`@`%`
+GRANT SELECT, INSERT ON `db_attestations`.* TO `app_attestations`@`%`
+```
+Rien sur `db_logs`.
+
+**Preuve active de l'isolement (au-delà de la lecture des GRANT)** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_ATTESTATIONS_USER:-app_attestations} -p"${MYSQL_ATTESTATIONS_PASSWORD}" -e "SELECT COUNT(*) FROM db_logs.etudiants;"
+```
+Attendu : une erreur explicite, du type
+`ERROR 1142 (42000): SELECT command denied to user 'app_attestations'@'...' for table 'etudiants'`
+— preuve en conditions réelles, pas seulement documentaire, que la
+séparation tient.
+
+**Preuve du journal en écriture seule** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" -e "UPDATE db_logs.scans SET resultat='valide' WHERE 1=0;"
+```
+Attendu : `ERROR 1142 (42000): UPDATE command denied to user 'app_logs'@'...' for table 'scans'`
+(la clause `WHERE 1=0` ne sélectionne aucune ligne — c'est le refus de la
+commande elle-même qui est testé, pas son effet sur des données réelles).
+
+## 5. Route `/api/health` (régression Étape 0.2)
+
+```bash
+curl -k https://localhost/api/health
+```
+Attendu (inchangé) : `{"status":"ok","message":"Backend is running securely"}`
+
+## 6. Route `/api/db-health` — preuve bout en bout
+
+```bash
+curl -k https://localhost/api/db-health
+```
+
+Attendu, exactement :
+```json
+{"status":"ok","database":"connected","schema_initialized":true,"etudiants_count":4}
+```
+
+Si le backend a démarré avant que MySQL soit `healthy` (ne devrait pas
+arriver grâce à `depends_on: condition: service_healthy`, mais à vérifier si
+ce test échoue) :
+```json
+{"status":"error","database":"unreachable","message":"connect ECONNREFUSED ..."}
+```
+avec un code HTTP `500`. Dans ce cas : `docker compose logs backend` pour
+confirmer l'erreur, puis `docker compose restart backend` une fois
+`docker compose ps` confirme `mysql` à `(healthy)`.
+
+## 7. Logs applicatifs du backend
+
+```bash
+docker compose logs backend
+```
+Ne doit contenir aucune ligne `Erreur /api/db-health` si le test 6 a réussi.
+Si cette ligne apparaît malgré un test 6 réussi ensuite, c'est le signe d'une
+erreur transitoire au démarrage (backend lancé avant MySQL réellement prêt) —
+sans gravité si la requête suivante réussit, à signaler sinon.
+
+## Critère de succès global — Étape 1
+
+Validée si et seulement si : les 8 tables existent avec exactement le contenu
+attendu (section 3), les deux utilisateurs MySQL ont des privilèges
+strictement disjoints et ce cloisonnement est démontré activement — pas
+seulement lu dans `SHOW GRANTS` (section 4), et `/api/db-health` renvoie
+`etudiants_count: 4` (section 6).
+
+---
+
+# Étape 2 — Jeton RS256, rotation, diffusion WebSocket
+
+Ce protocole suppose l'Étape 1 déjà validée. Nécessite un client WebSocket en
+ligne de commande : `wscat` (Node, installable globalement) ou l'extension
+WebSocket de Postman — les deux fonctionnent, les instructions ci-dessous
+utilisent `wscat`.
+
+```bash
+npm install -g wscat
+```
+
+## 1. Redémarrage avec le nouveau code
+
+```bash
+git pull origin dev
+docker compose up -d --build
+docker compose ps
+```
+
+Attendu : les 3 conteneurs `Up`, `presence_mysql` `(healthy)`. Le volume
+`keys/` est désormais monté sur `backend` — vérifier qu'aucune erreur de
+démarrage n'apparaît :
+
+```bash
+docker compose logs backend
+```
+
+Attendu : `Backend demarre sur le port 3000`, **aucune** ligne du type
+`Impossible de lire la cle privee`. Si cette erreur apparaît : vérifier que
+`./generate_keys.sh` a bien été exécuté à la racine (section 2 du protocole
+Étape 0.1) et que `keys/private.pem` existe sur ta machine.
+
+## 2. Création d'une séance
+
+```bash
+curl -k -X POST https://localhost/api/seances \
+  -H "Content-Type: application/json" \
+  -d '{"uf_id":"11111111-1111-1111-1111-111111111111","salle_id":"22222222-2222-2222-2222-222222222222"}'
+```
+
+(ces deux UUID sont ceux du jeu de données de démonstration, `02-seed.sql`)
+
+Attendu, exactement :
+```json
+{"status":"ok","seance_id":"<un-nouvel-uuid>","uf_id":"11111111-1111-1111-1111-111111111111","salle_id":"22222222-2222-2222-2222-222222222222","statut":"ouverte"}
+```
+
+**Note le `seance_id` retourné** — il sert à toutes les étapes suivantes.
+Variante d'erreur à tester :
+```bash
+curl -k -X POST https://localhost/api/seances -H "Content-Type: application/json" -d '{}'
+```
+Attendu : `400` avec `{"status":"error","message":"uf_id et salle_id sont obligatoires."}`
+
+```bash
+curl -k -X POST https://localhost/api/seances \
+  -H "Content-Type: application/json" \
+  -d '{"uf_id":"00000000-0000-0000-0000-000000000000","salle_id":"22222222-2222-2222-2222-222222222222"}'
+```
+Attendu : `400` avec `{"status":"error","message":"uf_id ou salle_id inconnu (aucune ligne correspondante en base)."}` (uf_id inexistant).
+
+**Vérification en base** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" -e "SELECT id, uf_id, salle_id, statut, date_ouverture FROM db_logs.seances;"
+```
+Attendu : la ligne correspondant au `seance_id` retourné par l'API, `statut = ouverte`.
+
+## 3. Connexion WebSocket et observation de la rotation
+
+Remplacer `<SEANCE_ID>` par la valeur obtenue en étape 2.
+
+```bash
+wscat -c "wss://localhost/api/ws/seances/<SEANCE_ID>" --no-check
+```
+
+(`--no-check` : équivalent du `-k` de `curl`, nécessaire pour la même raison
+que d'habitude — certificat local Caddy non approuvé par défaut, cf. Étape
+0.2/`TESTING.md`)
+
+Attendu **immédiatement** à la connexion, un premier message :
+```json
+{"type":"token","token":"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...."}
+```
+
+Puis **rien pendant 20 secondes**, puis un deuxième message du même format
+(nouveau jeton, nouveau `jti`). Laisser tourner au moins 45 secondes pour
+observer 2 à 3 rotations. Chronométrer approximativement l'écart entre deux
+messages : il doit être proche de 20s (± latence réseau/traitement, quelques
+centaines de ms tout au plus).
+
+Laisser `wscat` ouvert et, dans un second terminal, vérifier les logs :
+```bash
+docker compose logs -f backend
+```
+Attendu : une ligne `[qrBroadcaster] Formateur connecte : seance=<SEANCE_ID> salle=22222222-...` à la connexion.
+
+## 4. Vérification du contenu et de la signature d'un jeton
+
+Copier un des jetons reçus (la valeur du champ `"token"`, sans les guillemets)
+et le décoder tel quel sur [jwt.io](https://jwt.io) (décodage uniquement,
+aucune donnée sensible n'est envoyée par ce site — le décodage se fait dans
+le navigateur) : la partie payload doit afficher exactement 4 champs,
+`session_id`, `salle_id`, `jti`, `iat`, `exp` (5 en comptant `iat`/`exp`
+séparément).
+
+**Vérification de la signature en ligne de commande** (plus rigoureux que
+jwt.io, ne fait confiance qu'à ta propre clé publique locale) :
+
+```bash
+node -e "
+const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const publicKey = fs.readFileSync('keys/public.pem', 'utf8');
+const token = process.argv[1];
+const decoded = jwt.verify(token, publicKey, { algorithms: ['RS256'] });
+console.log(JSON.stringify(decoded, null, 2));
+console.log('exp - iat =', decoded.exp - decoded.iat, '(attendu : 25)');
+" "<COLLER_LE_TOKEN_ICI>"
+```
+
+(nécessite `jsonwebtoken` installé quelque part accessible — depuis
+`backend/`, où il est déjà une dépendance, fonctionne directement)
+
+Attendu : le JSON du payload s'affiche sans erreur (`jwt.verify` lève une
+exception si la signature est invalide), et `exp - iat = 25` exactement.
+
+**Test négatif — altération détectée** :
+```bash
+node -e "
+const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const publicKey = fs.readFileSync('keys/public.pem', 'utf8');
+const token = process.argv[1] + 'X'; // alteration triviale
+try {
+  jwt.verify(token, publicKey, { algorithms: ['RS256'] });
+  console.log('ECHEC : aurait du etre rejete');
+} catch (e) {
+  console.log('OK, rejet attendu :', e.message);
+}
+" "<COLLER_LE_TOKEN_ICI>"
+```
+Attendu : `OK, rejet attendu : invalid signature` (ou message équivalent).
+
+## 5. Fermeture de connexion et nettoyage de l'intervalle
+
+Dans `wscat`, `Ctrl+C` pour fermer la connexion. Vérifier immédiatement après :
+```bash
+docker compose logs backend | tail -5
+```
+Attendu : une ligne `[qrBroadcaster] Rotation arretee pour la seance <SEANCE_ID> (deconnexion formateur).`
+
+**Preuve qu'il n'y a pas de fuite** : rouvrir puis refermer `wscat` sur la
+même séance 3-4 fois de suite, rapidement. Chaque ouverture doit produire
+exactement une ligne `Formateur connecte`, chaque fermeture exactement une
+ligne `Rotation arretee`. Laisser passer 30 secondes après la dernière
+fermeture puis vérifier qu'aucun nouveau message `[qrBroadcaster]` n'apparaît
+dans les logs — un intervalle mal nettoyé continuerait à logguer/générer des
+jetons même sans connexion active.
+
+## 6. Cas d'erreur : séance inexistante ou clôturée
+
+```bash
+wscat -c "wss://localhost/api/ws/seances/00000000-0000-0000-0000-000000000000" --no-check
+```
+Attendu : la connexion est immédiatement refusée (`wscat` affiche une erreur
+du type `error: Unexpected server response: 404`), aucun message `token` n'est
+jamais reçu.
+
+## Critère de succès global — Étape 2
+
+Validée si et seulement si : `POST /api/seances` crée bien une ligne en base
+et retourne son `id` (section 2), la connexion WebSocket reçoit un jeton
+immédiatement puis un nouveau toutes les ~20s (section 3), la signature de
+chaque jeton est vérifiable avec la seule clé publique et `exp - iat = 25`
+exactement (section 4), et l'intervalle de rotation s'arrête proprement à la
+déconnexion sans laisser de trace résiduelle dans les logs (section 5).
+
+---
+
+# Stratégie de test automatisé (Jest/Supertest) et CI
+
+Ce protocole complète (il ne remplace pas) les tests manuels des sections
+précédentes. Les tests automatisés couvrent la logique déjà validée à la
+main aux Étapes 1 et 2 — les rejouer à chaque `push` est tout l'intérêt de
+cette section.
+
+## 1. Lancer les tests en local
+
+Prérequis : `docker compose up -d` déjà exécuté (MySQL doit être joignable
+pour `health.test.js`), et `keys/private.pem`/`keys/public.pem` déjà générés
+(`./generate_keys.sh`, Étape 0.1).
+
+```bash
+cd backend
+npm install
+npm test
+```
+
+**Avant tout `git push` touchant `backend/package.json` ou
+`backend/package-lock.json`**, valider en plus que `npm ci` (la commande
+réellement utilisée par la CI, section 3) réussit à partir d'un
+`node_modules` propre :
+```bash
+rm -rf node_modules
+npm ci
+```
+Contrairement à `npm install`, `npm ci` n'accepte aucun écart entre
+`package.json` et `package-lock.json` — c'est un test de synchronisation du
+lockfile, pas juste une installation. Le faire en local avant de pousser
+évite de découvrir la désynchronisation seulement après un aller-retour de
+pipeline (cf. `ANALYSE_CODE.md`, section « Fix CI : package-lock.json
+désynchronisé »).
+
+Attendu, exactement (l'ordre des suites peut varier) :
+```
+PASS tests/tokenService.test.js
+  tokenService.generateSessionToken
+    ✓ le TTL du jeton est STRICTEMENT de 25 secondes (exp - iat)
+    ✓ le payload contient un identifiant unique a usage unique (le "nonce" du cahier des charges, implemente comme revendication JWT standard "jti")
+    ✓ deux jetons generes successivement ont des jti distincts (pas de reutilisation de nonce)
+    ✓ le payload contient exactement les session_id et salle_id fournis
+    ✓ la verification echoue si on force HS256 avec la cle publique comme secret (anti algorithm-confusion)
+    ✓ leve une erreur explicite si sessionId ou salleId est manquant
+    ✓ rotation (20s) et TTL (25s) respectent le recouvrement de 5s acte lors de la revue de coherence
+
+PASS tests/health.test.js
+  GET /api/health
+    ✓ repond 200, sante applicative pure sans dependance a la base
+  GET /api/db-health
+    ✓ repond 200 et confirme la connexion + le schema initialise avec le seed attendu
+
+Test Suites: 2 passed, 2 total
+Tests:       9 passed, 9 total
+```
+
+**Si `health.test.js` échoue avec `Expected: 200, Received: 500`** : MySQL
+n'est pas joignable depuis ta machine avec les variables d'environnement
+actuelles. Vérifier `docker compose ps` (le service `mysql` doit être
+`healthy`) et que les variables `MYSQL_*` de ton shell (ou d'un `.env`
+chargé) correspondent à celles du conteneur.
+
+**Aucun avertissement de ce type ne doit apparaître** :
+```
+Jest has detected the following 1 open handle potentially keeping Jest from exiting
+```
+S'il apparaît, un `pool.end()`/nettoyage manque quelque part — signaler,
+ne pas ignorer (c'est précisément ce que `detectOpenHandles: true` est
+configuré pour révéler, cf. `jest.config.js`).
+
+## 2. Vérifier que le test attrape vraiment la règle des 25 secondes
+
+Modifier temporairement `TOKEN_TTL_SECONDS` dans
+`backend/src/services/tokenService.js` (par exemple `20` au lieu de `25`),
+relancer `npm test` :
+```bash
+npm test -- tokenService.test.js
+```
+Attendu : le test `le TTL du jeton est STRICTEMENT de 25 secondes` échoue
+explicitement (`Expected: 25, Received: 20`). **Remettre la valeur à `25`
+immédiatement après ce test** (ne jamais laisser cette modification, elle
+casserait RF-04). Cette manipulation ponctuelle prouve que le test protège
+réellement la règle métier, pas seulement qu'il s'exécute sans erreur.
+
+## 3. Déclencher la pipeline GitLab CI
+
+Après un `git push` vers `dev` ou `main`, ou l'ouverture d'une Merge
+Request : ouvrir l'onglet **CI/CD > Pipelines** du projet GitLab. Une
+pipeline avec un seul job, `test_backend`, doit se déclencher automatiquement.
+
+**Étapes attendues dans les logs du job** (accessible en cliquant sur le
+job) :
+```
+$ apt-get update -qq && apt-get install -y -qq default-mysql-client
+$ ./generate_keys.sh
+Génération de la clé privée RSA 2048 bits (RS256)...
+...
+$ En attente de MySQL... (tentative 1/30)     [ou directement OK si rapide]
+$ mysql -h "$MYSQL_HOST" -u root -p"$MYSQL_ROOT_PASSWORD" < database/01-schema.sql
+$ mysql -h "$MYSQL_HOST" -u root -p"$MYSQL_ROOT_PASSWORD" < database/02-seed.sql
+$ bash database/03-privileges.sh
+03-privileges.sh : privileges mis en place avec succes !
+$ cd backend
+$ npm ci
+$ npm test
+...
+Test Suites: 2 passed, 2 total
+Tests:       9 passed, 9 total
+```
+Statut final du job : ✅ vert (`passed`).
+
+**Si le job échoue à l'étape `mysqladmin ping` (boucle des 30 tentatives
+épuisée)** : le service `mysql:8.0` n'a pas démarré à temps — relancer le
+job manuellement (bouton "Retry") ; si l'échec persiste, vérifier dans les
+paramètres du runner GitLab que les services Docker sont autorisés.
+
+**Si le job échoue à `mysql -h "$MYSQL_HOST" ... < database/01-schema.sql`**
+avec une erreur d'authentification : vérifier que la ligne `command:
+["--default-authentication-plugin=mysql_native_password"]` est bien présente
+sous le service `mysql:8.0` dans `.gitlab-ci.yml`.
+
+**Si le job échoue à l'étape `npm ci` avec `Missing: <paquet>@<version>
+from lock file`** : `backend/package-lock.json` n'est plus synchronisé avec
+`backend/package.json` (typiquement après une modification des dépendances
+committée sans revalidation locale). Corriger en local — jamais en éditant
+le lockfile à la main :
+```bash
+cd backend
+rm -rf node_modules package-lock.json
+npm install
+rm -rf node_modules && npm ci   # doit reussir sans aucune re-resolution
+```
+puis committer le `package-lock.json` régénéré. Voir `ANALYSE_CODE.md`,
+section « Fix CI : package-lock.json désynchronisé », pour le détail de
+cette classe d'incident et pourquoi `npm ci` est volontairement strict.
+
+## Critère de succès global — Stratégie de test et CI
+
+Validée si et seulement si : `npm test` en local produit 9/9 tests réussis
+sans avertissement de handle ouvert (section 1), le test du TTL échoue
+explicitement quand la constante est altérée puis repasse au vert une fois
+restaurée (section 2), et la pipeline GitLab CI s'exécute automatiquement
+sur un `push` vers `dev`/`main` ou l'ouverture d'une Merge Request, avec les
+9 mêmes tests validés contre un MySQL entièrement provisionné par les
+scripts du projet (section 3).
+
+---
+
+# Étape 3 — Cascade de validation d'un scan (RF-12)
+
+Ce protocole suppose l'Étape 2 déjà validée (jeton RS256, WebSocket) et
+`docker compose up -d --build` déjà exécuté avec le code de cette étape.
+Ferme V1 (jeton expiré) et V4 (rejeu) — le géofencing et l'authentification
+par appareil (RF-07/RF-13) ne sont volontairement PAS couverts ici (cf.
+`ANALYSE_CODE.md`, section Étape 3, « Objectif et périmètre exact »).
+
+## 1. Redémarrage avec le nouveau code
+
+```bash
+git pull origin dev
+docker compose up -d --build
+docker compose logs backend | tail -5
+```
+Attendu : `Backend demarre sur le port 3000`, aucune erreur.
+
+## 2. Créer une séance et générer un jeton valide
+
+```bash
+curl -k -X POST https://localhost/api/seances \
+  -H "Content-Type: application/json" \
+  -d '{"uf_id":"11111111-1111-1111-1111-111111111111","salle_id":"22222222-2222-2222-2222-222222222222"}'
+```
+Noter le `seance_id` retourné (`<SEANCE_ID>` ci-dessous).
+
+Plutôt que d'ouvrir une connexion WebSocket et copier un jeton au vol
+(Étape 2, section 3), générer directement un jeton pour cette séance en
+exécutant le même code que le backend, **à l'intérieur du conteneur**
+(mêmes clés, mêmes variables d'environnement) :
+```bash
+docker compose exec backend node -e "
+const { generateSessionToken } = require('./src/services/tokenService');
+console.log(generateSessionToken('<SEANCE_ID>', '22222222-2222-2222-2222-222222222222'));
+"
+```
+Attendu : une chaîne JWT compacte (`eyJhbGciOiJSUzI1NiIs...`) s'affiche.
+Copier cette valeur (`<JETON>` ci-dessous) — elle sert aux sections 3 à 5.
+
+## 3. Cas nominal — scan accepté
+
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<JETON>","etudiant_id":"33333333-3333-3333-3333-333333333331"}'
+```
+Attendu, exactement (le `scan_id` change à chaque exécution) :
+```json
+{"status":"ok","scan_id":"<uuid>","seance_id":"<SEANCE_ID>","etudiant_id":"33333333-3333-3333-3333-333333333331","resultat":"valide"}
+```
+Code HTTP : `201`.
+
+**Vérification en base** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, seance_id, etudiant_id, jti, resultat FROM db_logs.scans WHERE seance_id='<SEANCE_ID>';"
+```
+Attendu : une ligne, `resultat = valide`.
+
+## 4. Cas d'échec V4 — rejeu du même jeton
+
+Rejouer **exactement la même commande** que la section 3, avec le même `<JETON>` :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<JETON>","etudiant_id":"33333333-3333-3333-3333-333333333331"}'
+```
+Attendu, exactement :
+```json
+{"status":"error","code":"REJEU_DETECTE","message":"Ce jeton a deja ete utilise par cet etudiant (rejeu detecte)."}
+```
+Code HTTP : `409`. Vérifier qu'**aucune deuxième ligne** n'a été ajoutée en
+base (rejouer la requête SQL de la section 3 : toujours une seule ligne).
+
+**Variante — même jeton, étudiant différent** (le rejeu est bloqué par
+étudiant, pas globalement — cf. `UNIQUE(jti, etudiant_id)` et non
+`UNIQUE(jti)` seul) :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<JETON>","etudiant_id":"33333333-3333-3333-3333-333333333332"}'
+```
+Attendu : `201` (accepté — un autre étudiant scannant le même jeton affiché
+dans la même salle est un usage légitime, pas un rejeu).
+
+## 5. Cas d'échec V1 — jeton expiré
+
+Générer un jeton dont l'expiration est déjà dépassée (même clé privée,
+`expiresIn` négatif) :
+```bash
+docker compose exec backend node -e "
+const fs = require('fs');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const privateKey = fs.readFileSync(process.env.JWT_PRIVATE_KEY_PATH, 'utf8');
+console.log(jwt.sign(
+  { session_id: '<SEANCE_ID>', salle_id: '22222222-2222-2222-2222-222222222222' },
+  privateKey,
+  { algorithm: 'RS256', expiresIn: '-10s', jwtid: crypto.randomUUID() }
+));
+"
+```
+Puis :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<JETON_EXPIRE>","etudiant_id":"33333333-3333-3333-3333-333333333333"}'
+```
+Attendu, exactement :
+```json
+{"status":"error","code":"JETON_EXPIRE","message":"Jeton expire : rescannez le QR code actuellement affiche."}
+```
+Code HTTP : `401`. Alternative en conditions réelles (sans forcer `expiresIn`) :
+générer un jeton via la section 2, attendre 26 secondes réelles, puis
+soumettre — même résultat attendu.
+
+## 6. Cas d'échec — signature invalide et champs manquants
+
+**Jeton altéré** (même principe qu'Étape 2, section 4 — une modification
+triviale de la chaîne invalide la signature) :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<JETON>X","etudiant_id":"33333333-3333-3333-3333-333333333331"}'
+```
+Attendu : `401` avec `"code":"JETON_INVALIDE"`.
+
+**Champs manquants** :
+```bash
+curl -k -X POST https://localhost/api/scans -H "Content-Type: application/json" -d '{}'
+```
+Attendu : `400` avec `{"status":"error","message":"jeton et etudiant_id sont obligatoires."}`
+
+## 7. Tests automatisés (Jest/Supertest)
+
+**Commande exacte** (à l'intérieur du conteneur, jamais sur la machine hôte
+directement — cf. section 9 ci-dessous pour ce qui se passe si tu oublies) :
+```bash
+docker compose exec backend npm test -- scan.test.js
+```
+Attendu : 6 tests verts (nominal, V1, signature invalide, V4, double scan,
+champs manquants) — cf. `backend/tests/scan.test.js`. Ce fichier est détecté
+automatiquement par `jest.config.js` (`testMatch: ['**/tests/**/*.test.js']`,
+aucune modification nécessaire) et s'exécute donc aussi bien en local que
+dans la pipeline GitLab CI (`.gitlab-ci.yml`, job `test_backend`, également
+inchangé) — vérifier sur l'onglet **CI/CD > Pipelines** de GitLab qu'un
+nouveau pipeline déclenché par ce push affiche bien `15 passed, 15 total`
+dans les logs du job.
+
+## 8. Règle métier de présence — double scan avec deux jetons différents
+
+Suite de la section 2 : générer un **second** jeton pour la même séance
+(nouvelle rotation ou nouvel appel manuel) :
+```bash
+docker compose exec backend node -e "
+const { generateSessionToken } = require('./src/services/tokenService');
+console.log(generateSessionToken('<SEANCE_ID>', '22222222-2222-2222-2222-222222222222'));
+"
+```
+Avec un étudiant qui n'a **pas encore** scanné pour cette séance (par
+exemple `33333333-3333-3333-3333-333333333334`, en supposant les sections 3
+et 4 déjà exécutées avec d'autres étudiants) :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<PREMIER_JETON>","etudiant_id":"33333333-3333-3333-3333-333333333334"}'
+```
+Attendu : `201`. Puis, avec le **second** jeton (différent, `jti` différent,
+mais lui aussi parfaitement valide) et le **même** étudiant :
+```bash
+curl -k -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" \
+  -d '{"jeton":"<SECOND_JETON>","etudiant_id":"33333333-3333-3333-3333-333333333334"}'
+```
+Attendu, exactement :
+```json
+{"status":"error","code":"DOUBLE_SCAN","message":"Presence deja validee pour cette seance."}
+```
+Code HTTP : `409`. **Point clé à vérifier** : ce rejet n'est pas un rejeu
+(les deux jetons ont des `jti` différents — vérifiable en les décodant sur
+[jwt.io](https://jwt.io)) — c'est la règle métier d'unicité de présence
+(`uq_scan_presence`, distincte de `uq_scan_nonce`) qui agit ici, cf.
+`ANALYSE_CODE.md`.
+
+**Si ce test échoue** (le second scan est accepté au lieu d'être rejeté) :
+le volume `mysql_data` a probablement été initialisé **avant** ce correctif
+et ne contient donc pas encore la contrainte `uq_scan_presence` — cf.
+section 9 (dépannage) pour la procédure de reset.
+
+## 9. Robustesse — `db.js` refuse de démarrer sans les variables MySQL
+
+Simuler l'erreur qui a motivé ce correctif (lancer le code hors de Docker,
+sans variables d'environnement) :
+```bash
+cd backend
+env -i PATH="$PATH" node -e "require('./src/config/db.js')"
+```
+Attendu, exactement (et non plus une erreur MySQL du type `Access denied
+for user ''@'...'`) :
+```
+Error: Variables d'environnement DB manquantes (MYSQL_HOST, MYSQL_DATABASE, MYSQL_USER, MYSQL_PASSWORD) -- Executez-vous le code dans Docker ? ...
+```
+Le process se termine immédiatement (code de sortie non nul), avant toute
+tentative de connexion réseau à MySQL.
+
+## Critère de succès global — Étape 3
+
+Validée si et seulement si : le scan nominal (section 3) est accepté et
+visible en base ; le rejeu exact du même jeton par le même étudiant
+(section 4) est rejeté en 409 `REJEU_DETECTE` sans créer de deuxième ligne,
+tandis que le même jeton par un étudiant différent est accepté ; un jeton
+expiré (section 5) est rejeté en 401 avec le code `JETON_EXPIRE` ; un jeton
+altéré (section 6) est rejeté en 401 avec le code `JETON_INVALIDE` ; deux
+jetons différents et valides pour le même étudiant/même séance (section 8)
+donnent `201` puis `409 DOUBLE_SCAN` ; `db.js` refuse de démarrer avec un
+message explicite en l'absence des variables `MYSQL_*` critiques (section
+9) ; et `docker compose exec backend npm test` (section 7) confirme ces 6
+scénarios en automatisé, aussi bien en local qu'en CI (`15 passed, 15
+total`).
+
+---
+
+# Étape 4 — Enrôlement cryptographique des appareils
+
+Ce protocole suppose l'Étape 3 déjà validée. Nouveau prérequis : après
+`git pull origin dev`, comme `01-schema.sql` a changé (colonne
+`info_appareil`), un volume déjà initialisé doit être recréé :
+```bash
+docker compose down -v
+docker compose up -d --build
+docker compose ps
+```
+Attendu : **quatre** conteneurs désormais (`presence_mysql`,
+`presence_backend`, `presence_frontend`, `presence_proxy`), tous `Up`
+(`presence_mysql` en `healthy` après quelques secondes).
+
+## 1. Le frontend répond bien derrière Caddy, en HTTPS
+
+```bash
+curl -k -o /dev/null -s -w "%{http_code}
+" https://localhost/
+```
+Attendu : `200`. Puis, dans un navigateur (pas seulement `curl` — le test
+suivant a besoin d'un vrai moteur JS) : ouvrir `https://localhost/`.
+Avertissement de certificat attendu, comme depuis l'Étape 0.2 (accepter
+pour continuer). La page « Enrôlement d'appareil » doit s'afficher, avec un
+menu déroulant d'étudiants de démonstration, un champ de description
+d'appareil, et un bouton « Générer une clé et s'enrôler ».
+
+**Vérifier que le rechargement à chaud (HMR) fonctionne** (preuve que
+`vite.config.js`/`hmr.clientPort` est correctement traversé par Caddy) :
+modifier un texte dans `frontend/src/App.jsx`, enregistrer — la page doit se
+mettre à jour dans le navigateur **sans rechargement complet**, en moins
+d'une seconde. Si la page se recharge entièrement (ou pas du tout), inspecter
+la console : une erreur de connexion WebSocket vers un port différent de 443
+indique un problème de configuration HMR, pas un bug fonctionnel de
+l'enrôlement lui-même.
+
+## 2. Enrôlement via l'interface
+
+Choisir un étudiant dans le menu déroulant, cliquer sur « Générer une clé et
+s'enrôler ». Attendu : après un court instant, un bloc de résultat vert
+s'affiche avec un JSON du type :
+```json
+{
+  "status": "ok",
+  "appareil_id": "<uuid>",
+  "etudiant_id": "33333333-3333-3333-3333-333333333331",
+  "statut": "actif",
+  "appareil_precedent_revoque": false
+}
+```
+Cliquer une seconde fois sur le bouton (même étudiant) : `appareil_precedent_revoque`
+doit désormais valoir `true` — preuve que la règle RF-09 (un seul appareil
+actif) fonctionne de bout en bout, pas seulement en test automatisé.
+
+## 3. Vérification dans la console du navigateur (protocole manuel bas niveau)
+
+Ouvrir les outils de développement (F12) sur `https://localhost/`, onglet
+Console. `CryptoService` est exposé sur `window` en mode développement :
+```js
+const paire = await window.CryptoService.generateAndStoreKeyPair();
+paire.privateKey.extractable   // attendu : false
+paire.publicKey.extractable    // attendu : true
+const pem = await window.CryptoService.exportPublicKey();
+console.log(pem);              // attendu : "-----BEGIN PUBLIC KEY-----
+...."
+```
+**Test négatif attendu** (preuve directe, dans le vrai navigateur, que la
+clé privée ne peut pas être exportée) :
+```js
+await window.crypto.subtle.exportKey('pkcs8', paire.privateKey);
+```
+Attendu : une exception `InvalidAccessError` (`"key is not extractable"`),
+levée par le moteur du navigateur lui-même — pas par du code applicatif.
+
+## 4. Vérification dans IndexedDB (onglet Application)
+
+Dans les outils de développement : onglet **Application** (Chrome/Edge) ou
+**Stockage** (Firefox) → **IndexedDB** → `presence-appareil-db` →
+`cles-cryptographiques`. Attendu : deux entrées,
+`appareil-cle-privee` et `appareil-cle-publique`, chacune affichée comme un
+objet `CryptoKey` (pas une chaîne, pas un JSON lisible — c'est attendu : le
+navigateur affiche un objet opaque pour une clé non exportable). Recharger
+entièrement la page (`F5`) puis relancer la commande de la section 3
+(`window.CryptoService.exportPublicKey()`) sans regénérer de nouvelle
+paire : le même PEM doit être retourné, preuve que la clé a bien persisté
+d'un chargement de page à l'autre.
+
+## 5. Vérification en base MySQL
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}"   -e "SELECT id, etudiant_id, statut, info_appareil, date_enrolement, date_revocation FROM db_logs.appareils_enroles WHERE etudiant_id='33333333-3333-3333-3333-333333333331'\G"
+```
+Attendu : autant de lignes que d'enrôlements effectués pour cet étudiant
+(section 2), **une seule** avec `statut: actif` (la plus récente), toutes
+les autres `statut: revoque` avec `date_revocation` renseignée. La colonne
+`cle_publique` (non affichée ci-dessus pour la lisibilité, à inspecter
+séparément si besoin) doit contenir un bloc PEM `-----BEGIN PUBLIC
+KEY-----`.
+
+**Vérifier qu'il n'existe jamais deux lignes actives simultanément** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}"   -e "SELECT etudiant_id, COUNT(*) AS nb_actifs FROM db_logs.appareils_enroles WHERE statut='actif' GROUP BY etudiant_id HAVING nb_actifs > 1;"
+```
+Attendu : **aucune ligne retournée** (la contrainte `uq_appareil_actif`
+rend ce cas structurellement impossible, quel que soit le nombre
+d'enrôlements effectués).
+
+## 6. Tests automatisés
+
+```bash
+docker compose exec backend npm test -- enrolement.test.js
+```
+Attendu : 4 tests verts (premier enrôlement, remplacement RF-09, champs
+manquants, `etudiant_id` inconnu). `docker compose exec backend npm test`
+(sans filtre) doit désormais afficher `19 passed, 19 total` sur les 4
+suites (`tokenService`, `health`, `scan`, `enrolement`).
+
+## Critère de succès global — Étape 4
+
+Validée si et seulement si : les quatre conteneurs démarrent proprement
+après un `docker compose down -v` (section 0) ; `https://localhost/` sert
+la page React (section 1), HMR fonctionnel ; un enrôlement réussi puis un
+second pour le même étudiant démontrent RF-09 dans l'interface (section 2)
+et en base (section 5, jamais deux actifs simultanés) ; la console du
+navigateur confirme `extractable: false` sur la clé privée et l'échec de
+son export (section 3) ; IndexedDB contient bien les deux clés et la clé
+privée persiste entre rechargements (section 4) ; et
+`docker compose exec backend npm test` confirme `23 passed, 23 total`
+(section 6 — 19 tests à l'Étape 4, 23 depuis l'Étape 5 ; ce critère est
+donc validé par le total courant).
+
+---
+
+# Étape 5 — Signature par l'appareil et boucle de vérification
+
+Ce protocole suppose l'Étape 4 validée (appareil enrôlé). Aucun changement de
+schéma à cette étape : **pas besoin de `docker compose down -v`**, un simple
+`git pull` + rebuild suffit.
+
+```bash
+git pull origin dev
+docker compose up -d --build
+docker compose ps
+```
+
+## 1. Parcours complet dans l'interface (le plus rapide)
+
+Ouvrir `https://localhost/`. La page comporte désormais **deux sections**
+sous le sélecteur d'étudiant.
+
+**Étape 1 — enrôler l'appareil** (si ce n'est pas déjà fait pour l'étudiant
+sélectionné) : section « 1 · Enrôlement de l'appareil » → *Générer une clé et
+s'enrôler*. Attendu : bloc vert avec `"statut": "actif"`.
+
+**Étape 2 — ouvrir une séance** : section « 2 · Simulation de scan » →
+*Ouvrir une séance de test*. Attendu : une pastille verte
+« WebSocket connecté » avec l'identifiant de séance, et le champ « Jeton de
+séance (JWT) » se remplit **automatiquement** en moins d'une seconde. Laisser
+la page ouverte 25 s : le jeton doit être **remplacé** par un nouveau
+(rotation toutes les 20 s, RF-05).
+
+**Étape 3 — signer et envoyer** : *Signer et envoyer*. Attendu, bloc vert :
+```json
+{
+  "status": "ok",
+  "scan_id": "<uuid>",
+  "seance_id": "<uuid>",
+  "etudiant_id": "33333333-3333-3333-3333-333333333331",
+  "resultat": "valide"
+}
+```
+Ce seul parcours valide la chaîne entière : jeton signé RS256 par le serveur
+→ diffusé en WebSocket → signé ECDSA par l'appareil → vérifié par le backend
+avec la clé publique lue en base.
+
+## 2. Cas d'échec à vérifier dans l'interface
+
+**Rejeu (V4)** : recliquer sur *Signer et envoyer* sans attendre de nouveau
+jeton. Attendu : `[REJEU_DETECTE] Ce jeton a deja ete utilise…` (409).
+
+**Double scan** : attendre la rotation (nouveau jeton, `jti` différent), puis
+*Signer et envoyer*. Attendu : `[DOUBLE_SCAN] Presence deja validee pour
+cette seance.` (409) — le même étudiant ne peut valider qu'une présence par
+séance, même avec un jeton différent et correctement signé.
+
+**Signature d'un autre appareil (le cœur de l'Étape 5)** : changer
+l'étudiant dans le sélecteur du haut **sans ré-enrôler** — la clé présente
+dans IndexedDB reste celle de l'étudiant précédent — puis *Signer et
+envoyer* avec un jeton frais. Attendu :
+`[SIGNATURE_APPAREIL_INVALIDE] La signature de l'appareil est invalide…`
+(401). C'est exactement le scénario « un tiers relaie le jeton depuis son
+propre téléphone ».
+
+**Aucun appareil enrôlé** : sélectionner un étudiant qui n'a jamais été
+enrôlé (`Driss El Amrani` si les tests précédents ne l'ont pas utilisé), et
+*Signer et envoyer*. Attendu :
+`[AUCUN_APPAREIL_ENROLE] Aucun appareil actif n'est enrole…` (403 — et non
+401 : c'est l'état du compte qui bloque, pas l'authentification).
+
+## 3. Vérification bas niveau dans la console du navigateur
+
+```js
+// Le jeton courant est visible dans le champ de la section 2 ; on le reprend ici.
+const jwt = document.getElementById('jeton').value.trim();
+const signature = await window.CryptoService.signData(jwt);
+console.log('Signature Base64 :', signature);
+// Preuve du format BRUT r||s (IEEE P1363) et non DER :
+console.log('Taille décodée :', atob(signature).length, 'octets (attendu : 64)');
+```
+Attendu : exactement **64 octets**. Une taille de ~70-72 octets indiquerait
+du DER — format que le backend rejette (cf. `ANALYSE_CODE.md`, Étape 5,
+« Le piège d'interopérabilité »).
+
+**Test négatif — signature altérée** :
+```js
+const signatureCassee = btoa(atob(signature).slice(0, 63) + '\x00');
+const r = await fetch('/api/scans', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    etudiant_id: '33333333-3333-3333-3333-333333333331',
+    jeton: jwt,
+    signature_appareil: signatureCassee,
+  }),
+});
+console.log(r.status, await r.json());
+```
+Attendu : `401` et `code: "SIGNATURE_APPAREIL_INVALIDE"`.
+
+## 4. Vérification en base
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT s.id, s.etudiant_id, s.resultat, s.horodatage, a.info_appareil
+      FROM db_logs.scans s
+      JOIN db_logs.appareils_enroles a
+        ON a.etudiant_id = s.etudiant_id AND a.statut = 'actif'
+      ORDER BY s.horodatage DESC LIMIT 5\G"
+```
+Attendu : les scans validés à la section 1, chacun rattaché à l'appareil
+actif de son étudiant. **Aucune ligne ne doit exister** pour les tentatives
+rejetées des sections 2 et 3 (signature invalide, aucun appareil) — preuve
+que la vérification de signature intervient bien **avant** toute écriture.
+
+## 5. Tests automatisés
+
+```bash
+docker compose exec backend npm test -- scan.test.js
+```
+Attendu : 10 tests verts, dont les 4 spécifiques à l'Étape 5 (signature d'un
+autre appareil, signature syntaxiquement invalide, signature non rejouable
+sur un autre jeton, étudiant sans appareil enrôlé).
+
+```bash
+docker compose exec backend npm test
+```
+Attendu : `23 passed, 23 total` sur 4 suites.
+
+## Critère de succès global — Étape 5
+
+Validée si et seulement si : le parcours complet de la section 1 aboutit à
+`resultat: "valide"` avec un jeton reçu automatiquement par WebSocket ; les
+quatre cas d'échec de la section 2 renvoient bien `REJEU_DETECTE` (409),
+`DOUBLE_SCAN` (409), `SIGNATURE_APPAREIL_INVALIDE` (401) et
+`AUCUN_APPAREIL_ENROLE` (403) ; la signature mesurée dans la console fait
+exactement 64 octets (section 3) ; aucune ligne n'est écrite en base pour
+les tentatives rejetées (section 4) ; et
+`docker compose exec backend npm test` confirme `23 passed, 23 total`
+(section 5).
+
+---
+
+# Étape 6 — Lecteur de QR code (caméra)
+
+Aucun changement de schéma : pas de `docker compose down -v` nécessaire.
+Le conteneur frontend doit en revanche réinstaller ses dépendances
+(`jsqr`, `qrcode.react`, `vitest`) :
+
+```bash
+git pull origin dev
+docker compose up -d --build
+docker compose ps
+```
+
+## 1. Le piège du test sur téléphone — à lire AVANT d'essayer
+
+Tester le scanner avec un vrai téléphone se heurte à deux obstacles réels,
+indépendants du code :
+
+1. **`localhost` ne désigne pas ton PC depuis le téléphone.** Il faut
+   l'adresse LAN de la machine (`ipconfig` sous Windows), donc une URL du
+   type `https://192.168.1.42/`.
+2. **Le certificat de Caddy n'est pas reconnu par le téléphone.** `tls
+   internal` émet un certificat pour `localhost`, pas pour cette IP, et son
+   autorité est inconnue du téléphone. Le navigateur mobile bloquera — et
+   comme `getUserMedia` exige un contexte sécurisé, **la caméra sera refusée**
+   même en acceptant l'avertissement, dans plusieurs navigateurs.
+
+**Le test recommandé n'utilise donc qu'un seul poste** : afficher le QR code
+à l'écran (section 2 de l'interface) et le scanner avec **la webcam du même
+ordinateur** (section 3). `https://localhost` est un contexte sécurisé
+valide, le certificat est déjà accepté, et la chaîne testée est
+rigoureusement la même. C'est aussi la raison pour laquelle `facingMode` est
+en contrainte souple : sur un portable, la webcam frontale est acceptée.
+
+Pour un vrai test mobile ultérieur, il faudra soit un certificat valide sur
+un nom de domaine réel, soit un tunnel HTTPS public — hors périmètre de ce
+prototype.
+
+## 2. Parcours nominal (un seul poste)
+
+Ouvrir `https://localhost/`.
+
+1. **Section 1** — sélectionner un étudiant, *Générer une clé et s'enrôler*.
+   Attendu : bloc vert, `"statut": "actif"`.
+2. **Section 2** — *Ouvrir une séance de test*. Attendu : pastille verte
+   « WebSocket connecté », puis **un QR code s'affiche**. Le laisser tourner
+   ~25 s : le QR doit **changer visiblement** (nouveau jeton, RF-05).
+3. **Section 3** — *Scanner le QR code*. Attendu, dans l'ordre :
+   - une demande d'autorisation caméra du navigateur ;
+   - pendant l'attente, un **spinner** et le texte « Accès à la caméra… » ;
+   - après autorisation, le **flux vidéo** avec fenêtre de visée, coins
+     blancs, pourtour assombri, ligne verte de balayage et le texte
+     « Placez le QR code au centre » ;
+   - présenter l'écran affichant le QR devant la webcam → **écran vert
+     immédiat « QR code détecté »**, la caméra se coupe ;
+   - puis le bloc vert « Présence validée » avec `"resultat": "valide"`.
+
+**Vérification anti-fuite, à faire systématiquement** : dès l'écran vert, le
+**voyant de la webcam doit s'éteindre**. S'il reste allumé, le flux n'a pas
+été libéré — c'est exactement le défaut que
+`src/components/QRScanner.test.jsx` est chargé de prévenir.
+
+Refaire le test en cliquant *Fermer le scanner* au lieu de scanner : le
+voyant doit s'éteindre là aussi. Puis une troisième fois en fermant **pendant
+que la demande de permission est encore affichée** — c'est le cas de course
+le plus délicat, celui où la caméra peut rester allumée silencieusement.
+
+## 3. Refus de permission
+
+**Chrome / Edge** : icône à gauche de la barre d'adresse → *Paramètres du
+site* → *Caméra* → **Bloquer**. Recharger, puis *Scanner le QR code*.
+Attendu : écran sombre, icône d'alerte rouge, et le message
+« Accès à la caméra refusé. Autorisez-le dans les paramètres du site… ».
+Aucun code technique brut (`NotAllowedError`) ne doit apparaître.
+
+**Firefox** : bouton d'informations du site → *Autorisations* → *Utiliser la
+caméra* → **Bloquer**.
+
+Remettre ensuite sur *Autoriser*, recharger, vérifier que le scanner
+redémarre normalement.
+
+**Absence de caméra** : sur une machine sans webcam, le message attendu est
+différent — « Aucune caméra détectée sur cet appareil. Utilisez la saisie
+manuelle du jeton. » Les deux cas doivent rester distincts : ils appellent
+des actions opposées.
+
+## 4. Repli manuel
+
+Cliquer *Saisir le jeton manuellement (sans caméra)*, coller le JWT visible
+en section 2 (ou obtenu via la console), *Signer et envoyer*. Attendu :
+identique au parcours caméra. Ce chemin reste le seul moyen de reproduire
+volontairement un jeton expiré ou altéré (cf. Étape 5, section 2).
+
+## 5. Réduction des animations
+
+Activer la réduction des animations du système (Windows : *Paramètres →
+Accessibilité → Effets visuels → Effets d'animation* → désactivé), recharger,
+ouvrir le scanner. Attendu : la ligne de balayage et le spinner **ne sont pas
+animés** (`motion-safe:`), tout le reste fonctionne à l'identique.
+
+## 6. Tests automatisés
+
+```bash
+docker compose exec frontend npm test
+```
+Attendu : `5 passed` — dont « CAS CRITIQUE : démontage PENDANT que
+getUserMedia() est en attente ». Aucune caméra réelle n'est utilisée.
+
+```bash
+docker compose exec frontend npm run lint
+docker compose exec frontend npm run build
+docker compose exec backend npm test
+```
+Attendu : 0 erreur, build réussi, et `23 passed, 23 total` côté backend
+(non-régression : l'Étape 6 ne touche pas au backend).
+
+## Critère de succès global — Étape 6
+
+Validée si et seulement si : le QR s'affiche et se renouvelle en section 2 ;
+le scan par webcam aboutit à `"resultat": "valide"` (section 2) ; **le voyant
+de la caméra s'éteint** après un scan réussi, après une fermeture manuelle, et
+après une fermeture pendant la demande de permission ; un refus de permission
+affiche un message actionnable distinct de celui de l'absence de caméra
+(section 3) ; le repli manuel fonctionne (section 4) ; les animations sont
+désactivées en mode réduction de mouvement (section 5) ; et
+`docker compose exec frontend npm test` confirme `5 passed` (section 6).
+
+---
+
+# Étape 7a/7c — Authentification et identité issue de la session
+
+**Migration OBLIGATOIRE** : le schéma et le seed changent (tables
+`utilisateurs` et `sessions`, comptes de connexion). Un volume déjà
+initialisé ne les recevra pas.
+
+```bash
+git pull origin dev
+docker compose down -v
+docker compose up -d --build
+docker compose ps
+```
+
+## Comptes de démonstration
+
+> **Depuis l'Étape 11, il n'est plus nécessaire de saisir ces adresses.**
+> La page `/login` propose un bloc **« Accès rapide »** avec deux listes
+> déroulantes (formateurs, étudiants) alimentées directement par
+> `frontend/src/components/comptesDemo.js`, tenu en correspondance exacte
+> avec `02-seed.sql`. Ce bloc est absent des versions de production.
+
+| Email | Mot de passe | Rôle | Périmètre |
+|---|---|---|---|
+| `amara.diallo@example.org` | `Etudiant123!` | étudiant | — |
+| `bilal.ozturk@example.org` | `Etudiant123!` | étudiant | — |
+| `chiara.rossi@example.org` | `Etudiant123!` | étudiant | — |
+| `driss.elamrani@example.org` | `Etudiant123!` | étudiant | — |
+| `elena.petrova@example.org` | `Etudiant123!` | étudiant | — |
+| `farid.benali@example.org` | `Etudiant123!` | étudiant | — |
+| `gwendoline.moreau@example.org` | `Etudiant123!` | étudiant | — |
+| `hugo.vandenberghe@example.org` | `Etudiant123!` | étudiant | — |
+| `sophie.lambert@example.org` | `Formateur123!` | formateur | Architecture Logicielle, Développement Web |
+| `marc.dupont@example.org` | `Formateur123!` | formateur | Développement Web, Cybersécurité |
+| `nadia.cherif@example.org` | `Formateur123!` | formateur | **DevOps uniquement** |
+
+## 1. Connexion et cookie de session
+
+```bash
+curl -k -i -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"amara.diallo@example.org","mot_de_passe":"Etudiant123!"}'
+```
+Attendu : `200`, un en-tête `Set-Cookie` contenant **`HttpOnly`**,
+**`Secure`** et **`SameSite=Strict`**, et un corps JSON décrivant
+l'utilisateur. **Le jeton de session ne doit apparaître nulle part dans le
+corps** — uniquement dans le cookie.
+
+Pour la suite, conserver le cookie dans un fichier :
+```bash
+curl -k -c cookies.txt -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"amara.diallo@example.org","mot_de_passe":"Etudiant123!"}'
+curl -k -b cookies.txt https://localhost/api/auth/moi
+```
+Attendu : le second appel renvoie `200` avec `"role":"etudiant"`.
+
+## 2. Anti-énumération de comptes
+
+```bash
+curl -k -s -X POST https://localhost/api/auth/login -H "Content-Type: application/json" \
+  -d '{"email":"amara.diallo@example.org","mot_de_passe":"FAUX"}'
+echo
+curl -k -s -X POST https://localhost/api/auth/login -H "Content-Type: application/json" \
+  -d '{"email":"nexiste.pas@example.org","mot_de_passe":"FAUX"}'
+```
+Attendu : **exactement la même réponse** dans les deux cas (`401`,
+`IDENTIFIANTS_INVALIDES`, message identique). Comparer aussi les temps de
+réponse — ils doivent être du même ordre (~130 ms) :
+```bash
+curl -k -s -o /dev/null -w "compte existant  : %{time_total}s\n" -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" -d '{"email":"amara.diallo@example.org","mot_de_passe":"FAUX"}'
+curl -k -s -o /dev/null -w "compte inexistant: %{time_total}s\n" -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" -d '{"email":"nexiste.pas@example.org","mot_de_passe":"FAUX"}'
+```
+Un écart marqué (1 ms contre 130 ms) signalerait que le leurre ne fonctionne
+plus, et permettrait de déterminer quelles adresses possèdent un compte.
+
+## 3. Les routes protégées refusent l'accès sans session
+
+```bash
+curl -k -s -X POST https://localhost/api/scans -H "Content-Type: application/json" -d '{}'
+echo
+curl -k -s -X POST https://localhost/api/enrolements -H "Content-Type: application/json" -d '{}'
+```
+Attendu : `401` avec `"code":"NON_AUTHENTIFIE"` dans les deux cas.
+
+Avec un cookie inventé :
+```bash
+curl -k -s -X POST https://localhost/api/scans \
+  -H "Content-Type: application/json" -H "Cookie: presence_session=invente" -d '{}'
+```
+Attendu : `401` avec `"code":"SESSION_INVALIDE"`.
+
+## 4. Le formateur ne peut ni scanner ni enrôler
+
+```bash
+curl -k -c form.txt -s -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"sophie.lambert@example.org","mot_de_passe":"Formateur123!"}' > /dev/null
+curl -k -b form.txt -s -X POST https://localhost/api/enrolements \
+  -H "Content-Type: application/json" -d '{"public_key":"x"}'
+```
+Attendu : `403` avec `"code":"ROLE_INSUFFISANT"` — et non 401 : le formateur
+est bien authentifié, c'est son rôle qui ne l'autorise pas.
+
+## 5. L'usurpation par le corps de la requête ne fonctionne plus
+
+Le test central de l'Étape 7c. Connecté en tant qu'Amara, tenter d'enrôler
+un appareil au nom de Bilal :
+```bash
+curl -k -b cookies.txt -s -X POST https://localhost/api/enrolements \
+  -H "Content-Type: application/json" \
+  -d '{"public_key":"-----BEGIN PUBLIC KEY-----\nMFkw...\n-----END PUBLIC KEY-----\n",
+       "etudiant_id":"33333333-3333-3333-3333-333333333332"}'
+```
+Attendu : la réponse contient `"etudiant_id":"33333333-3333-3333-3333-333333333331"`
+(**Amara**, celle de la session) et **jamais** l'identifiant de Bilal. Le
+champ envoyé est silencieusement ignoré.
+
+## 6. La déconnexion invalide réellement la session
+
+```bash
+curl -k -b cookies.txt -s https://localhost/api/auth/moi | head -c 80; echo
+curl -k -b cookies.txt -s -X POST https://localhost/api/auth/logout; echo
+curl -k -b cookies.txt -s https://localhost/api/auth/moi
+```
+Attendu : `200`, puis `{"status":"ok"}`, puis **`401 SESSION_INVALIDE`** en
+rejouant le **même** cookie. C'est ce qu'un JWT auto-porteur ne permettrait
+pas : il resterait valide jusqu'à son expiration.
+
+## 7. Le jeton n'est pas stocké en clair
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, utilisateur_id, LEFT(jeton_hash,16) AS empreinte, date_expiration FROM db_logs.sessions\G"
+```
+Attendu : `jeton_hash` est une empreinte hexadécimale de 64 caractères,
+**jamais** la valeur présente dans le cookie. Vérifier aussi que les mots de
+passe sont bien hachés :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT email, LEFT(mot_de_passe_hash,20) AS debut, role FROM db_logs.utilisateurs;"
+```
+Attendu : chaque valeur commence par `scrypt$32768$8$1$`, et **les quatre
+étudiants ont des empreintes différentes** bien qu'ayant le même mot de
+passe — preuve directe du sel par compte.
+
+## 8. La contrainte de cohérence rôle/lien est portée par la base
+
+```bash
+docker compose exec mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" \
+  -e "INSERT INTO db_logs.utilisateurs (id,email,mot_de_passe_hash,nom,role,etudiant_id)
+      VALUES (UUID(),'test@x.org','x','Test','formateur','33333333-3333-3333-3333-333333333331');"
+```
+Attendu : **échec** avec une violation de `chk_utilisateur_role_lien` — un
+formateur ne peut pas être rattaché à un étudiant, même en root, même en SQL
+direct.
+
+## 9. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+```
+Attendu : **`44 passed, 44 total`** sur 5 suites (`tokenService`, `health`,
+`scan`, `enrolement`, `auth`).
+
+## Critère de succès global — Étape 7a/7c
+
+Validée si et seulement si : la connexion pose un cookie
+`HttpOnly; Secure; SameSite=Strict` sans exposer le jeton dans le corps
+(section 1) ; compte inexistant et mot de passe erroné sont indistinguables
+en statut, message **et** durée (section 2) ; les routes protégées répondent
+401 sans session et avec un cookie inventé (section 3) ; un formateur reçoit
+403 (section 4) ; un `etudiant_id` glissé dans le corps est ignoré au profit
+de celui de la session (section 5) ; la déconnexion invalide réellement le
+cookie (section 6) ; jetons et mots de passe ne sont jamais en clair en base
+(section 7) ; la contrainte `CHECK` refuse un formateur rattaché à un
+étudiant (section 8) ; et `docker compose exec backend npm test` confirme
+`44 passed` (section 9).
+
+---
+
+# Étape 7b — Interface de connexion, routage et tableaux de bord
+
+Aucun changement de schéma : **pas besoin de `docker compose down -v`** si
+l'Étape 7a/7c a déjà été appliquée. Le conteneur frontend doit en revanche
+réinstaller ses dépendances (`react-router-dom`).
+
+```bash
+git pull origin dev
+docker compose up -d --build
+docker compose ps
+```
+
+Ouvrir `https://localhost/` (accepter l'avertissement de certificat comme
+depuis l'Étape 0.2).
+
+## 1. Redirection et écran de connexion
+
+Attendu à l'ouverture de `https://localhost/` : redirection automatique vers
+`/login`, puis un écran centré avec le logo, les champs e-mail et mot de
+passe, un bouton principal, et deux boutons discrets de pré-remplissage.
+
+Vérifier que le bouton **Se connecter est désactivé** tant qu'un des deux
+champs est vide.
+
+Ouvrir directement `https://localhost/etudiant` sans être connecté. Attendu :
+redirection vers `/login`. **Point à vérifier après connexion** : vous devez
+arriver sur `/etudiant`, la destination demandée ayant été mémorisée.
+
+## 2. Erreur d'identifiants
+
+Saisir `amara.diallo@example.org` avec un mot de passe erroné. Attendu : un
+encadré rouge avec une icône et le message « Email ou mot de passe
+incorrect. », les champs passant en bordure rouge, et le mot de passe effacé.
+Aucun code technique ne doit apparaître.
+
+Essayer ensuite avec un e-mail inexistant. Attendu : **exactement le même
+message** (anti-énumération, cf. Étape 7a).
+
+## 3. Connexion étudiant
+
+Cliquer sur **Pré-remplir étudiant**, puis **Se connecter**. Attendu :
+- un bref état de chargement sur le bouton ;
+- redirection automatique vers `/etudiant` ;
+- en-tête affichant « Amara Diallo » et « Espace étudiant ».
+
+## 4. Le rôle est respecté
+
+Connecté en tant qu'étudiant, ouvrir `https://localhost/formateur`. Attendu :
+redirection immédiate vers `/etudiant`, sans message d'erreur. Inversement,
+connecté en formateur, `/etudiant` renvoie vers `/formateur`.
+
+## 5. Parcours étudiant complet
+
+Sur `/etudiant`, la carte « Votre appareil » affiche une puce d'état.
+Cliquer sur **Associer cet appareil**. Attendu : puce passant à « Associé »
+et message vert de confirmation. Recliquer : le message doit indiquer que
+l'appareil précédent a été révoqué (RF-09).
+
+**Vérification centrale de l'Étape 7c** : ouvrir les outils de développement
+(F12), onglet **Réseau**, puis relancer l'association. Inspecter la requête
+`POST /api/enrolements` :
+
+- l'onglet **Charge utile** ne doit contenir que `public_key` et
+  `device_info` ; **aucun `etudiant_id`** ;
+- l'onglet **Cookies** doit montrer que `presence_session` a bien été envoyé ;
+- dans **Application → Cookies**, `presence_session` doit porter la mention
+  `HttpOnly` cochée. Taper `document.cookie` dans la console doit renvoyer
+  une chaîne **ne contenant pas** `presence_session` : c'est la preuve
+  directe qu'une faille XSS ne pourrait pas voler la session.
+
+Ouvrir ensuite une séance depuis un second navigateur connecté en formateur
+n'est pas encore possible (Étape 7d). Pour tester le scan dès maintenant,
+générer un jeton en ligne de commande :
+
+```bash
+curl -k -c form.txt -s -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"sophie.lambert@example.org","mot_de_passe":"Formateur123!"}' > /dev/null
+
+curl -k -b form.txt -s -X POST https://localhost/api/seances \
+  -H "Content-Type: application/json" \
+  -d '{"uf_id":"11111111-1111-1111-1111-111111111111","salle_id":"22222222-2222-2222-2222-222222222222"}'
+```
+Puis afficher son QR code avec le jeton obtenu (voir Étape 6, section 2) et
+le scanner depuis `/etudiant`. Attendu : écran vert « QR code détecté », puis
+message « Votre présence a bien été enregistrée. »
+
+Vérifier dans l'onglet Réseau que `POST /api/scans` n'envoie que `jeton` et
+`signature_appareil`.
+
+## 6. Tableau de bord formateur
+
+Se déconnecter, puis **Pré-remplir formateur** et se connecter. Attendu :
+`/formateur`, une carte « Votre compte » avec nom et e-mail, et une carte
+« Ouvrir une séance » présentant un aperçu grisé avec l'étiquette
+« Étape 7d ». Les champs de cet aperçu sont volontairement inertes.
+
+## 7. Déconnexion et expiration de session
+
+Cliquer sur **Se déconnecter**. Attendu : retour à `/login`. Utiliser le
+bouton **Précédent** du navigateur : vous ne devez **pas** revenir dans
+l'espace connecté, mais être redirigé vers `/login`.
+
+**Test de la session perdue en cours d'utilisation** : se reconnecter, puis
+supprimer manuellement le cookie (Application → Cookies → supprimer
+`presence_session`), et déclencher une action (associer l'appareil).
+Attendu : redirection automatique vers `/login`, sans page blanche ni erreur
+technique affichée.
+
+## 8. Rendu mobile
+
+Dans les outils de développement, activer le mode appareil mobile (par
+exemple iPhone SE, 375 px). Attendu : une seule colonne, aucun débordement
+horizontal, texte lisible sans zoom, boutons occupant toute la largeur, et
+en-tête où le libellé « Se déconnecter » est remplacé par une icône afin de
+ne pas écraser le nom.
+
+Vérifier également que l'en-tête reste visible en faisant défiler la page.
+
+## 9. Réduction des animations
+
+Activer la réduction des animations du système. Attendu : les apparitions de
+cartes, le spinner et la ligne de balayage du scanner ne sont plus animés,
+tout le reste fonctionnant à l'identique.
+
+## 10. Vérifications automatisées
+
+```bash
+docker compose exec frontend npm run lint
+docker compose exec frontend npm test
+docker compose exec frontend npm run build
+docker compose exec backend npm test
+```
+Attendu : 0 avertissement au lint, `5 passed` côté frontend, build réussi,
+et `44 passed, 44 total` côté backend.
+
+**Contrôle de sécurité sur le build** : les identifiants de démonstration ne
+doivent pas se retrouver dans le bundle de production.
+```bash
+docker compose exec frontend sh -c "npm run build > /dev/null && grep -r 'Etudiant123' dist/ || echo 'ABSENT du bundle (attendu)'"
+```
+
+## Critère de succès global — Étape 7b
+
+Validée si et seulement si : `/` redirige vers `/login` puis vers le bon
+tableau de bord après connexion (sections 1 et 3) ; une destination demandée
+avant connexion est restaurée ensuite (section 1) ; les identifiants erronés
+et les comptes inexistants donnent le même message (section 2) ; l'accès à
+un tableau de bord d'un autre rôle redirige sans erreur (section 4) ;
+`POST /api/enrolements` et `POST /api/scans` n'envoient **aucun**
+`etudiant_id` et `document.cookie` ne révèle pas la session (section 5) ; la
+déconnexion empêche le retour arrière et la perte de session redirige
+proprement (section 7) ; le rendu mobile tient en 375 px sans débordement
+(section 8) ; et les quatre commandes de la section 10 passent, identifiants
+de démonstration absents du bundle.
+
+---
+
+# Étape 7b (bis) — Refonte visuelle, accessibilité et plein écran
+
+```bash
+git pull origin dev
+docker compose up -d --build
+```
+
+## 1. Aspect général
+
+Ouvrir `https://localhost/`. Attendu : fond blanc cassé légèrement chaud,
+cartes blanches, aucune zone sombre en dehors du scanner. La marque affiche
+« Prise de présence » et non « Présence », et le titre de l'onglet également.
+
+## 2. Contraste, vérification automatisée
+
+Dans les outils de développement, onglet **Lighthouse**, lancer un audit
+**Accessibilité** sur `/login` puis sur `/etudiant` une fois connecté.
+Attendu : aucune violation de la catégorie « contrast ».
+
+Vérification ponctuelle avec le sélecteur de couleur intégré : inspecter un
+texte d'aide (par exemple « Jeu de données de démonstration »), ouvrir le
+nuancier de la propriété `color` dans l'onglet Styles. Chrome affiche le
+ratio de contraste et deux coches AA/AAA. Attendu : au moins AA sur tous les
+textes.
+
+**Point souvent oublié à contrôler** : cliquer dans le champ e-mail, puis
+regarder sa bordure au repos (sans focus). Elle doit rester nettement
+visible sur le fond blanc, y compris en réduisant la luminosité de l'écran.
+
+## 3. En-tête et navigation
+
+Connecté sur `/etudiant` : la marque en haut à gauche est plus grande
+qu'auparavant. Cliquer dessus. Attendu : retour à la page précédente.
+
+Ouvrir `https://localhost/etudiant` dans un **onglet neuf** (donc sans
+historique), puis cliquer sur la marque. Attendu : redirection vers la racine,
+et non un bouton sans effet.
+
+Naviguer au clavier avec la touche Tab : la marque et le bouton de
+déconnexion doivent recevoir un anneau de focus visible.
+
+## 4. Déconnexion discrète
+
+Attendu sur ordinateur : une icône de sortie suivie du libellé
+« Se déconnecter », sans bordure ni fond au repos, un fond gris apparaissant
+au survol. Sur mobile (375 px) : seule l'icône reste, le nom de l'utilisateur
+n'étant plus écrasé.
+
+## 5. Projection du QR en plein écran
+
+Se connecter en formateur. La carte « Ouvrir une séance » affiche un QR
+d'aperçu et un bouton **Projeter en plein écran**.
+
+Cliquer dessus. Attendu : le QR occupe tout l'écran sur fond blanc, avec le
+titre « Aperçu de projection » au-dessus et le rappel « Appuyez sur Échap
+pour revenir ».
+
+**Deux contrôles qui comptent** :
+- Sortir avec la touche **Échap** (et non par le bouton), puis regarder le
+  bouton : son libellé doit être revenu à « Projeter en plein écran ». S'il
+  affiche encore « Quitter », l'état interne s'est désynchronisé de celui du
+  navigateur.
+- Reculer de quelques mètres de l'écran et vérifier que le QR reste net : il
+  est rendu en SVG, il ne doit pas pixelliser.
+
+Sur Safari ou iPad, le bouton doit fonctionner de la même façon grâce à
+l'API préfixée. Si un navigateur refuse le plein écran, un message doit
+apparaître et proposer la touche F11, plutôt que de laisser un bouton inerte.
+
+## 6. Non-régression
+
+```bash
+docker compose exec frontend npm run lint
+docker compose exec frontend npm test
+docker compose exec backend npm test
+```
+Attendu : 0 avertissement, `5 passed` côté frontend, `44 passed` côté backend.
+
+## Critère de succès global — Étape 7b (bis)
+
+Validée si et seulement si : l'interface est claire et sans zone sombre hors
+scanner (section 1) ; Lighthouse ne relève aucune violation de contraste et
+les bordures de champ restent visibles au repos (section 2) ; la marque
+agrandie ramène à la page précédente, et à la racine depuis un onglet neuf
+(section 3) ; la déconnexion est discrète et se réduit à une icône sur mobile
+(section 4) ; le plein écran fonctionne, et sortir par Échap remet le libellé
+du bouton en cohérence (section 5) ; les suites de tests restent vertes
+(section 6).
+
+---
+
+# Étape 7d — Création de séance et correction des anomalies 7b
+
+**Migration nécessaire** : `01-schema.sql` change (heures prévues sur
+`seances`).
+
+```bash
+git pull origin dev
+docker compose down -v
+docker compose up -d --build
+```
+
+## 1. Redirection après connexion, sans rafraîchissement
+
+Ouvrir `https://localhost/`, cliquer **Pré-remplir étudiant**, puis
+**Se connecter**. Attendu : le tableau de bord étudiant apparaît
+**immédiatement**, sans F5. Répéter avec **Pré-remplir formateur**.
+
+Vérifier aussi le cas d'échec : saisir un mot de passe erroné. Attendu : le
+message d'erreur s'affiche et le bouton **redevient cliquable**. S'il reste
+sur « Connexion en cours », l'anomalie est réapparue.
+
+## 2. Alignement de l'en-tête
+
+Sur `/etudiant`, réduire la fenêtre à 375 px. Attendu : le nom et
+« Espace étudiant » sont alignés à **gauche**, juste après la marque, et non
+poussés contre le bouton de déconnexion.
+
+## 3. Création d'une séance
+
+Se connecter en formateur. Attendu : un formulaire avec unité de formation,
+salle, date (pré-remplie au jour courant), début et fin prévus.
+
+**Contrôle de cohérence immédiat** : mettre une fin antérieure au début
+(par exemple 12:00 puis 09:00). Attendu : message d'erreur instantané, champ
+de fin en bordure rouge, bouton désactivé, **sans appel réseau**.
+
+Corriger, puis **Créer la séance**. Attendu : le formulaire et la carte
+« Votre compte » disparaissent, remplacés par le récapitulatif (UF, salle,
+créneau), un badge vert « En cours » et le QR code.
+
+**Vérification en base** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, date_ouverture, heure_debut_prevue, heure_fin_prevue, statut
+      FROM db_logs.seances ORDER BY date_ouverture DESC LIMIT 1\G"
+```
+Attendu : `heure_debut_prevue` correspond à l'heure saisie **convertie en
+UTC**. Si vous avez saisi 09:00 en heure belge d'été, la base doit contenir
+`07:00:00`. Une valeur identique à la saisie signalerait que la conversion
+n'a pas lieu, ce qui fausserait les futurs cumuls d'heures.
+
+`date_ouverture` doit être proche de l'instant du clic, et donc **différente**
+de `heure_debut_prevue`. Les deux colonnes ne mesurent pas la même chose.
+
+## 4. Erreur remontée proprement
+
+Choisir « Bureautique - Initiation » (absente du jeu de démonstration) et
+créer la séance. Attendu : message d'erreur lisible
+« uf_id ou salle_id inconnu », le formulaire restant utilisable.
+
+## 5. Projection
+
+Sur la séance ouverte, cliquer **Projeter en plein écran**. Attendu : le QR
+occupe l'écran avec le titre « Scannez pour valider votre présence ». Sortir
+par Échap et vérifier que le libellé du bouton redevient « Projeter en plein
+écran ».
+
+## 6. Un étudiant ne peut pas ouvrir de séance
+
+```bash
+curl -k -c etu.txt -s -X POST https://localhost/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"amara.diallo@example.org","mot_de_passe":"Etudiant123!"}' > /dev/null
+
+curl -k -b etu.txt -s -X POST https://localhost/api/seances \
+  -H "Content-Type: application/json" \
+  -d '{"uf_id":"11111111-1111-1111-1111-111111111111","salle_id":"22222222-2222-2222-2222-222222222222"}'
+```
+Attendu : `403` avec `"code":"ROLE_INSUFFISANT"`.
+
+## 7. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+Attendu : `52 passed` côté backend (6 suites) et `9 passed` côté frontend.
+
+## Critère de succès global — Étape 7d
+
+Validée si et seulement si : la connexion mène au tableau de bord sans
+rafraîchissement et le bouton se débloque après une erreur (section 1) ;
+l'en-tête est aligné à gauche en 375 px (section 2) ; la création de séance
+bascule vers le QR et les heures sont stockées **en UTC**, distinctes de
+`date_ouverture` (section 3) ; une UF inconnue produit un message lisible
+(section 4) ; le plein écran fonctionne et l'état du bouton reste cohérent
+après Échap (section 5) ; un étudiant reçoit 403 (section 6) ; et les deux
+suites de tests passent (section 7).
+
+---
+
+# Étape 7d (bis) — Tableaux de bord et QR dynamique
+
+**Migration obligatoire** : le schéma et le seed changent (suivi du temps,
+3 UF et 3 salles).
+
+```bash
+git pull origin dev
+docker compose down -v
+docker compose up -d --build
+```
+
+## 1. Le formulaire ne propose que des données réelles
+
+Se connecter en formateur. Attendu : les listes contiennent trois unités de
+formation et trois salles, **chargées depuis la base**. Créer une séance avec
+n'importe quelle combinaison : elle doit réussir à chaque fois. Plus aucune
+erreur de clé étrangère n'est possible, puisque le client ne peut proposer
+que ce qui existe.
+
+## 2. QR dynamique
+
+Une fois la séance créée, observer le QR code. Attendu :
+- la mention « Jeton renouvelé automatiquement toutes les 20 secondes » avec
+  une pastille verte ;
+- au premier instant, un cadre « En attente du premier jeton » très bref ;
+- **le QR change visuellement toutes les 20 secondes**. Le laisser tourner une
+  minute pour observer au moins deux renouvellements.
+
+Vérifier le contenu réellement encodé : ouvrir la console et exécuter
+```js
+document.querySelector('svg[height]')?.outerHTML.length
+```
+avant puis après un renouvellement. La valeur doit changer.
+
+**Test du vecteur V1** : faire une capture d'écran du QR, attendre 30
+secondes, puis la scanner depuis `/etudiant`. Attendu : `JETON_EXPIRE`. C'est
+la démonstration que photographier l'écran ne sert à rien.
+
+## 3. Verrouillage de sortie
+
+Pendant que le QR est projeté, cliquer sur la marque en haut à gauche.
+Attendu : une demande de confirmation « Le QR code cessera d'être affiché ».
+Annuler : rien ne se passe, le QR reste. Confirmer : retour arrière normal.
+
+Sur un écran sans QR (liste des séances), le clic ne doit **pas** demander
+confirmation.
+
+## 4. Liste des séances et réaffichage
+
+Revenir à la liste. Attendu : les séances créées, avec unité de formation,
+date, salle, nombre de présences et un badge « Ouverte ».
+
+Cliquer **Réafficher le QR** sur une séance ouverte : le QR revient, et le
+flux se reconnecte. C'est le cas d'usage des retardataires.
+
+## 5. Vue des présences
+
+Cliquer **Présences**. Attendu : un tableau avec étudiant, arrivée, départ et
+durée. Une présence sans heure de départ affiche le badge « En cours » et non
+une durée de zéro. Sans donnée, un encadré explicite s'affiche plutôt qu'un
+vide.
+
+## 6. Historique étudiant
+
+Se connecter en étudiant, associer l'appareil, puis scanner le QR projeté
+depuis un second navigateur connecté en formateur. Attendu : la carte
+« Mes présences » se met à jour **sans rechargement**.
+
+Pour peupler l'historique sans attendre, insérer une présence de test :
+```bash
+docker compose exec mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "
+  INSERT INTO db_logs.presences (id, seance_id, etudiant_id, heure_arrivee, heure_depart)
+  SELECT UUID(), s.id, '33333333-3333-3333-3333-333333333331',
+         '2026-09-01 09:05:00', '2026-09-01 12:00:00'
+  FROM db_logs.seances s ORDER BY s.date_ouverture DESC LIMIT 1;"
+```
+Attendu à l'écran : une ligne avec la durée `2 h 55`, et non `175 min`.
+
+## 7. Fenêtre de rectification calculée par le serveur
+
+La séance insérée ci-dessus se terminant le 01/09/2026, la fenêtre de 24 h
+est ouverte ou fermée selon la date du jour. Attendu : soit un bouton
+« Signaler une erreur », soit le message « Le délai de signalement de 24
+heures est écoulé ».
+
+**Contrôle qui compte** : changer l'heure de votre machine ne doit rien
+changer. Le drapeau est calculé par la base, à partir de son horloge. Si
+modifier l'heure locale rouvrait la fenêtre, n'importe quel étudiant pourrait
+contester une séance vieille de plusieurs mois.
+
+## 8. L'audit trail est inaltérable
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "DELETE FROM db_attestations.journal_modifications;"
+```
+Attendu : **échec**, `DELETE command denied`. L'application ne peut
+qu'insérer et lire. C'est ce qui donne sa valeur au journal.
+
+Même contrôle sur les présences :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "DELETE FROM db_logs.presences LIMIT 1;"
+```
+Attendu : échec également. Une présence se corrige, elle ne se supprime pas.
+
+## 9. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+Attendu : `62 passed` (7 suites) et `15 passed`.
+
+## Critère de succès global — Étape 7d (bis)
+
+Validée si et seulement si : toute combinaison UF/salle crée une séance sans
+erreur (section 1) ; le QR change toutes les 20 secondes et une capture
+d'écran devient invalide (section 2) ; quitter l'écran de projection demande
+confirmation, et seulement dans ce cas (section 3) ; le réaffichage du QR
+fonctionne depuis la liste (section 4) ; une présence ouverte affiche
+« En cours » et non zéro (sections 5 et 6) ; la fenêtre de rectification ne
+dépend pas de l'horloge du client (section 7) ; les suppressions sur le
+journal d'audit et sur les présences sont refusées par MySQL (section 8) ; et
+les deux suites de tests passent (section 9).
+
+---
+
+# Étape 7e (préalable) — Suivi du temps complet
+
+**Migration obligatoire** (le scan écrit maintenant dans `presences`) :
+```bash
+git pull origin dev && docker compose down -v && docker compose up -d --build
+```
+
+## 1. Le scan crée bien une présence
+
+Connectez-vous en formateur, ouvrez une séance, projetez le QR. Dans un autre
+navigateur, connectez-vous en étudiant, associez l'appareil, scannez.
+
+Attendu : la carte « Mes présences » affiche la séance avec la mention
+« En cours » (aucune heure de départ). Vérification en base :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, heure_arrivee, heure_depart, source, scan_arrivee_id
+      FROM db_logs.presences ORDER BY heure_arrivee DESC LIMIT 1\G"
+```
+Attendu : `source = scan`, `heure_depart` à `NULL`, et `scan_arrivee_id`
+renseigné, reliant la présence à sa preuve d'origine.
+
+## 2. Verrouillage de l'appareil
+
+**Sans appareil associé** : le bouton « Scanner le QR code » est désactivé,
+avec la mention « Associez d'abord cet appareil ».
+
+**Appareil dissocié** : dans une fenêtre privée, connectez-vous avec **le même
+étudiant** et associez cet appareil. Revenez à la première fenêtre et
+rechargez.
+
+Attendu : un **encadré rouge « Cet appareil a été dissocié »**, le badge passe
+à « Dissocié », et le bouton de scan est désactivé avec la raison affichée.
+L'étudiant est prévenu **avant** de tenter quoi que ce soit.
+
+Tentez malgré tout un scan en appelant l'API depuis la console : le serveur
+doit répondre `403 APPAREIL_REVOQUE`, et non une erreur de signature.
+
+## 3. Signalement dans les 24 heures
+
+Sur une séance terminée, cliquer **Signaler une erreur**. Contrôles :
+- le bouton d'envoi reste **désactivé** tant que le motif est vide ;
+- un départ antérieur à l'arrivée affiche une erreur immédiate ;
+- **Échap** ferme la modale (comportement natif de `<dialog>`) ;
+- la navigation au clavier reste piégée dans la modale.
+
+Après envoi : badge « Signalement en attente », bouton disparu, seconde
+tentative impossible.
+
+Sur une séance terminée depuis plus de 24 h : un badge discret
+**« Délai de signalement expiré »** remplace le bouton.
+
+**Contrôle qui compte** : changer l'heure de votre machine ne doit rien
+changer. Le délai est calculé par la base.
+
+## 4. Traitement par le formateur
+
+Espace formateur, séance concernée, bouton **Présences**. La demande apparaît
+dans un encadré ambré avec le motif, les heures demandées et les actuelles.
+
+**Refuser** puis **Accepter** : la modale exige un motif dans les deux cas,
+le bouton restant désactivé tant qu'il est vide. Vérifier que le motif est
+exigé **même pour un refus**.
+
+Après acceptation :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT source, heure_arrivee, heure_depart FROM db_logs.presences
+      ORDER BY heure_arrivee DESC LIMIT 1\G"
+```
+Attendu : `source = rectification_validee`.
+
+## 5. Modification manuelle
+
+Sur une ligne de présence, bouton **Modifier**. Changer l'heure de départ,
+saisir un motif, enregistrer. Attendu : la durée se recalcule et `source`
+passe à `correction_formateur`.
+
+## 6. Le journal d'audit contient la trace
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT champ, valeur_avant, valeur_apres, auteur_email, role_auteur,
+             motif, origine, horodatage
+      FROM db_attestations.journal_modifications ORDER BY horodatage DESC LIMIT 5\G"
+```
+Attendu : une entrée **par champ modifié**, avec la valeur précédente, le
+motif saisi, l'adresse du formateur et l'origine.
+
+**Preuve d'inaltérabilité, à montrer au jury** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "UPDATE db_attestations.journal_modifications SET motif = 'falsifie';"
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "DELETE FROM db_attestations.journal_modifications;"
+```
+Attendu : **les deux échouent**. L'application ne peut qu'insérer et lire ;
+la garantie vient du moteur, pas du code.
+
+## 7. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+Attendu : `76 passed` (8 suites) et `15 passed`.
+
+## 8. Réactivité sans rechargement
+
+**Côté formateur** : ouvrir la vue « Présences » d'une séance en cours.
+Attendu : la mention « Actualisation automatique » avec une pastille verte
+dans l'en-tête.
+
+Depuis un second navigateur, faire scanner un étudiant. Attendu :
+**l'étudiant apparaît dans le tableau en moins de cinq secondes, sans
+aucun F5**, et le compteur de présences se met à jour.
+
+Contrôles qui comptent :
+- La liste ne doit **jamais clignoter** ni afficher d'indicateur de
+  chargement lors des actualisations. Seul le tout premier affichage en
+  montre un.
+- Ouvrir la modale « Modifier » et la laisser ouverte une trentaine de
+  secondes : la liste dessous ne doit **pas** bouger. L'actualisation est
+  suspendue pendant la saisie.
+- Passer sur un autre onglet une minute, puis revenir : les données doivent
+  être à jour **immédiatement**, sans attendre le cycle suivant.
+
+Pour vérifier la mise en veille, ouvrir l'onglet **Réseau** des outils de
+développement, filtrer sur `presences`, puis basculer sur un autre onglet du
+navigateur. Attendu : **plus aucune requête** tant que l'onglet est masqué.
+
+**Côté étudiant** : après un scan réussi, la carte « Mes présences » se
+complète sans rechargement. Après l'envoi d'un signalement, le badge
+« Signalement en attente » apparaît **instantanément**, avant même la réponse
+du serveur (mise à jour optimiste), et le bouton disparaît.
+
+## 9. Modales
+
+Ouvrir n'importe quelle modale. Attendu : le fond s'assombrit et se floute
+progressivement, la fenêtre apparaît avec un léger mouvement vers le haut et
+un agrandissement. À la fermeture, l'animation joue **en sens inverse** au
+lieu d'une disparition brutale.
+
+Contrôles d'accessibilité :
+- **Tab** ne sort jamais de la modale tant qu'elle est ouverte ;
+- **Échap** la ferme, avec l'animation de sortie ;
+- le bouton de fermeture en haut à droite fonctionne également ;
+- le focus revient à un endroit sensé après fermeture.
+
+Activer la réduction des animations du système, rouvrir une modale. Attendu :
+elle apparaît sans mouvement, et reste parfaitement utilisable.
+
+## Critère de succès global — Suivi du temps
+
+Validée si et seulement si : un scan crée une présence liée à son scan
+d'origine (section 1) ; un appareil dissocié est signalé en rouge et le scan
+verrouillé avant toute tentative, l'API répondant `APPAREIL_REVOQUE`
+(section 2) ; le signalement fonctionne dans les 24 h et affiche un badge
+d'expiration au-delà, sans dépendre de l'horloge du client (section 3) ;
+accepter et refuser exigent tous deux un motif (section 4) ; la modification
+manuelle recalcule la durée (section 5) ; le journal contient une entrée par
+champ et résiste à `UPDATE` comme à `DELETE` (section 6) ; les deux suites
+passent (section 7) ; un étudiant qui scanne apparaît chez le formateur en
+moins de cinq secondes sans rechargement, et l'actualisation se suspend quand
+l'onglet est masqué ou qu'une modale est ouverte (section 8) ; les modales
+s'ouvrent et se ferment avec une transition, et restent utilisables au
+clavier (section 9).
+
+---
+
+# Étape 7e — Géofencing
+
+**Migration obligatoire** (nouvelles colonnes de position) :
+```bash
+git pull origin dev && docker compose down -v && docker compose up -d --build
+```
+
+## 1. Ouverture de séance avec position
+
+Se connecter en formateur. Attendu : sous le champ Date, un encadré explique
+que la position sera demandée et à quoi elle sert, **avant** que le navigateur
+n'affiche sa propre demande.
+
+Créer la séance et **autoriser** la position. Attendu : un badge
+« Position de référence enregistrée » à côté de « Ouverte ».
+
+Vérification en base :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT latitude_reference, longitude_reference, rayon_tolerance_m
+      FROM db_logs.seances ORDER BY date_ouverture DESC LIMIT 1\G"
+```
+
+**Cas du refus** : bloquer la position dans les paramètres du site, recharger,
+créer une séance. Attendu : elle se crée normalement, avec le badge
+« Sans référence de position ». Aucun blocage.
+
+## 2. Scan avec position
+
+Côté étudiant, la carte de scan annonce que la position sera demandée et que
+le refus est possible. Scanner en autorisant la position.
+
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT latitude_scan, longitude_scan, precision_m, distance_m, position_coherente
+      FROM db_logs.presences ORDER BY heure_arrivee DESC LIMIT 1\G"
+```
+Attendu : coordonnées renseignées, `distance_m` faible (formateur et étudiant
+sur la même machine), `position_coherente = 1`.
+
+**Refus de position** : la présence doit être enregistrée quand même, le
+message de confirmation précisant que la position n'a pas pu être obtenue
+« ce qui ne remet pas en cause sa validité ». En base, `position_coherente`
+doit valoir **NULL** et non 0.
+
+## 3. Simuler un étudiant éloigné
+
+Chrome et Edge permettent de falsifier la position, ce qui est **exactement**
+la démonstration de la limite du dispositif à montrer au jury.
+
+Outils de développement → menu à trois points → *More tools* → **Sensors** →
+*Location* → *Other…* et saisir des coordonnées lointaines (par exemple
+latitude `50.8503`, longitude `4.3517`, soit Bruxelles).
+
+Scanner à nouveau depuis un autre compte étudiant. Attendu :
+- **la présence est validée** (le géofencing ne bloque jamais) ;
+- côté formateur, un badge orange **« Position incertaine »** à côté du nom ;
+- au survol du badge, la distance mesurée s'affiche ;
+- une légende sous le tableau rappelle que ce n'est pas une preuve d'absence.
+
+Ce test vaut double : il vérifie le fonctionnement **et** démontre que la
+position est falsifiable, ce qui doit être assumé et non caché.
+
+## 4. Tester avec un vrai smartphone sur le réseau local
+
+Les trois fonctionnalités clés du prototype (WebCrypto, caméra,
+géolocalisation) exigent un **contexte sécurisé**. Sur téléphone, cela demande
+quelques précautions.
+
+**Étape 1 — relever l'adresse locale du PC**
+```powershell
+ipconfig
+```
+Repérer l'adresse IPv4 de la carte Wi-Fi, du type `192.168.1.42`.
+
+**Étape 2 — connecter le téléphone au même réseau Wi-Fi** que le PC. Un
+téléphone en 4G ne verra pas la machine.
+
+**Étape 3 — ouvrir `https://192.168.1.42` sur le téléphone**, en respectant
+deux points :
+- **`https://` et non `http://`** : sans TLS, WebCrypto, la caméra et la
+  géolocalisation sont toutes trois refusées ;
+- ne pas utiliser `localhost`, qui désigne le téléphone lui-même.
+
+**Étape 4 — accepter l'avertissement de sécurité.** C'est le point qui bloque
+la plupart des tentatives. Caddy émet un certificat via sa propre autorité,
+inconnue du téléphone, et pour l'adresse `localhost` et non pour cette IP. Le
+navigateur affichera donc un avertissement.
+
+- **Chrome Android** : *Paramètres avancés* → *Continuer vers le site
+  (dangereux)*.
+- **Safari iOS** : *Afficher les détails* → *Visiter ce site web* →
+  *Visiter*.
+
+**Tant que l'avertissement n'est pas accepté, la page est servie mais les API
+sensibles restent bloquées** : la caméra ne démarrera pas et l'enrôlement
+échouera, sans message explicite. C'est la cause la plus fréquente d'un test
+mobile qui « ne marche pas ».
+
+**Si Safari iOS refuse malgré tout** l'accès à la caméra : certaines versions
+refusent définitivement `getUserMedia` sur un certificat non approuvé. Deux
+options alors, hors périmètre de ce prototype : exporter l'autorité de Caddy
+et l'installer comme profil de confiance sur le téléphone, ou exposer
+l'application derrière un vrai certificat via un tunnel HTTPS public.
+
+**Rappel** : pour une simple validation fonctionnelle, le test sur un seul
+poste (QR affiché à l'écran, scanné par la webcam du même ordinateur) reste
+plus rapide et suffit à tout vérifier sauf l'ergonomie mobile réelle.
+
+## 5. Si la position reste vide en test local
+
+Symptôme fréquent : même après avoir cliqué sur « Autoriser », la position
+reste `NULL` en base et le badge affiche « Sans référence de position ».
+
+**Diagnostic en une commande.** Dans la console du navigateur :
+```js
+console.log('Contexte sécurisé :', window.isSecureContext);
+navigator.geolocation.getCurrentPosition(
+  (p) => console.log('OK', p.coords.latitude, p.coords.longitude, '±', p.coords.accuracy, 'm'),
+  (e) => console.log('ÉCHEC code', e.code, e.message)
+);
+```
+
+| Résultat | Cause | Solution |
+|---|---|---|
+| `isSecureContext: false` | Page hors contexte sécurisé | Voir ci-dessous |
+| code `1` | Permission refusée | Réautoriser dans les paramètres du site |
+| code `2` | **Aucune source de position** | Voir ci-dessous |
+| code `3` | Délai dépassé | Réessayer près d'une fenêtre |
+
+**Le code 2 sur un ordinateur fixe est le cas le plus courant, et ce n'est
+pas un défaut de l'application.** La Geolocation API expose ce que le système
+sait de sa position, elle ne le devine pas : sans récepteur GNSS ni carte
+Wi-Fi à trianguler, le navigateur n'a aucune source. Une machine reliée
+uniquement en Ethernet échouera systématiquement. Testez alors depuis un
+portable avec Wi-Fi activé, ou depuis un téléphone.
+
+**À savoir sur `localhost`** : contrairement à une idée répandue, le
+certificat auto-signé de Caddy **n'est pas** en cause ici. La spécification
+*Secure Contexts* classe `localhost` et `127.0.0.1` parmi les origines
+potentiellement dignes de confiance, quel que soit le certificat. Le
+géofencing fonctionne donc sur `https://localhost` dès lors qu'une source de
+position existe.
+
+**Le certificat redevient bloquant hors de `localhost`.** Une adresse LAN
+(`https://192.168.1.42`) n'est pas une origine de confiance : tant que
+l'avertissement n'est pas accepté, la page n'est pas en contexte sécurisé et
+la géolocalisation, WebCrypto et la caméra sont **toutes trois** refusées.
+Deux options pour un test mobile réel :
+
+1. **Installer l'autorité de Caddy sur le téléphone.** L'exporter depuis le
+   conteneur :
+   ```bash
+   docker compose exec proxy cat /data/caddy/pki/authorities/local/root.crt > caddy-root-ca.crt
+   ```
+   puis la transférer sur le téléphone et l'installer comme profil de
+   confiance. Sur iOS, il faut en plus l'activer dans *Réglages → Général →
+   Informations → Réglages des certificats*, étape que beaucoup oublient.
+2. **Passer par un tunnel HTTPS public** (ngrok, Cloudflare Tunnel). Le
+   certificat est alors émis par une autorité reconnue et aucun réglage n'est
+   nécessaire sur le téléphone. C'est la voie la plus rapide pour une
+   démonstration, au prix d'exposer temporairement l'application sur
+   Internet — à ne faire qu'avec le jeu de données de démonstration.
+
+## 6. Preuve de possession à l'enrôlement
+
+L'enrôlement se fait désormais en deux temps. Ouvrir l'onglet **Réseau**, puis
+associer un appareil. Attendu : **deux** requêtes successives,
+`POST /api/enrolements/defi` puis `POST /api/enrolements`, la seconde
+contenant `defi_id` et `signature_defi` en plus de `public_key`.
+
+**Vérifier l'usage unique** en rejouant la seconde requête. Dans l'onglet
+Réseau, clic droit sur `POST /api/enrolements` → *Copier comme fetch*, coller
+dans la console et exécuter. Attendu : `400` avec
+`"code":"DEFI_INVALIDE"` — le défi a déjà été consommé, un rejeu est
+impossible.
+
+**Trace des défis en base** :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, etudiant_id, date_creation, date_expiration, date_consommation
+      FROM db_logs.defis_enrolement ORDER BY date_creation DESC LIMIT 5\G"
+```
+Attendu : `date_consommation` renseignée pour le défi utilisé, `NULL` pour
+ceux restés inutilisés. Ces lignes ne sont jamais supprimées : elles
+constituent une trace des tentatives, utile pour repérer une succession
+anormale sur un même compte.
+
+## 7. Navigation par la marque
+
+Connecté en étudiant, ouvrir la vue d'historique puis cliquer sur la marque
+en haut à gauche. Attendu : retour à `/etudiant`. En formateur, retour à
+`/formateur`. Depuis un onglet ouvert directement sur une page, le clic doit
+**également** fonctionner, alors qu'il ne faisait rien auparavant.
+
+Pendant la projection d'un QR, le clic doit toujours demander confirmation
+avant de quitter.
+
+## 8. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+Attendu : `101 passed` (9 suites) et `20 passed`.
+
+## Critère de succès global — Étape 7e
+
+Validée si et seulement si : la séance enregistre une position de référence et
+l'affiche par un badge, tout en se créant normalement en cas de refus
+(section 1) ; un scan enregistre coordonnées, précision et distance, et
+`position_coherente` vaut NULL et non 0 quand la position est refusée
+(section 2) ; une position falsifiée produit un badge orange **sans bloquer la
+validation**, avec la distance au survol (section 3) ; le diagnostic de la
+section 5 identifie sans ambiguïté la cause d'une position manquante ;
+l'enrôlement produit bien deux requêtes et un défi rejoué est refusé
+(section 6) ; la marque ramène à l'accueil du rôle (section 7) ; et les deux
+suites passent (section 8).
+
+---
+
+# Cycle de vie de la séance et rapport administratif
+
+**Migration obligatoire** : `docker compose down -v && docker compose up -d --build`
+
+## 1. Une séance se termine toute seule
+
+Créer une séance dont la fin prévue est dans **deux minutes**. Attendu côté
+formateur : badge vert « En cours » et bouton « Réafficher le QR » disponible.
+
+Laisser la page ouverte et attendre l'échéance. Attendu **sans rechargement** :
+le badge passe à « Terminée » (gris) et le bouton de réaffichage disparaît.
+
+La bascule côté étudiant est anticipée localement mais confirmée par le
+serveur. Pour vérifier que la déduction vient bien de la base :
+```bash
+docker compose exec mysql mysql -u${MYSQL_USER:-app_logs} -p"${MYSQL_PASSWORD}" \
+  -e "SELECT id, statut, heure_fin_prevue, NOW() > heure_fin_prevue AS terminee
+      FROM db_logs.seances ORDER BY date_ouverture DESC LIMIT 3;"
+```
+Attendu : `statut` vaut toujours `ouverte` alors que `terminee` vaut `1`. Le
+statut est **déduit**, jamais mis à jour — un traitement périodique laisserait
+la valeur fausse entre deux passages.
+
+## 2. Temps de participation
+
+Sur `/etudiant`, une séance terminée affiche « Terminée », la durée retenue,
+et la mention « Départ non pointé : l'heure de fin prévue a été retenue »
+lorsque aucun départ n'a été saisi.
+
+Faire ensuite modifier l'heure de départ par le formateur (bouton
+**Modifier**). Attendu : la durée se recalcule et la mention disparaît, la
+valeur étant désormais constatée et non déduite.
+
+## 3. Le signalement n'est possible qu'après la fin
+
+Sur une séance **en cours** : badge « Signalement à la fin de la séance », pas
+de bouton.
+
+Sur une séance **terminée depuis moins de 24 h** : le bouton « Signaler une
+erreur » est disponible.
+
+Sur une séance **terminée depuis plus de 24 h** : badge « Délai de signalement
+expiré ».
+
+**Contrôle serveur** — le blocage ne doit pas dépendre du navigateur :
+```bash
+curl -k -b cookies.txt -s -X POST https://localhost/api/rectifications \
+  -H "Content-Type: application/json" \
+  -d '{"presence_id":"<ID_SUR_SEANCE_EN_COURS>","motif":"test"}'
+```
+Attendu : `403` avec `"code":"DELAI_EXPIRE"`, même en appelant l'API
+directement.
+
+## 4. Rapport administratif
+
+```bash
+curl -k -b form.txt -s https://localhost/api/seances/<SEANCE_ID>/rapport | python -m json.tool
+```
+
+Attendu dans `synthese` : `attendus` égal au nombre d'inscrits à l'UF (4 avec
+le jeu de démonstration), `presents`, `absents`, `minutes_validees_total`,
+`provisoire` et `demandes_en_attente`.
+
+**Point à vérifier en priorité** : les étudiants **absents** doivent figurer
+dans `etudiants`, avec `present: false`. Le rapport part des inscriptions et
+non des présences — lister les présences ne montrerait que ceux qui sont
+venus, alors que l'information administrative décisive est l'inverse.
+
+Vérifier aussi :
+- `depart_deduit: true` pour un étudiant dont le départ n'a pas été pointé ;
+- `provisoire: true` sur une séance encore en cours, `false` une fois
+  terminée ;
+- `demande_en_attente: true` après avoir soumis un signalement, et
+  `synthese.demandes_en_attente` incrémenté. Valider des crédits sur un temps
+  encore susceptible d'être corrigé exposerait à devoir revenir sur la
+  décision.
+
+Un étudiant appelant cette route doit recevoir `403`.
+
+## 5. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+Attendu : `112 passed` (10 suites) et `25 passed`.
+
+## Critère de succès global
+
+Validée si et seulement si : une séance bascule en « Terminée » sans
+rechargement et son QR devient indisponible, alors que la colonne `statut`
+n'a pas changé (section 1) ; la durée retenue s'affiche avec la mention du
+départ déduit, et se recalcule après correction (section 2) ; le signalement
+n'est possible qu'entre la fin de la séance et 24 h plus tard, y compris en
+appelant l'API directement (section 3) ; le rapport fait apparaître les
+absents et signale départs déduits, caractère provisoire et demandes en
+attente (section 4) ; et les deux suites passent (section 5).
+
+---
+
+# Étape 8 (interface) — Rapport d'assiduité, export CSV et impression
+
+Protocole manuel après `docker compose up -d --build`. **Aucune migration de
+base n'est nécessaire** : cette itération ne touche ni le schéma SQL ni la
+logique backend. Un simple redémarrage suffit.
+
+Connectez-vous en formateur (`formateur@example.be` / `Formateur2026!`).
+
+## 1. Le badge « En cours » disparaît sur une séance terminée
+
+### Préparer une séance déjà terminée
+
+Le plus simple est de créer une séance dont l'heure de fin est **déjà
+passée**. Depuis l'interface formateur, créez une séance, puis avancez sa fin
+en base :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" presence_db -e "
+  UPDATE seances
+     SET heure_debut_prevue = DATE_SUB(NOW(), INTERVAL 3 HOUR),
+         heure_fin_prevue   = DATE_SUB(NOW(), INTERVAL 1 HOUR)
+   WHERE id = '<SEANCE_ID>';
+  SELECT id, statut, heure_fin_prevue FROM seances WHERE id = '<SEANCE_ID>';"
+```
+
+Notez que `statut` vaut toujours `ouverte` : c'est voulu. Le statut est
+**déduit** de l'horloge, jamais stocké.
+
+Faites scanner un étudiant **avant** cette manipulation, pour disposer d'une
+présence sans heure de départ.
+
+### Vérifier à l'écran
+
+Ouvrez le détail de cette séance. Attendu :
+
+| Élément | Attendu |
+| --- | --- |
+| Badge en tête de carte | **« Séance terminée »**, gris ardoise |
+| Colonne *Départ* | l'heure de fin prévue, suivie de la mention **« déduit »** |
+| Colonne *Durée* | la durée validée (ex. `2 h`) + badge gris **« Terminé »** |
+| Badge vert « En cours » | **absent partout** |
+| Mention « Actualisation automatique » | **absente** (plus rien ne bouge) |
+| Sous le tableau | légende « Départ déduit : ces étudiants n'ont pas pointé leur sortie… » |
+| Bouton QR | **absent** |
+| Bouton bleu | **« Voir le rapport d'assiduité »**, présent |
+
+Survolez la mention « déduit » : l'infobulle doit indiquer « Départ
+automatique : la sortie n'a pas été pointée, l'heure de fin prévue de la
+séance a été retenue. »
+
+### Contrôle négatif — la séance en cours
+
+Sur une séance dont l'heure de fin est encore à venir, tout doit être
+l'inverse : tiret dans la colonne *Départ*, badge vert « En cours », mention
+« Actualisation automatique » présente, et **aucun bouton de rapport** — le
+document serait par construction incomplet.
+
+### La bascule sans rechargement
+
+Créez une séance se terminant dans deux minutes, ouvrez son détail et
+**attendez sans rien toucher**. Au passage de l'heure, le badge doit basculer
+de vert à gris et la mention « déduit » apparaître, **sans rechargement de
+page**. La réévaluation est locale (période de 10 s), le serveur confirme
+ensuite.
+
+### Contrôle du cas limite
+
+Sur une séance terminée **sans** `heure_fin_prevue` (colonne à `NULL`, comme
+les séances créées avant l'introduction des horaires prévus), la colonne
+*Départ* doit rester un **tiret**. Aucune heure n'est inventée : le serveur ne
+déduit rien non plus dans ce cas.
+
+## 2. Le rapport d'assiduité
+
+Cliquez sur **« Voir le rapport d'assiduité »**.
+
+### En-tête officiel
+
+Doivent figurer : l'intitulé de l'UF, le local, la date, les horaires, et
+quatre compteurs — *Attendus*, *Présents*, *Absents*, *Temps validé*.
+
+En haut à droite, un badge **« Officiel »** ou **« Provisoire »**.
+
+### Les absents figurent au rapport
+
+**C'est le point à vérifier en priorité.** Le jeu de démonstration compte
+quatre inscrits ; si un seul a scanné, le tableau doit afficher **quatre
+lignes**, dont trois marquées « Absent » sur fond légèrement teinté.
+
+Un rapport qui n'afficherait que les présents ne répondrait pas à la question
+administrative, qui est de savoir **qui manquait**.
+
+Pour un absent, les colonnes *Arrivée*, *Départ* et *Temps validé* doivent
+toutes afficher un tiret — et surtout **pas** l'heure de fin de séance.
+
+### Les trois statuts
+
+Faites soumettre une demande de rectification par un étudiant présent
+(espace étudiant, dans les 24 h suivant la fin de la séance), puis rouvrez le
+rapport. Les trois libellés doivent coexister :
+
+- **Présent (validé)** — badge vert
+- **Absent** — badge gris
+- **Contestation en cours** — badge ambre
+
+L'étudiant qui a contesté doit afficher **« Contestation en cours »** et non
+« Présent (validé) » : la contestation prime, c'est le seul état qui doit
+interrompre une validation.
+
+### Départ déduit
+
+Un étudiant sans départ pointé affiche l'heure de fin de séance suivie de
+« déduit ». Celui dont le départ a réellement été pointé (ou corrigé par le
+formateur) l'affiche **sans aucune mention**.
+
+## 3. La bannière de conformité
+
+Tant qu'une demande de rectification est en attente, une **bannière ambre**
+doit s'afficher **au-dessus du tableau** :
+
+> **Ce rapport est provisoire.** Une demande de rectification est en attente.
+> Les temps concernés peuvent encore être modifiés : ne validez pas de crédits
+> sur cette base.
+
+Vérifiez le **pluriel** avec deux demandes en attente : « 2 demandes de
+rectification **sont** en attente ».
+
+Traitez la demande (accepter ou refuser). Rouvrez le rapport : la bannière doit
+avoir **disparu** et le badge être repassé à **« Officiel »**.
+
+**Contrôle sur une séance en cours** : un message d'information discret
+(« La séance n'est pas terminée… ») doit apparaître à la place de la bannière
+ambre. Les deux causes de provisoire n'ont pas la même gravité, et les
+confondre banaliserait l'avertissement le plus important.
+
+## 4. Export CSV — le test décisif des accents
+
+Cliquez sur **« Exporter en CSV »**. Survolez d'abord le bouton : l'infobulle
+annonce le nom du fichier.
+
+### Nom du fichier
+
+| Situation | Nom attendu |
+| --- | --- |
+| Aucune demande en attente, séance terminée | `assiduite-OFFICIEL-<uf>-<date>.csv` |
+| Une demande en attente | `assiduite-PROVISOIRE-<uf>-<date>.csv` |
+| Séance en cours | `assiduite-PROVISOIRE-<uf>-<date>.csv` |
+
+Le mot figure dans le **nom**, pas seulement dans le contenu : un fichier
+transféré par courriel arrive souvent détaché de son contexte.
+
+### Ouvrir dans Excel — la vérification qui compte
+
+**Double-cliquez** sur le fichier téléchargé (ne passez pas par l'assistant
+d'importation, qui masquerait le défaut recherché).
+
+Attendu :
+
+- Les colonnes sont **séparées** (le point-virgule est reconnu).
+- Les accents sont **corrects** : `Français langue étrangère`, et non
+  `FranÃ§ais langue Ã©trangÃ¨re`.
+
+Si les accents se disloquent, le BOM UTF-8 a disparu de `construireCsv`.
+
+### Vérifier le BOM en ligne de commande
+
+```bash
+head -c 3 ~/Téléchargements/assiduite-*.csv | xxd
+```
+
+Attendu : `efbbbf` — les trois octets de la marque d'ordre.
+
+### Contrôle de l'échappement
+
+Faites soumettre par un étudiant une demande dont le motif contient un
+point-virgule et un guillemet, par exemple :
+
+```
+Rendez-vous médical ; certificat "urgent" fourni
+```
+
+Le CSV ne doit pas s'en trouver décalé : la valeur apparaît entre guillemets,
+les guillemets internes doublés, et **le nombre de colonnes reste constant sur
+toutes les lignes**.
+
+### Contenu attendu
+
+- Une ligne par **inscrit**, absents compris.
+- Colonne `Depart deduit` à `Oui` / `Non`.
+- Un absent : `Arrivee`, `Depart` et `Temps valide` **vides** — pas `0h00`, qui
+  fausserait toute somme faite sur la colonne.
+- En pied, après une ligne vide : `Attendus`, `Presents`, `Absents`,
+  `Total valide`, et `Statut;OFFICIEL` ou `Statut;PROVISOIRE`.
+
+## 5. Aperçu avant impression
+
+Depuis le rapport, faites **Ctrl+P** (ou Cmd+P).
+
+| Doit avoir disparu | Doit être apparu |
+| --- | --- |
+| En-tête de l'application (marque, déconnexion) | Pied : « Document établi le … » |
+| Boutons *Retour*, *Imprimer*, *Exporter en CSV* | Mention `PROVISOIRE` si applicable |
+| Ombres et fond de page | — |
+
+Vérifiez également :
+
+- Les **badges de statut conservent leur fond coloré** (`print-color-adjust`).
+  Même sans couleur le document reste lisible — le libellé est écrit — mais la
+  lecture en diagonale en pâtirait.
+- Sur un rapport de plus d'une page, **l'en-tête du tableau se répète en tête
+  de chaque page**, et aucune ligne d'étudiant n'est coupée par un saut de
+  page.
+- Marges de 1,5 cm, fond blanc.
+
+Enregistrez en PDF : le document doit être présentable tel quel dans un
+dossier administratif.
+
+## 6. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+
+Attendu : `112 passed` (10 suites) côté backend — inchangé, cette itération ne
+touche pas au serveur — et **`80 passed`** (8 fichiers) côté frontend, dont
+55 ajoutés ici.
+
+Pour n'exécuter que les nouveaux :
+
+```bash
+docker compose exec frontend npx vitest run src/services/exportCsv.test.js
+docker compose exec frontend npx vitest run src/pages/DetailSeance.test.jsx
+docker compose exec frontend npx vitest run src/pages/RapportSeance.test.jsx
+```
+
+### Vérifier que ces tests détectent vraiment quelque chose
+
+Un test qui ne peut pas échouer ne prouve rien. Réintroduisez le défaut
+d'origine à la main :
+
+```bash
+# Dans frontend/src/pages/DetailSeance.jsx, fonction CelluleDuree,
+# remplacer :  if (seanceTerminee) {
+# par        :  if (false) {
+docker compose exec frontend npx vitest run src/pages/DetailSeance.test.jsx
+```
+
+Attendu : **3 tests en échec**. Rétablissez ensuite la ligne.
+
+Onze mutations de ce type ont été appliquées lors du développement, et les
+onze ont été détectées (tableau détaillé dans `ANALYSE_CODE.md`, section
+« Étape 8 (volet interface) »).
+
+## Critère de succès global
+
+Validée si et seulement si : aucune séance passée n'affiche « En cours » et sa
+colonne *Départ* porte l'heure déduite avec sa mention (section 1) ; le rapport
+fait apparaître **tous les inscrits**, absents compris, avec les trois statuts
+distincts (section 2) ; la bannière ambre apparaît puis disparaît selon les
+demandes en attente (section 3) ; le CSV s'ouvre dans Excel **avec les accents
+intacts**, porte `PROVISOIRE` ou `OFFICIEL` dans son nom, et résiste à un motif
+contenant un point-virgule (section 4) ; l'aperçu d'impression ne montre aucun
+bouton et affiche le pied de document (section 5) ; et les deux suites passent
+(section 6).
+
+---
+
+# Rapport non vide et double scan entrée/sortie
+
+**`docker compose down -v` OBLIGATOIRE.** Le schéma et le seed changent tous
+les deux : une contrainte est retirée de `scans`, une colonne est ajoutée à
+`presences`, et les inscriptions sont étendues aux trois UF. Sans purge des
+volumes, MySQL conserve l'ancienne base et le défaut persiste.
+
+```bash
+docker compose down -v && docker compose up -d --build
+```
+
+## 1. Le rapport n'est plus vide, quelle que soit l'UF
+
+### Vérifier le seed
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT u.intitule, COUNT(i.id) AS inscrits
+    FROM uf u LEFT JOIN inscriptions i ON i.uf_id = u.id
+   GROUP BY u.id, u.intitule;"
+```
+
+Attendu — **aucune UF à zéro** :
+
+| UF | inscrits |
+| --- | --- |
+| Anglais - Niveau 2 | 4 |
+| Bureautique - Initiation | 3 |
+| Comptabilite generale | 2 |
+
+Les effectifs sont volontairement **différents** : une répartition uniforme
+masquerait une erreur d'aiguillage entre UF, tous les rapports se ressemblant.
+
+### Le test qui reproduisait le défaut
+
+Créez une séance sur **« Bureautique - Initiation »** (l'UF qui n'avait aucun
+inscrit auparavant), faites scanner Amara, puis terminez la séance :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  UPDATE seances SET heure_debut_prevue = DATE_SUB(NOW(), INTERVAL 3 HOUR),
+                     heure_fin_prevue   = DATE_SUB(NOW(), INTERVAL 1 HOUR)
+   WHERE id = '<SEANCE_ID>';"
+```
+
+Ouvrez le rapport d'assiduité. Attendu : **3 attendus, 1 présent, 2 absents**,
+et Amara Diallo visible dans le tableau. Avant correction, cet écran affichait
+« Attendus 0, Présents 0, Absents 0 » avec un tableau vide.
+
+### Le cas du présent NON INSCRIT
+
+C'est le défaut structurel, indépendant du seed. Faites scanner **Driss El
+Amrani**, qui n'est pas inscrit à « Bureautique » :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT e.nom FROM presences p JOIN etudiants e ON e.id = p.etudiant_id
+   WHERE p.seance_id = '<SEANCE_ID>';"
+```
+
+Driss doit apparaître dans cette requête **et** dans le rapport, avec le badge
+**« Présent (non inscrit) »** et une note explicative sous le tableau.
+
+Vérifiez que les compteurs restent cohérents :
+
+- `Attendus` reste à **3** (les inscrits), pas 4 — un présent non inscrit
+  n'était pas attendu.
+- `Absents` n'est **jamais négatif**.
+
+Dans le CSV, une colonne **`Inscrit`** vaut `Non` sur sa ligne, et le pied de
+fichier porte `Presents non inscrits;1`.
+
+> Pourquoi ce cas compte : un absent improprement compté se remarque —
+> l'intéressé proteste. Un **présent effacé ne se remarque pas**.
+
+## 2. Le double scan entrée/sortie
+
+### Le cycle nominal
+
+1. Connectez-vous en étudiant sur un téléphone, scannez le QR code d'une
+   séance **en cours**. Attendu : présence enregistrée, réponse `201`.
+2. **Attendez au moins une minute** (voir le point suivant), puis scannez à
+   nouveau le même QR code affiché.
+3. Attendu : le scan est **accepté**, pas rejeté.
+
+Vérifiez l'effet en base :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT heure_arrivee, heure_depart, scan_arrivee_id IS NOT NULL AS a_scan_arrivee,
+         scan_depart_id  IS NOT NULL AS a_scan_depart
+    FROM presences WHERE seance_id='<SEANCE_ID>' AND etudiant_id='<ETUDIANT_ID>';
+  SELECT COUNT(*) AS nb_scans FROM scans
+   WHERE seance_id='<SEANCE_ID>' AND etudiant_id='<ETUDIANT_ID>';"
+```
+
+Attendu :
+
+- **UNE seule** ligne dans `presences`, avec `heure_depart` renseignée et
+  `scan_depart_id` non nul.
+- **DEUX** lignes dans `scans`.
+
+L'état reste unique, l'histoire est complète. C'est exactement la distinction
+qui avait été mal posée : la contrainte d'unicité était sur `scans` (le
+journal) au lieu de `presences` (l'état).
+
+Côté formateur, la colonne *Départ* affiche désormais l'heure **réelle**, sans
+la mention « déduit ».
+
+### Les trois refus
+
+| Test | Attendu |
+| --- | --- |
+| Scanner **une troisième fois** | `409 DEPART_DEJA_POINTE` — le cycle est complet |
+| Scanner deux fois **dans la même seconde** | `409 DEPART_TROP_TOT`, message « Rescannez en quittant la salle » |
+| Rescanner **le même jeton** (capture d'écran) | `409 REJEU_DETECTE` — inchangé |
+
+Le troisième cas mérite attention : un départ légitime utilise un jeton
+**différent**, émis par une rotation ultérieure. Le double scan n'affaiblit
+donc en rien la protection anti-rejeu.
+
+Vérifiez que le troisième scan est tout de même **journalisé** — une tentative
+refusée fait partie de l'histoire de la séance :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT COUNT(*) FROM scans WHERE seance_id='<SEANCE_ID>' AND etudiant_id='<ETUDIANT_ID>';"
+```
+
+Attendu : **3**, alors que `presences` en compte toujours **1**.
+
+## 3. Le vocabulaire du départ automatique
+
+Sur une séance terminée avec un départ non pointé, la légende sous le tableau
+doit décrire une **procédure**, jamais un manquement :
+
+> **Départ automatique** : l'heure de fin prévue a été appliquée par défaut.
+> Pour un suivi du temps exact — départ anticipé, par exemple — les étudiants
+> scannent le QR code une seconde fois en quittant la salle.
+
+Le texte « n'ont pas pointé leur sortie » ne doit plus apparaître nulle part.
+
+## 4. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+
+Attendu : **`118 passed`** (10 suites) côté backend et **`82 passed`**
+(8 fichiers) côté frontend.
+
+### Vérifier que ces tests détectent le défaut
+
+Réintroduisez la cause structurelle à la main, dans
+`backend/src/controllers/rapportController.js` :
+
+```sql
+-- Retirer les deux lignes UNION du IN (...) :
+--     UNION
+--     SELECT p2.etudiant_id FROM presences p2 WHERE p2.seance_id = s.id
+```
+
+```bash
+docker compose exec backend npx jest tests/rapport.test.js
+```
+
+Attendu : **échec** sur « un etudiant PRESENT mais NON INSCRIT figure au
+rapport ». Rétablissez ensuite les lignes.
+
+Sept mutations de ce type ont été appliquées pendant le développement, et les
+sept ont été détectées (détail dans `ANALYSE_CODE.md`).
+
+## Critère de succès global
+
+Validée si et seulement si : les trois UF ont des inscrits et aucun rapport
+n'est vide (section 1) ; un présent non inscrit apparaît, signalé, sans gonfler
+l'effectif attendu (section 1) ; un second scan renseigne `heure_depart` sur la
+**même** ligne de présence, avec deux lignes dans `scans` (section 2) ; les
+trois refus renvoient les codes attendus (section 2) ; le texte du départ
+automatique est procédural (section 3) ; et les deux suites passent
+(section 4).
+
+---
+
+# Étape 9 — Bilan par UF, clôture RGPD et bornes de rectification
+
+**`docker compose down -v` OBLIGATOIRE**, et **avant de relancer, complétez
+votre `.env`** avec les deux nouvelles variables (voir `.env.example`) :
+
+```
+MYSQL_RGPD_USER=app_rgpd
+MYSQL_RGPD_PASSWORD=un_mot_de_passe_solide
+```
+
+Sans elles, le backend refuse de démarrer avec un message explicite : le pool
+RGPD applique la même stratégie fail-fast que le pool applicatif. Mieux vaut
+un refus au démarrage qu'une découverte au milieu d'une opération
+irréversible.
+
+```bash
+docker compose down -v && docker compose up -d --build
+```
+
+## 1. La rectification : arrivée verrouillée, départ borné
+
+Connectez-vous en étudiant, sur une séance **terminée depuis moins de 24 h**,
+et ouvrez « Signaler une erreur ».
+
+### À l'écran
+
+| Élément | Attendu |
+| --- | --- |
+| Champ *Arrivée enregistrée* | Grisé, **non modifiable**, avec la mention « Validée par votre scan » |
+| Champ *Départ réel* | Modifiable, avec « Au plus tard HH:MM » |
+| Saisie d'un départ après la fin | Message d'erreur, bouton d'envoi désactivé |
+
+### Le contrôle qui compte : contourner l'interface
+
+Un formulaire verrouillé ne protège de rien. Appelez l'API directement :
+
+```bash
+# a) Tenter de modifier l'ARRIVEE
+curl -k -b etu.txt -X POST https://localhost/api/rectifications \
+  -H 'Content-Type: application/json' \
+  -d '{"presence_id":"<ID>","motif":"Test","heure_arrivee_demandee":"2026-09-01T08:00:00.000Z"}'
+```
+
+Attendu : **400**, code `ARRIVEE_NON_CONTESTABLE`.
+
+```bash
+# b) Tenter un depart APRES la fin prevue de la seance
+curl -k -b etu.txt -X POST https://localhost/api/rectifications \
+  -H 'Content-Type: application/json' \
+  -d '{"presence_id":"<ID>","motif":"Test","heure_depart_demandee":"2026-09-01T23:00:00.000Z"}'
+```
+
+Attendu : **400**, code `DEPART_APRES_FIN_SEANCE`, avec l'heure limite dans le
+message.
+
+```bash
+# c) Contre-epreuve : un depart ANTICIPE doit passer
+curl -k -b etu.txt -X POST https://localhost/api/rectifications \
+  -H 'Content-Type: application/json' \
+  -d '{"presence_id":"<ID>","motif":"Rendez-vous medical","heure_depart_demandee":"<fin moins 1h>"}'
+```
+
+Attendu : **201**. La borne ne doit pas bloquer le cas légitime, qui est
+précisément le départ anticipé.
+
+### Vérifier l'absence de décalage horaire
+
+C'est le contrôle qui a révélé un défaut réel. Acceptez la demande ci-dessus
+en tant que formateur, puis relisez la présence :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT heure_arrivee, heure_depart FROM presences WHERE id = '<ID>';"
+```
+
+L'heure de départ enregistrée doit correspondre **exactement** à celle
+demandée dans l'interface, à la minute près. Un écart de 1 ou 2 heures
+signalerait le retour du mélange de fuseaux corrigé à cette étape.
+
+## 2. Le bilan global par UF
+
+Depuis le tableau de bord formateur, cliquez **« Voir le bilan »**.
+
+### Vérifier le dénominateur
+
+Créez trois séances sur une même UF : deux terminées, une en cours.
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT COUNT(*) total,
+         SUM(NOW() > heure_fin_prevue) terminees
+    FROM seances WHERE uf_id = '<UF_ID>';"
+```
+
+Le bilan doit afficher le nombre de séances **terminées** comme dénominateur,
+pas le total. Une séance en cours n'a pas de durée définitive : l'inclure ferait
+varier le bilan d'une minute à l'autre.
+
+### Vérifier le taux
+
+Un étudiant présent à 1 séance sur 2 doit afficher **1 / 2** et **50 %**, pas
+100 %. C'est le piège du `GROUP BY` : un dénominateur calculé par étudiant
+donnerait 100 % à quelqu'un venu une seule fois sur douze séances.
+
+Vérifiez aussi :
+
+- Un étudiant **jamais venu** figure au tableau avec **0** et non une case
+  vide.
+- Une UF dont aucune séance n'est terminée n'affiche **jamais `NaN`**.
+- Le taux est écrit **en chiffres** à côté de la barre : à l'impression noir et
+  blanc, la barre seule serait illisible.
+
+### L'impression
+
+**Ctrl+P** sur le bilan. Doivent disparaître : l'en-tête applicatif, le
+sélecteur d'UF, les boutons, et **toute la zone de clôture**. Doit apparaître :
+le pied « Document établi le… ».
+
+## 3. La clôture RGPD
+
+### Les garde-fous, d'abord
+
+| Test | Attendu |
+| --- | --- |
+| Bouton *Clôturer* sur une UF déjà clôturée | **Absent** |
+| Valider la modale sans saisir le mot | Bouton **désactivé** |
+| Saisir autre chose que `CLOTURER` | Bouton **toujours désactivé** |
+| Appel API sans `confirmation` | **400** `CONFIRMATION_MANQUANTE` |
+| Appel API par un étudiant | **403** |
+| Clôturer avec une demande en attente | **409** `DEMANDES_EN_ATTENTE` |
+
+Le dernier mérite d'être testé explicitement : faites soumettre une demande de
+rectification, puis tentez la clôture. Le refus est volontaire — **le droit à
+la minimisation ne prime pas sur le droit d'être entendu**.
+
+### Relever l'état AVANT la purge
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT p.id, p.latitude_scan, p.longitude_scan, p.distance_m,
+         p.position_coherente, p.heure_arrivee, p.heure_depart
+    FROM presences p JOIN seances s ON s.id = p.seance_id
+   WHERE s.uf_id = '<UF_ID>';
+  SELECT sc.jti FROM scans sc JOIN seances s ON s.id = sc.seance_id
+   WHERE s.uf_id = '<UF_ID>';"
+```
+
+Notez les valeurs : coordonnées renseignées, `jti` ressemblant à un UUID.
+
+### Purger
+
+Traitez d'abord toute demande en attente, puis cliquez **« Clôturer l'UF et
+purger les métadonnées (RGPD) »**, saisissez `CLOTURER`, validez.
+
+La modale doit clairement séparer **Détruit** (coordonnées GPS, distance,
+précision, verdict, lien vers les jetons) de **Conservé 5 ans** (identité,
+heures, nombre de scans, journal).
+
+### Relever l'état APRÈS
+
+Rejouez exactement les deux mêmes requêtes.
+
+| Colonne | Attendu |
+| --- | --- |
+| `latitude_scan`, `longitude_scan` | **NULL** |
+| `precision_m`, `distance_m` | **NULL** |
+| `position_coherente` | **NULL** |
+| `heure_arrivee`, `heure_depart` | **inchangées** |
+| `scans.jti` | commence par `purge:` |
+| Nombre de lignes dans `scans` | **inchangé** |
+
+Ce dernier point est essentiel : les lignes survivent. On peut toujours
+prouver qu'un étudiant a scanné **deux** fois, donc qu'il a pointé son départ.
+Supprimer les lignes détruirait la preuve que la présence repose sur des scans
+et non sur une saisie manuelle.
+
+### La trace d'audit
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_attestations -e "
+  SELECT champ, valeur_apres, motif, auteur_email, origine
+    FROM journal_modifications WHERE table_cible = 'uf';"
+```
+
+Attendu : une ligne, avec le compte des positions détruites et des scans
+anonymisés, et un motif mentionnant la minimisation.
+
+### Le verrou d'archive
+
+```bash
+# Cote etudiant
+curl -k -b etu.txt -X POST https://localhost/api/rectifications \
+  -H 'Content-Type: application/json' \
+  -d '{"presence_id":"<ID>","motif":"Tentative apres cloture"}'
+
+# Cote formateur
+curl -k -b form.txt -X PUT https://localhost/api/presences/<ID> \
+  -H 'Content-Type: application/json' \
+  -d '{"heure_depart":null,"motif":"Tentative apres cloture"}'
+```
+
+Attendu dans les **deux** cas : **409** `UF_CLOTUREE`. Le verrou s'applique
+aussi au formateur, et c'est voulu : une archive dont le détenteur peut encore
+modifier le contenu n'est pas une archive.
+
+## 4. Vérifier la séparation des privilèges
+
+C'est le point d'architecture le plus défendable de cette étape.
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" \
+  -e "SHOW GRANTS FOR 'app_logs'@'%'; SHOW GRANTS FOR 'app_rgpd'@'%';"
+```
+
+Attendu :
+
+- `app_logs` : **aucun** `UPDATE` ni `DELETE` sur `db_logs.scans`. La garantie
+  d'inaltérabilité n'a pas été affaiblie pour implémenter la purge.
+- `app_rgpd` : `GRANT UPDATE (jti) ON db_logs.scans` — un privilège de
+  **colonne**, pas de table. Le compte de purge ne peut ni réattribuer un scan
+  à un autre étudiant, ni en modifier l'horodatage. Et **aucun `DELETE` nulle
+  part**.
+
+## 5. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+
+Attendu : **`138 passed`** (11 suites) côté backend et **`93 passed`**
+(9 fichiers) côté frontend.
+
+Le test central demandé se lance isolément :
+
+```bash
+docker compose exec backend npx jest -t "depart apres la fin prevue"
+```
+
+## Critère de succès global
+
+Validée si et seulement si : l'arrivée est refusée par le serveur et pas
+seulement grisée à l'écran, et un départ après la fin prévue renvoie
+`DEPART_APRES_FIN_SEANCE` (section 1) ; une heure rectifiée est enregistrée
+sans décalage horaire (section 1) ; le bilan compte les seules séances
+terminées avec un dénominateur commun (section 2) ; la clôture détruit les
+coordonnées, préserve les heures, anonymise sans supprimer les scans, et
+verrouille l'UF pour les deux rôles (section 3) ; `app_logs` reste sans droit
+d'écriture sur `scans` (section 4) ; et les deux suites passent (section 5).
+
+---
+
+# Étape 10 — Cloisonnement, KPI et refonte des rapports
+
+**`docker compose down -v` OBLIGATOIRE.** Le schéma gagne la table
+`formateur_uf` et la colonne `uf.volume_horaire_minutes`, et le jeu de données
+est entièrement renouvelé.
+
+```bash
+docker compose down -v && docker compose up -d --build
+```
+
+## 0. Le nouveau jeu de données
+
+| Compte | Mot de passe | UF couvertes |
+| --- | --- | --- |
+| `sophie.lambert@example.org` | `Formateur123!` | Architecture Logicielle, Développement Web |
+| `marc.dupont@example.org` | `Formateur123!` | Développement Web, Cybersécurité |
+| `nadia.cherif@example.org` | `Formateur123!` | **DevOps uniquement** |
+
+Huit étudiants (`Etudiant123!`), quatre UF informatiques, trois salles
+(`A301`, `B101`, `Amphi Turing`). Effectifs volontairement **inégaux** :
+5, 7, 3 et 4 inscrits.
+
+> Le compte de démonstration du cloisonnement est **Nadia Cherif** : elle ne
+> doit voir ni les séances, ni les bilans des trois autres UF.
+
+## 1. Le cloisonnement à l'écran
+
+Connectez-vous en **Nadia Cherif**. Attendu :
+
+- La liste déroulante d'ouverture de séance ne propose **que** « DevOps et
+  Conteneurisation ».
+- « Séances récentes » ne montre aucune séance des autres UF.
+- Le sélecteur du bilan ne propose **qu'une** UF.
+
+Connectez-vous ensuite en **Sophie** puis en **Marc** : « Développement Web »
+apparaît chez **les deux**, et **une seule fois** chez chacun. C'est le cas
+de co-encadrement qui a motivé la table de liaison plutôt qu'un simple champ
+`createur_id`, et le `EXISTS` plutôt qu'un `JOIN`.
+
+## 2. Le cloisonnement contourné (le test qui compte)
+
+Masquer une UF dans une liste ne protège de rien : il suffit de poster
+l'identifiant. Récupérez l'identifiant d'une séance de Sophie, puis appelez
+l'API **en tant que Nadia** :
+
+```bash
+# Session Nadia
+curl -k -c nadia.txt -X POST https://localhost/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"nadia.cherif@example.org","mot_de_passe":"Formateur123!"}' > /dev/null
+
+SEANCE=<id d'une seance de Sophie>
+UF_ARCHI=11111111-1111-1111-1111-111111111111
+
+curl -k -b nadia.txt -s -o /dev/null -w "presences        : %{http_code}\n" https://localhost/api/seances/$SEANCE/presences
+curl -k -b nadia.txt -s -o /dev/null -w "rapport seance   : %{http_code}\n" https://localhost/api/seances/$SEANCE/rapport
+curl -k -b nadia.txt -s -o /dev/null -w "rectifications   : %{http_code}\n" https://localhost/api/seances/$SEANCE/rectifications
+curl -k -b nadia.txt -s -o /dev/null -w "bilan UF         : %{http_code}\n" https://localhost/api/uf/$UF_ARCHI/rapport-global
+curl -k -b nadia.txt -s -o /dev/null -w "cloture RGPD     : %{http_code}\n" \
+  -X POST -H 'Content-Type: application/json' -d '{"confirmation":"CLOTURER"}' \
+  https://localhost/api/uf/$UF_ARCHI/cloture-rgpd
+```
+
+Attendu : **404 sur les cinq lignes**, avec le code `HORS_PERIMETRE`.
+
+**Pourquoi 404 et non 403** : répondre « interdit » confirmerait l'existence de
+la ressource. En énumérant des identifiants, un formateur curieux apprendrait
+quelles UF existent et combien de séances chacune compte.
+
+Vérifiez ensuite qu'aucune clôture n'a eu lieu :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs \
+  -e "SELECT intitule, date_cloture_rgpd FROM uf;"
+```
+
+### Contre-épreuve indispensable
+
+Rejouez **les mêmes requêtes en tant que Sophie** : elles doivent toutes
+répondre **200**. Un filtre qui bloquerait tout le monde passerait tous les
+tests négatifs sans rien protéger.
+
+### Créer une séance sur l'UF d'un collègue
+
+```bash
+curl -k -b nadia.txt -X POST https://localhost/api/seances \
+  -H 'Content-Type: application/json' \
+  -d "{\"uf_id\":\"$UF_ARCHI\",\"salle_id\":\"22222222-2222-2222-2222-222222222222\"}"
+```
+
+Attendu : **404** `HORS_PERIMETRE`. Sans ce contrôle, un formateur ferait
+apparaître chez un collègue un événement qu'il n'a pas programmé.
+
+## 3. Les KPI
+
+### Rapport de séance
+
+Sur une séance terminée, chaque ligne doit afficher :
+
+- le **ratio** `2 h 30 / 3 h 00`, jamais une durée seule ;
+- une **jauge** avec le pourcentage écrit à côté ;
+- en en-tête, l'assiduité moyenne des présents et la durée théorique.
+
+### Bilan d'UF
+
+| Colonne | Attendu |
+| --- | --- |
+| Présences | `11 / 12` |
+| Heures suivies | `18 h 30 / 20 h 00` |
+| Taux horaire | jauge + `92,5 %` (virgule décimale) |
+
+**Vérifiez la distinction des deux taux.** Faites pointer un étudiant présent à
+toutes les séances mais parti au bout d'une heure : la colonne *Présences*
+affiche 100 %, le *taux horaire* bien moins. Ce sont deux questions
+différentes, et c'est la seconde qui conditionne la certification.
+
+Contrôles de robustesse :
+
+- Aucun `NaN` sur une UF dont aucune séance n'est terminée : le taux vaut `—`.
+- Aucun taux au-dessus de **100 %**, même pour un étudiant arrivé en avance et
+  reparti en retard.
+- Le dénominateur est le **volume programmé écoulé**, pas le volume officiel de
+  l'UF — sinon un étudiant assidu afficherait 20 % en milieu de semestre. Le
+  volume officiel est affiché à part, comme référence.
+
+### Les paliers de couleur
+
+| Taux | Couleur | Libellé annoncé |
+| --- | --- | --- |
+| ≥ 80 % | vert | Quota atteint |
+| 50 – 79 % | ambre | Partiel |
+| < 50 % | rouge | Insuffisant |
+
+Ces seuils viennent du règlement de la promotion sociale, pas d'un choix
+graphique.
+
+**Contrôle d'accessibilité** : le pourcentage doit être écrit **à côté** de
+chaque barre. Une jauge seule serait invisible pour une personne daltonienne
+(WCAG 1.4.1) et disparaîtrait à l'impression noir et blanc.
+
+## 4. L'impression
+
+**Ctrl+P** sur les deux rapports. Attendu :
+
+- Filet noir épais au-dessus du titre, filets francs autour du tableau.
+- En-têtes de colonnes en capitales, sur fond marqué, **répétés en tête de
+  chaque page**.
+- Les jauges conservent un **contour visible** même sans fond imprimé.
+- Aucun bouton, aucun en-tête applicatif, aucune zone de clôture.
+- Pied « Document établi le… ».
+- Un tableau de vingt étudiants tient sur une page A4.
+
+Enregistrez en PDF : le document doit être classable tel quel dans un dossier
+administratif.
+
+## 5. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+
+Attendu : **`154 passed`** (12 suites) et **`95 passed`** (9 fichiers).
+
+La suite dédiée :
+
+```bash
+docker compose exec backend npx jest tests/cloisonnement.test.js
+```
+
+### Vérifier que ces tests détectent la faille
+
+Retirez le filtre dans `backend/src/controllers/ufController.js` :
+
+```js
+// Remplacer :  if (!(await formateurGereUf(pool, req.utilisateur.id, ufId))) {
+// par        :  if (false) {
+docker compose exec backend npx jest tests/cloisonnement.test.js
+```
+
+Attendu : **2 tests en échec**. Rétablissez ensuite la ligne.
+
+Trois mutations de ce type ont été appliquées et **toutes détectées** : filtre
+retiré de la liste des séances, mandat non vérifié sur les présences, bilan
+accessible sans mandat.
+
+## Critère de succès global
+
+Validée si et seulement si : Nadia ne voit qu'une UF à l'écran **et** reçoit
+404 sur les cinq routes appelées directement (sections 1 et 2) ; Sophie obtient
+200 sur les mêmes routes (section 2) ; les ratios et pourcentages s'affichent
+sans `NaN` ni dépassement de 100 % (section 3) ; l'impression produit un
+document administratif sans boutons (section 4) ; et les deux suites passent
+(section 5).
+
+---
+
+# Tester avec un vrai smartphone : le tunnel HTTPS
+
+## Le problème, et pourquoi il n'a pas une seule cause
+
+Tester le scan depuis un téléphone bute sur **deux obstacles distincts**, qu'il
+est tentant de confondre parce qu'ils se manifestent au même moment.
+
+**1. Le pare-feu.** Windows bloque par défaut les connexions entrantes vers un
+port ouvert par Docker. Le téléphone, pourtant sur le même Wi-Fi, ne joint
+simplement pas la machine.
+
+**2. Le contexte sécurisé.** Même pare-feu ouvert, `https://192.168.1.42`
+présente un certificat auto-signé émis par Caddy (`tls internal`). Le
+navigateur du téléphone affiche un avertissement, et surtout — c'est le point
+décisif — **il refuse `navigator.geolocation` et `crypto.subtle` tant que le
+certificat n'est pas approuvé.** Or importer une autorité de certification sur
+Android ou iOS est une manipulation pénible, et sur Android moderne une CA
+installée par l'utilisateur n'est même plus reconnue par les applications.
+
+L'enrôlement d'appareil et le géofencing seraient donc **inutilisables** :
+exactement les deux fonctions qu'on cherchait à démontrer.
+
+Un tunnel règle les deux d'un coup : il n'y a plus de connexion entrante à
+autoriser (c'est votre machine qui sort), et le certificat est un vrai
+certificat public, reconnu sans manipulation.
+
+## Option A — ngrok (le plus rapide)
+
+Créez un compte gratuit sur `ngrok.com`, récupérez votre jeton, puis :
+
+```bash
+# Une seule fois
+ngrok config add-authtoken <VOTRE_JETON>
+
+# À chaque session — noter le --host-header
+ngrok http https://localhost:443 --host-header=localhost
+```
+
+`--host-header=localhost` **n'est pas facultatif**. Sans lui, ngrok transmet
+`Host: xxxx.ngrok-free.app`, que le bloc `localhost, api.localhost` du
+`Caddyfile` ne reconnaît pas : Caddy répond 404 sur tout. C'est le premier
+piège, et il ne produit aucun message explicite.
+
+ngrok affiche alors une URL du type :
+
+```
+Forwarding  https://a1b2-81-240-x-x.ngrok-free.app -> https://localhost:443
+```
+
+## Option B — Cloudflare Tunnel (pas de compte requis)
+
+```bash
+cloudflared tunnel --url https://localhost:443 --no-tls-verify
+```
+
+`--no-tls-verify` est nécessaire parce que le certificat local de Caddy est
+auto-signé : `cloudflared` le refuserait sinon. Le certificat vu par le
+téléphone, lui, est bien celui de Cloudflare, parfaitement valide.
+
+Plus rapide à démarrer (aucun compte), mais l'URL change à chaque lancement et
+le débit est plus variable — préférable pour un test ponctuel, moins pour une
+démonstration devant jury.
+
+## L'étape que tout le monde oublie : autoriser l'hôte dans Vite
+
+Au premier chargement, vous obtiendrez très probablement une page blanche
+portant :
+
+```
+Blocked request. This host ("a1b2-81-240-x-x.ngrok-free.app") is not allowed.
+```
+
+Ce n'est ni ngrok, ni Caddy : **c'est Vite**, qui refuse par défaut tout
+en-tête `Host` inconnu (protection contre le DNS rebinding). Rien n'apparaît
+dans les journaux de Caddy, ce qui rend le diagnostic long.
+
+Ajoutez l'hôte à votre `.env`, **sans le schéma `https://`** :
+
+```
+VITE_ALLOWED_HOSTS=a1b2-81-240-x-x.ngrok-free.app
+VITE_HMR_HOST=a1b2-81-240-x-x.ngrok-free.app
+```
+
+puis :
+
+```bash
+docker compose restart frontend
+```
+
+`VITE_HMR_HOST` évite que le client de rechargement à chaud tente d'ouvrir un
+WebSocket vers `localhost`, c'est-à-dire vers le téléphone lui-même. Sans lui
+la page fonctionne, mais la console se remplit d'erreurs de connexion.
+
+## Le piège suivant : l'appareil enrôlé n'est plus reconnu
+
+Vous vous connectez, vous scannez, et le serveur répond **403, appareil non
+enrôlé** — alors que l'enrôlement s'était bien passé la veille sur
+`https://localhost`.
+
+Ce n'est pas un défaut. La clé privée ECDSA vit dans **IndexedDB**, et
+IndexedDB est cloisonné **par origine**. `https://localhost` et
+`https://a1b2.ngrok-free.app` sont deux origines différentes : la clé n'y est
+tout simplement pas.
+
+C'est d'ailleurs une propriété de sécurité, pas une gêne — elle garantit qu'un
+site tiers ne peut pas atteindre la clé. **Il faut donc ré-enrôler l'appareil
+sur l'URL du tunnel**, et le refaire à chaque nouvelle URL (l'offre gratuite
+de ngrok en attribue une différente à chaque lancement).
+
+> Pour une démonstration devant jury, réservez un domaine ngrok statique
+> (gratuit, un par compte) : l'URL cesse de changer, l'enrôlement survit d'une
+> session à l'autre, et vous ne perdez pas cinq minutes à ré-enrôler devant
+> l'assistance.
+
+## Protocole de test complet sur téléphone
+
+1. Lancez la pile : `docker compose up -d`.
+2. Ouvrez le tunnel, notez l'URL.
+3. Renseignez `VITE_ALLOWED_HOSTS` et `VITE_HMR_HOST`, puis
+   `docker compose restart frontend`.
+4. Ouvrez l'URL sur le téléphone. **Aucun avertissement de certificat ne doit
+   apparaître** : c'est le signe que le contexte sécurisé est réel.
+5. Connectez-vous en étudiant, **enrôlez l'appareil** (première fois sur cette
+   origine).
+6. Sur l'ordinateur, connectez-vous en formateur et projetez le QR code.
+7. Scannez avec le téléphone.
+
+### Ce que ce test valide, et qui ne peut pas l'être autrement
+
+| Vérification | Pourquoi le tunnel est indispensable |
+| --- | --- |
+| La caméra s'ouvre | `getUserMedia` exige un contexte sécurisé |
+| L'appareil s'enrôle | `crypto.subtle` exige un contexte sécurisé |
+| La position est relevée | `navigator.geolocation` exige un contexte sécurisé, **et** un vrai GPS — absent d'un ordinateur de bureau |
+| `distance_m` est renseignée | Premier test avec des coordonnées réelles |
+| Le QR tourne toutes les 20 s | Le WebSocket traverse bien le tunnel |
+| Le double scan | Deux jetons distincts, plusieurs minutes d'écart |
+
+La ligne sur la géolocalisation est celle qui justifie à elle seule la
+manipulation : c'est **la seule façon d'obtenir un `distance_m` non nul**, et
+donc de vérifier le calcul de Haversine sur des données réelles plutôt que sur
+des valeurs injectées à la main.
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT e.nom, p.latitude_scan, p.longitude_scan,
+         p.precision_m, p.distance_m, p.position_coherente
+    FROM presences p JOIN etudiants e ON e.id = p.etudiant_id
+   ORDER BY p.heure_arrivee DESC LIMIT 5;"
+```
+
+Attendu : des coordonnées réelles, une `precision_m` de l'ordre de 10 à 30 m en
+extérieur (bien meilleure que les 150 à 200 m d'une localisation Wi-Fi en
+intérieur), et une `distance_m` cohérente avec la position de référence de la
+séance.
+
+## Points de vigilance
+
+- **Le tunnel est éphémère.** Il expose votre machine sur Internet public.
+  Fermez-le (`Ctrl+C`) dès le test terminé.
+- **Les comptes de démonstration ont des mots de passe publics**, écrits dans
+  le dépôt. Pendant l'ouverture du tunnel, n'importe qui connaissant l'URL peut
+  s'y connecter. Une raison de plus de ne pas le laisser ouvert.
+- **Ce n'est pas un déploiement.** Voir `ANALYSE_CODE.md`, section
+  « Architecture de déploiement en production ».
+
+---
+
+# Étape 11 — Quota d'enrôlements et réactivité sous latence
+
+**`docker compose down -v` OBLIGATOIRE** : la table `etudiants` gagne la
+colonne `compteur_enrolements`.
+
+## 1. Le quota, en conditions réelles
+
+Connectez-vous en étudiant sur le téléphone (via le tunnel, cf. section
+« Tester avec un vrai smartphone »).
+
+### Avant toute action
+
+L'encart ambre doit annoncer la limite **et** le solde :
+
+> **Attention :** par mesure de sécurité, vous ne pouvez associer un nouvel
+> appareil qu'une seule fois après votre enrôlement initial…
+>
+> Il vous reste 2 associations. (0 sur 2 utilisées)
+
+Le point à vérifier : l'avertissement est **antérieur** à l'action. Une limite
+découverte au moment où elle bloque est subie ; annoncée avant, elle laisse
+décider.
+
+### Consommer le quota
+
+1. **Association 1** — succès. Le solde passe à « 1 association ».
+2. **Association 2** — succès. Le solde passe à 0, l'encart ambre disparaît.
+3. **Association 3** — l'alerte **rouge bloquante** s'affiche et le bouton
+   devient inactif.
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT nom, compteur_enrolements FROM etudiants ORDER BY nom;"
+```
+
+### Contourner l'interface
+
+Le bouton désactivé ne protège de rien. Appelez l'API directement :
+
+```bash
+curl -k -b etu.txt -X POST https://localhost/api/enrolements \
+  -H 'Content-Type: application/json' \
+  -d '{"public_key":"...","device_info":"Test","defi_id":"...","signature_defi":"..."}'
+```
+
+Attendu : **403**, code `QUOTA_ENROLEMENT_ATTEINT`.
+
+### Le point qui ferme réellement l'angle mort
+
+Après le refus, vérifiez **quel appareil reste actif** :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT e.nom, a.info_appareil, a.statut
+    FROM appareils_enroles a JOIN etudiants e ON e.id = a.etudiant_id
+   WHERE a.statut = 'actif';"
+```
+
+L'appareil actif doit être celui du **deuxième** enrôlement. Le compte ne
+revient pas à l'appareil de l'ami : le scénario du prêt s'arrête là.
+
+### Un refus ne consomme pas de crédit
+
+Réessayez plusieurs fois et relisez le compteur : il ne doit **pas** dépasser
+2. Sinon la situation d'un étudiant de bonne foi s'aggraverait à chaque essai.
+
+## 1 bis. On ne peut plus griller son quota par erreur
+
+Sur un téléphone **déjà associé**, le bouton « Associer cet appareil » ne doit
+plus apparaître du tout.
+
+| État de l'appareil | Bouton attendu |
+| --- | --- |
+| Déjà lié (clé locale + identifiant correspondant) | **Absent** |
+| Vierge (aucune clé locale) | Présent |
+| Dissocié (clé locale, autre appareil actif) | Présent |
+| État non vérifiable (coupure réseau) | **Présent** |
+| Quota épuisé | Présent mais **désactivé** |
+
+Deux nuances qui comptent :
+
+- **Absent, pas désactivé.** Un bouton désactivé reste annoncé par les lecteurs
+  d'écran et suggère une action possible. Sur un appareil déjà lié, aucune
+  action n'est à faire : un message vert le confirme à la place.
+- **Le bouton reste présent quand l'état n'est pas vérifiable.** Bloquer sur un
+  état inconnu empêcherait un étudiant sur un téléphone neuf de s'enrôler pour
+  une simple coupure réseau — défaut plus grave que celui corrigé.
+
+Pour vérifier le cas « dissocié » sans second téléphone : enrôlez l'appareil A,
+puis enrôlez l'appareil B (ou simulez en modifiant l'appareil actif en base).
+Rechargez sur A : le message rouge « Cet appareil a été dissocié » et le bouton
+doivent réapparaître.
+
+Vérifiez ensuite qu'un rechargement de page sur un appareil lié **ne consomme
+rien** :
+
+```bash
+docker compose exec mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" db_logs -e "
+  SELECT nom, compteur_enrolements FROM etudiants ORDER BY nom;"
+```
+
+Le compteur doit rester stable, quel que soit le nombre de rechargements.
+
+## 2. La réinitialisation administrative
+
+C'est la seule issue, et elle passe par un humain.
+
+```sql
+-- 1. Constater
+SELECT id, nom, email, compteur_enrolements
+  FROM db_logs.etudiants WHERE email = 'elena.petrova@example.org';
+
+-- 2. Reinitialiser, APRES verification d'identite
+UPDATE db_logs.etudiants SET compteur_enrolements = 0 WHERE id = '<ID>';
+```
+
+Reprenez ensuite l'association sur le téléphone : elle doit réussir. Toujours
+filtrer sur `id` et jamais sur `nom` — deux homonymes existent dans toute
+promotion.
+
+## 3. Les bugs de latence (à tester VIA LE TUNNEL)
+
+Ces trois défauts **ne se reproduisent pas en local** : la latence est le
+révélateur. Testez depuis le téléphone, sur le tunnel.
+
+### Connexion
+
+| Test | Attendu |
+| --- | --- |
+| Se connecter | Le tableau de bord s'affiche **immédiatement**, sans F5 |
+| Se connecter **très vite** après le chargement de `/login` | Idem, aucune déconnexion inopinée |
+| Revenir sur `/login` en étant connecté | Redirection automatique |
+| Mauvais mot de passe | Message d'erreur, le bouton ne reste **jamais** figé |
+
+Le deuxième cas est celui qui échouait : la vérification initiale, encore en
+vol, terminait en `401` et effaçait la session fraîche.
+
+Pour le reproduire volontairement, ralentissez le réseau (DevTools, profil
+« Slow 3G »), rechargez `/login` et connectez-vous **sans attendre**.
+
+### Création de séance
+
+1. Créez une séance. Le QR s'affiche.
+2. Cliquez sur **« Masquer le QR code »**.
+3. La séance doit apparaître en tête de liste, **sans F5**.
+
+Vérifiez aussi le cas dégradé : coupez le réseau juste après la création, puis
+masquez le QR. La séance doit **rester visible** (insertion optimiste), même si
+ses compteurs ne sont pas à jour. Elle ne doit jamais disparaître.
+
+## 4. Le bloc « Accès rapide »
+
+Allégé : un titre, la mention « Mode démo », deux listes déroulantes. Aucun
+texte explicatif.
+
+Vérifiez qu'il reste **absent du build de production** :
+
+```bash
+cd frontend && npm run build && grep -c "nadia.cherif" dist/assets/*.js
+```
+
+Attendu : **0**.
+
+## 5. Tests automatisés
+
+```bash
+docker compose exec backend npm test
+docker compose exec frontend npm test
+```
+
+Attendu : **`165 passed`** (13 suites) et **`119 passed`** (11 fichiers).
+
+La suite dédiée au quota :
+
+```bash
+docker compose exec backend npx jest tests/quota-enrolement.test.js
+```
+
+Onze tests, dont **deux enrôlements simultanés** qui doivent produire
+exactement un `201` et un `403` — un `SELECT`-puis-`UPDATE` en laisserait
+passer deux.
+
+## Critère de succès global
+
+Validée si et seulement si : le 3ᵉ enrôlement renvoie `403` y compris en
+appelant l'API directement, et l'appareil actif reste celui du 2ᵉ (section 1) ;
+un refus ne consomme pas de crédit (section 1) ; la réinitialisation SQL
+débloque le compte (section 2) ; la connexion et la création de séance ne
+demandent **jamais** de F5 via le tunnel (section 3) ; le bloc démo est absent
+du build (section 4) ; et les deux suites passent (section 5).
+
+---
+
+# Annexe A — Runbook de relance après perte de `.env`/`keys/` (incident `git clean -fd`)
+
+## Contexte
+
+Cet incident type se produit quand une commande de nettoyage Git non
+qualifiée (`git clean -fd`) est exécutée après un pull : elle supprime
+**tous** les fichiers non suivis par Git, y compris ceux volontairement
+gitignorés (`.env`, `keys/`) car ils contiennent des secrets locaux qui ne
+doivent jamais être commités. Symptôme observé :
+```
+Error: [tokenService] Impossible de lire la cle privee RS256 (/keys/private.pem)
+: ENOENT: no such file or directory, open '/keys/private.pem'.
+Executez ./generate_keys.sh a la racine du projet avant de demarrer le backend.
+```
+puis, en tentant de lancer les tests pendant que le conteneur boucle :
+```
+Error response from daemon: Container [...] is restarting, wait until the container is running.
+```
+
+Deux causes distinctes se cumulent ici (voir `ANALYSE_CODE.md`, section
+« Fix critique ») : la perte réelle de `.env`/`keys/`, ET un bug latent de
+`docker-compose.yml` (variables `JWT_PRIVATE_KEY_PATH`/`JWT_PUBLIC_KEY_PATH`
+jamais transmises au conteneur `backend`) présent depuis l'Étape 2 et
+corrigé à cette occasion. Le protocole ci-dessous suppose le correctif déjà
+récupéré via `git pull`.
+
+## Protocole de relance, étape par étape
+
+**1. Récupérer le correctif**
+```bash
+git checkout dev
+git pull origin dev
+```
+Attendu : `docker-compose.yml` contient désormais, sous `backend.environment`,
+les deux lignes `JWT_PRIVATE_KEY_PATH: ${JWT_PRIVATE_KEY_PATH:-./keys/private.pem}`
+et `JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH:-./keys/public.pem}`
+(vérifiable avec `grep JWT_ docker-compose.yml`).
+
+**2. Restaurer `.env`**
+```bash
+cp .env.example .env
+```
+Éditer `.env` si des valeurs spécifiques (mots de passe) doivent être
+conservées ; sinon les valeurs d'exemple suffisent pour un usage local.
+Attendu : le fichier existe à la racine, contient bien `JWT_PRIVATE_KEY_PATH=./keys/private.pem`
+et les variables `MYSQL_*`.
+
+**3. Régénérer les clés RS256**
+```bash
+./generate_keys.sh
+```
+Attendu : `keys/private.pem` (droits 600) et `keys/public.pem` (droits 644)
+créés — le script refuse d'écraser une clé déjà présente, donc sans risque
+à relancer si des clés existent déjà. Ce chemin (`./keys/`) est exactement
+celui attendu par le volume `./keys:/app/keys:ro` de `docker-compose.yml`.
+
+**4. Purger TOTALEMENT l'état Docker, y compris les volumes**
+```bash
+docker compose down -v --remove-orphans
+```
+**Pourquoi `-v` est indispensable ici et pas juste `down` seul** : `.env`
+vient d'être régénéré depuis `.env.example`. Si l'ancien volume `mysql_data`
+(issu d'une initialisation précédente, avec d'anciens mots de passe) est
+conservé, MySQL redémarre dessus SANS rejouer `01-schema.sql`/`02-seed.sql`/
+`03-privileges.sh` (l'entrypoint officiel ne les exécute qu'au tout premier
+démarrage d'un volume vide) — les identifiants dans le nouveau `.env` ne
+correspondraient alors plus à ceux réellement configurés dans MySQL, et le
+backend échouerait à se connecter avec une erreur d'authentification, un
+second incident masquant la résolution du premier. `--remove-orphans`
+nettoie en plus tout conteneur résiduel d'une configuration antérieure du
+projet. Attendu : `docker volume ls` ne liste plus `mysql_data`,
+`caddy_data`, `caddy_config` pour ce projet ; `docker compose ps` ne liste
+plus aucun conteneur `presence_*`.
+
+**5. Reconstruire et relancer proprement**
+```bash
+docker compose up -d --build
+```
+Attendu : les trois conteneurs démarrent (`docker compose ps` → tous
+`running`/`healthy`) ; `docker compose logs backend` affiche la séquence de
+démarrage normale (connexion MySQL établie, `Backend demarre sur le port
+3000`) sans aucune ligne `ENOENT` ni redémarrage en boucle.
+
+## Vérification finale
+
+```bash
+docker compose ps
+docker compose logs backend --tail=30
+curl -k https://localhost/api/health
+curl -k https://localhost/api/db-health
+```
+Attendu : `docker compose ps` montre les trois services up ; les logs backend
+ne contiennent aucune erreur ; `/api/health` renvoie un JSON de statut OK ;
+`/api/db-health` renvoie `etudiants_count: 4` (le seed est rejoué sur le
+volume neuf). Une fois ces quatre vérifications passées, les tests
+d'intégration (section « Stratégie de test automatisé ») peuvent reprendre
+normalement.
+
+---
+
+# Annexe B — Travailler avec DEUX dépôts distants (GitHub + GitLab de l'école)
+
+## Le problème vécu
+
+Une erreur `npm ci ... Missing: @emnapi/core` a « persisté » en CI à travers
+plusieurs correctifs successifs. Cause réelle : **la pipeline GitLab
+s'exécutait sur un dépôt différent de celui où les correctifs étaient
+poussés**. Trois indices l'ont établi, tous lisibles dans les logs du job :
+
+- le chemin de build (`/builds/<groupe-école>/…/Projet_innovant`) ne
+  correspondait pas au dépôt GitHub de développement ;
+- le commit testé (`91f5bbd8`) **n'existait dans aucun** des deux historiques
+  connus localement (`git cat-file -t 91f5bbd8` → *Not a valid object name*) ;
+- la ligne exécutée était `bash ./generate_keys.sh` alors que le
+  `.gitlab-ci.yml` du dépôt de développement écrit `./generate_keys.sh` — le
+  fichier CI lui-même différait donc entre les deux dépôts.
+
+**Règle à retenir** : quand une erreur de CI résiste à un correctif dont on a
+vérifié qu'il fonctionne en local, la première chose à contrôler n'est pas le
+correctif — c'est **quel commit la pipeline a réellement testé**. Le
+`Checking out <sha>` en tête de log répond immédiatement à la question.
+
+## Configurer les deux dépôts
+
+```bash
+git remote -v                        # etat actuel
+git remote add ecole <URL-DU-GITLAB-DE-L-ECOLE>
+git remote -v                        # doit lister origin ET ecole
+```
+
+Pousser vers les deux à chaque fois :
+```bash
+git push origin dev
+git push ecole dev
+```
+
+**Alternative — un seul `git push` pour les deux** (à préférer, car il rend
+l'oubli impossible) : configurer plusieurs URL de push sur `origin`.
+```bash
+git remote set-url --add --push origin <URL-GITHUB>
+git remote set-url --add --push origin <URL-DU-GITLAB-DE-L-ECOLE>
+git remote -v                        # origin doit afficher DEUX lignes (push)
+```
+Après cette configuration, `git push origin dev` écrit dans les deux dépôts.
+Attention : la première commande `set-url --add --push` **remplace** l'URL de
+push implicite, il faut donc bien ajouter les deux, GitHub compris — sinon
+les push vers GitHub cessent silencieusement.
+
+## Vérifier AVANT de pousser
+
+`verifier-avant-push.sh` (racine du projet) rejoue en local, dans l'image
+Docker exacte de la CI (`node:20`), les étapes qui échouent le plus souvent :
+
+```bash
+./verifier-avant-push.sh
+```
+
+Il contrôle deux choses :
+
+1. **`npm ci` réussit** pour `backend/` et `frontend/`. La vérification se
+   fait dans un conteneur Linux, jamais dans l'environnement Windows local :
+   seuls `package.json` et `package-lock.json` sont copiés dans un répertoire
+   vierge du conteneur, de sorte qu'aucun `node_modules` de l'hôte ne puisse
+   fausser le résultat. Le dossier est monté en lecture seule — le script ne
+   modifie jamais rien.
+2. **Chaque dépôt distant est à jour** sur la branche courante. C'est ce
+   contrôle qui aurait signalé immédiatement le problème ci-dessus, avec un
+   message du type :
+   ```
+   ecole  : EN RETARD de 3 commit(s) (50ffaf17)
+       -> git push ecole dev
+   ```
+
+Code de sortie `0` si tout va bien, `1` sinon.
+
+**Rendre la vérification automatique** (optionnel) :
+```bash
+cp outils/pre-push .git/hooks/pre-push
+chmod +x .git/hooks/pre-push
+```
+Le push est alors refusé si la vérification échoue. Contournement ponctuel :
+`git push --no-verify`. À noter : `.git/hooks/` n'est jamais versionné par
+Git (un dépôt ne doit pas pouvoir faire exécuter du code chez qui le clone),
+d'où cette copie manuelle en une commande.
+
+## Si le `dev` du GitLab a divergé
+
+Le `.gitlab-ci.yml` différant entre les deux dépôts, l'historique GitLab
+contient probablement des commits absents de GitHub. Un `git push ecole dev`
+sera alors refusé (*non-fast-forward*). Constater l'écart avant toute chose :
+
+```bash
+git fetch ecole
+git log --oneline -10 ecole/dev
+git log --oneline --left-right --boundary ecole/dev...dev
+```
+
+Ne **jamais** régler cela par un `--force` réflexe : il écraserait
+définitivement les commits présents uniquement côté école. Selon ce que
+montre le `log`, soit fusionner (`git merge ecole/dev`, puis résoudre les
+conflits — typiquement sur `.gitlab-ci.yml`), soit, si les commits côté école
+n'ont aucune valeur, forcer en connaissance de cause avec
+`git push --force-with-lease ecole dev` (`--force-with-lease` plutôt que
+`--force` : il refuse d'écraser si quelqu'un a poussé entre-temps).
